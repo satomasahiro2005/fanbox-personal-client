@@ -1,0 +1,96 @@
+name: FANBOXClient
+options:
+  bundleIdPrefix: ai.nemut
+  deploymentTarget:
+    iOS: "26.0"
+  createIntermediateGroups: true
+  developmentLanguage: ja
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    SWIFT_STRICT_CONCURRENCY: minimal
+    DEVELOPMENT_TEAM: C82ST8T9MN
+    CODE_SIGN_STYLE: Automatic
+    MARKETING_VERSION: "1.0.0"
+    CURRENT_PROJECT_VERSION: "1"
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    COMPILER_INDEX_STORE_ENABLE: NO
+targets:
+  FANBOXClient:
+    type: application
+    platform: iOS
+    sources:
+      - path: FANBOXClient
+    info:
+      path: FANBOXClient/Resources/Info.plist
+      properties:
+        CFBundleDisplayName: FANBOX PC
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UIBackgroundModes:
+          - fetch
+          - processing
+          - remote-notification
+        BGTaskSchedulerPermittedIdentifiers:
+          - ai.nemut.FANBOXClient.refresh
+          - ai.nemut.FANBOXClient.maintenance
+        ITSAppUsesNonExemptEncryption: false
+        NSPhotoLibraryUsageDescription: 投稿に添付する画像を選択するために使用します。
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: ai.nemut.FANBOXClient
+        TARGETED_DEVICE_FAMILY: "1,2"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+  FANBOXClientTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: FANBOXClientTests
+    dependencies:
+      - target: FANBOXClient
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: ai.nemut.FANBOXClientTests
+        TEST_HOST: $(BUILT_PRODUCTS_DIR)/FANBOXClient.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/FANBOXClient
+        BUNDLE_LOADER: $(TEST_HOST)
+  FANBOXClientUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: FANBOXClientUITests
+    dependencies:
+      - target: FANBOXClient
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: ai.nemut.FANBOXClientUITests
+        TEST_TARGET_NAME: FANBOXClient
+schemes:
+  FANBOXClient:
+    build:
+      targets:
+        FANBOXClient: all
+        FANBOXClientTests: [test]
+        FANBOXClientUITests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      gatherCoverageData: false
+      targets:
+        - name: FANBOXClientTests
+        - name: FANBOXClientUITests
