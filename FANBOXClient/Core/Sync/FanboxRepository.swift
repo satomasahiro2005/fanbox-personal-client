@@ -1,14 +1,22 @@
 import Foundation
 import SwiftData
 
-/// Repository façade from SPEC §43. Combines `LocalStore` (LocalDataSource) and `RemoteDataSource`.
+/// Repository façade from SPEC §43. Combines `LocalStore` (LocalDataSource) and `RemoteDataSource` (through `SyncEngine`).
 /// Reads return local data immediately; remote refreshes write through `LocalStore`.
+/// Used by the notification pipeline for post text prefetch (`NotificationService.prefetch`).
 @MainActor
 protocol FanboxRepository {
     func timeline(account: String) async throws -> [Post]
-    func post(id: String, account: String) async throws -> Post
+    /// `account == nil` selects the account automatically (SPEC §8: an account that can view the post).
+    func post(id: String, account: String?, priority: RequestPriority) async throws -> Post
     func creator(id: String, account: String) async throws -> Creator
     func supports(account: String) async throws -> [Support]
+}
+
+extension FanboxRepository {
+    func post(id: String, account: String?) async throws -> Post {
+        try await post(id: id, account: account, priority: .interactiveRead)
+    }
 }
 
 /// Default repository: every method refreshes through `SyncEngine` (differential, coalesced) and then answers from the
@@ -31,9 +39,11 @@ final class DefaultFanboxRepository: FanboxRepository {
         return posts
     }
 
-    func post(id: String, account: String) async throws -> Post {
+    /// Local-first: a cached body is returned without any request. Otherwise the detail is fetched; when that fails the
+    /// local summary (if any) is returned and the error is thrown only when nothing is stored.
+    func post(id: String, account: String?, priority: RequestPriority) async throws -> Post {
         if let local = store.post(id: id), local.hasCachedBody { return local }
-        if let error = await engine.refreshPost(postID: id, accountID: account) {
+        if let error = await engine.refreshPost(postID: id, accountID: account, priority: priority) {
             if let local = store.post(id: id) { return local }
             throw error
         }

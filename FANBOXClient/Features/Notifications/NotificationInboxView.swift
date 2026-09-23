@@ -18,21 +18,26 @@ enum NotificationInboxSegment: String, CaseIterable, Identifiable, Sendable {
 /// Unified notification inbox across accounts (SPEC §27) + おたより.
 /// Presented as a sheet from the bell button (RootView) and also routable via `AppRoute.notificationInbox`.
 /// Everything renders from the local DB; tapping a row opens the locally prefetched content (SPEC §26).
+/// The event list is paged locally (`pageSize` rows, "さらに表示"), so the inbox stays fast as events accumulate.
 struct NotificationInboxView: View {
     @Environment(AppEnvironment.self) private var env
 
-    @Query(FetchDescriptorFactory.notificationsNewestFirst()) private var events: [NotificationEvent]
+    /// Unread events only (small set): segment counts, "すべて既読" state.
+    @Query(filter: #Predicate<NotificationEvent> { !$0.isRead }) private var unreadEvents: [NotificationEvent]
     @Query(sort: \Newsletter.createdAt, order: .reverse) private var newsletters: [Newsletter]
     @Query(sort: [SortDescriptor(\Account.sortOrder), SortDescriptor(\Account.createdAt)]) private var accounts: [Account]
-    @Query private var creators: [Creator]
 
     @State private var segment: NotificationInboxSegment = .notifications
     @State private var filter = NotificationInboxFilter()
     @State private var syncError: RemoteError?
     @State private var lastSyncAt: Date?
     @State private var isRefreshing = false
+    @State private var eventLimit = NotificationInboxView.pageSize
     /// Latched on first appearance: true when this view is the root of the bell sheet (needs its own route destinations).
     @State private var latchedSheetHosted: Bool?
+
+    /// Events rendered per local page.
+    static let pageSize = 200
 
     init() {}
 
@@ -49,6 +54,9 @@ struct NotificationInboxView: View {
                 if latchedSheetHosted == nil { latchedSheetHosted = env.router.isNotificationInboxPresented }
                 if lastSyncAt == nil { lastSyncAt = latestSuccessfulSync(for: .notifications) }
             }
+            .onDisappear {
+                Task { await env.notifications.updateBadge() }
+            }
     }
 
     // MARK: Content
@@ -58,60 +66,13 @@ struct NotificationInboxView: View {
         let accountsByID = Dictionary(accounts.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         switch segment {
         case .notifications:
-            notificationsList(accountsByID: accountsByID)
+            InboxEventList(limit: eventLimit, filter: filter, syncError: syncError, lastSyncAt: lastSyncAt,
+                           header: AnyView(header(showTypeChips: true, accountsByID: accountsByID)),
+                           onOpen: open, onSetRead: setRead,
+                           onShowMore: { eventLimit += Self.pageSize },
+                           onRefresh: { await refresh(.notifications) })
         case .newsletters:
             newslettersList
-        }
-    }
-
-    private func notificationsList(accountsByID: [String: Account]) -> some View {
-        let creatorNames = Dictionary(creators.map { ($0.creatorID, $0.name) }, uniquingKeysWith: { first, _ in first })
-        let visible = events.filter { filter.matches($0) }
-        // `.everyMinute` entries are minute-aligned; use the real clock so "1分前" is exact.
-        return TimelineView(.everyMinute) { _ in
-            let now = Date.now
-            List {
-                if let syncError {
-                    SyncStatusBanner(error: syncError, lastSync: lastSyncAt)
-                        .listRowSeparator(.hidden)
-                }
-                ForEach(visible, id: \.id) { event in
-                    let text = NotificationRowFormatter.format(
-                        NotificationRowInput(event: event, creatorName: event.creatorID.flatMap { creatorNames[$0] }),
-                        now: now)
-                    Button {
-                        open(event)
-                    } label: {
-                        NotificationInboxRow(event: event, text: text)
-                    }
-                    .buttonStyle(.plain)
-                    .swipeActions(edge: .leading, allowsFullSwipe: true) {
-                        Button {
-                            setRead(event, !event.isRead)
-                        } label: {
-                            Label(event.isRead ? "未読にする" : "既読にする",
-                                  systemImage: event.isRead ? "envelope.badge" : "envelope.open")
-                        }
-                        .tint(event.isRead ? .blue : .gray)
-                    }
-                    .accessibilityIdentifier("notificationRow.\(event.id)")
-                }
-            }
-            .listStyle(.plain)
-            .overlay {
-                if visible.isEmpty {
-                    if events.isEmpty {
-                        EmptyStateView(title: "通知はありません", systemImage: "bell",
-                                       message: "新しいコメント・投稿・おたよりなどがここに表示されます")
-                    } else {
-                        EmptyStateView(title: "該当する通知はありません", systemImage: "line.3.horizontal.decrease.circle",
-                                       message: "フィルターを変更してください")
-                    }
-                }
-            }
-            .safeAreaInset(edge: .top, spacing: 0) { header(showTypeChips: true, accountsByID: accountsByID) }
-            .refreshable { await refresh(.notifications) }
-            .accessibilityIdentifier("notificationList")
         }
     }
 
@@ -134,8 +95,10 @@ struct NotificationInboxView: View {
                     }
                     .swipeActions(edge: .leading, allowsFullSwipe: true) {
                         Button {
-                            newsletter.isRead.toggle()
-                            env.store.save()
+                            // Event and newsletter read states move together (both inbox segments).
+                            NotificationReadActions.setNewsletterRead(newsletterID: newsletter.newsletterID, read: !newsletter.isRead,
+                                                                      store: env.store)
+                            Task { await env.notifications.updateBadge() }
                         } label: {
                             Label(newsletter.isRead ? "未読にする" : "既読にする",
                                   systemImage: newsletter.isRead ? "envelope.badge" : "envelope.open")
@@ -200,7 +163,7 @@ struct NotificationInboxView: View {
     private func segmentTitle(_ seg: NotificationInboxSegment) -> String {
         let unread: Int
         switch seg {
-        case .notifications: unread = events.lazy.filter { !$0.isRead }.count
+        case .notifications: unread = unreadEvents.count
         case .newsletters: unread = newsletters.lazy.filter { !$0.isRead }.count
         }
         return unread > 0 ? "\(seg.title) (\(unread))" : seg.title
@@ -242,7 +205,7 @@ struct NotificationInboxView: View {
     private var hasUnreadInCurrentView: Bool {
         switch segment {
         case .notifications:
-            return events.contains { !$0.isRead && filter.matches($0) }
+            return unreadEvents.contains { filter.matches($0) }
         case .newsletters:
             return newsletters.contains { !$0.isRead && filter.matches(type: .newsletter, accountIDs: $0.accountIDs, isRead: $0.isRead) }
         }
@@ -251,25 +214,23 @@ struct NotificationInboxView: View {
     // MARK: Actions
 
     private func open(_ event: NotificationEvent) {
-        if !event.isRead {
-            event.isRead = true
-            env.store.save()
-        }
-        // The service resolves the local route (post / comments / newsletter / support) and dismisses this sheet.
+        // The service marks it read (event + its comment / おたより), resolves the local route and dismisses this sheet.
         env.notifications.open(eventID: event.id)
     }
 
     private func setRead(_ event: NotificationEvent, _ read: Bool) {
-        event.isRead = read
-        env.store.save()
+        NotificationReadActions.setEventRead(event, read: read, store: env.store)
+        Task { await env.notifications.updateBadge() }
     }
 
-    /// "すべて既読" applies to what is currently shown (all rows when no filter is active).
+    /// "すべて既読" applies to what matches the current filter (all unread rows when no filter is active), including rows
+    /// beyond the locally shown page.
     private func markAllRead() {
         switch segment {
-        case .notifications: NotificationReadActions.markAllRead(events, filter: filter, store: env.store)
+        case .notifications: NotificationReadActions.markAllRead(unreadEvents, filter: filter, store: env.store)
         case .newsletters: NotificationReadActions.markAllRead(newsletters, filter: filter, store: env.store)
         }
+        Task { await env.notifications.updateBadge() }
     }
 
     /// Pull-to-refresh: sync the resource for every enabled account in parallel (interactive priority).
@@ -300,6 +261,127 @@ struct NotificationInboxView: View {
         let resourceRaw = resource.rawValue
         let states = env.store.fetch(FetchDescriptor<SyncState>(predicate: #Predicate { $0.resourceRaw == resourceRaw }))
         return states.compactMap(\.lastSuccessfulSync).max()
+    }
+}
+
+/// The notification rows of the inbox: newest `limit` events (a bounded @Query), plus the reply-queue entry.
+private struct InboxEventList: View {
+    let limit: Int
+    let filter: NotificationInboxFilter
+    let syncError: RemoteError?
+    let lastSyncAt: Date?
+    let header: AnyView
+    let onOpen: (NotificationEvent) -> Void
+    let onSetRead: (NotificationEvent, Bool) -> Void
+    let onShowMore: () -> Void
+    let onRefresh: () async -> Void
+
+    @Environment(AppEnvironment.self) private var env
+    @Query private var events: [NotificationEvent]
+    @Query private var creators: [Creator]
+
+    init(limit: Int, filter: NotificationInboxFilter, syncError: RemoteError?, lastSyncAt: Date?, header: AnyView,
+         onOpen: @escaping (NotificationEvent) -> Void, onSetRead: @escaping (NotificationEvent, Bool) -> Void,
+         onShowMore: @escaping () -> Void, onRefresh: @escaping () async -> Void) {
+        self.limit = limit
+        self.filter = filter
+        self.syncError = syncError
+        self.lastSyncAt = lastSyncAt
+        self.header = header
+        self.onOpen = onOpen
+        self.onSetRead = onSetRead
+        self.onShowMore = onShowMore
+        self.onRefresh = onRefresh
+        // One extra row tells whether older events exist beyond the page.
+        _events = Query(FetchDescriptorFactory.notificationsNewestFirst(limit: limit + 1))
+    }
+
+    var body: some View {
+        let creatorNames = Dictionary(creators.map { ($0.creatorID, $0.name) }, uniquingKeysWith: { first, _ in first })
+        let hasMore = events.count > limit
+        let page = hasMore ? Array(events.prefix(limit)) : events
+        let visible = page.filter { filter.matches($0) }
+        let replyQueueVisible = env.replies.pendingCount > 0
+        // `.everyMinute` entries are minute-aligned; use the real clock so "1分前" is exact.
+        return TimelineView(.everyMinute) { _ in
+            let now = Date.now
+            List {
+                if let syncError {
+                    SyncStatusBanner(error: syncError, lastSync: lastSyncAt)
+                        .listRowSeparator(.hidden)
+                }
+                if replyQueueVisible {
+                    NavigationLink {
+                        ReplyQueueView()
+                    } label: {
+                        ReplyQueueSummaryLabel(pending: env.replies.pendingCount, attention: env.replies.attentionCount)
+                    }
+                    .accessibilityIdentifier("notificationReplyQueueRow")
+                }
+                ForEach(visible, id: \.id) { event in
+                    let text = NotificationRowFormatter.format(
+                        NotificationRowInput(event: event, creatorName: event.creatorID.flatMap { creatorNames[$0] }),
+                        now: now)
+                    Button {
+                        onOpen(event)
+                    } label: {
+                        NotificationInboxRow(event: event, text: text)
+                    }
+                    .buttonStyle(.plain)
+                    .swipeActions(edge: .leading, allowsFullSwipe: true) {
+                        Button {
+                            onSetRead(event, !event.isRead)
+                        } label: {
+                            Label(event.isRead ? "未読にする" : "既読にする",
+                                  systemImage: event.isRead ? "envelope.badge" : "envelope.open")
+                        }
+                        .tint(event.isRead ? .blue : .gray)
+                    }
+                    .accessibilityIdentifier("notificationRow.\(event.id)")
+                }
+                if hasMore {
+                    Button("さらに表示", action: onShowMore)
+                        .frame(maxWidth: .infinity)
+                        .accessibilityIdentifier("notificationShowMore")
+                }
+            }
+            .listStyle(.plain)
+            .overlay {
+                if visible.isEmpty && !hasMore {
+                    if page.isEmpty {
+                        EmptyStateView(title: "通知はありません", systemImage: "bell",
+                                       message: "新しいコメント・投稿・おたよりなどがここに表示されます")
+                    } else {
+                        EmptyStateView(title: "該当する通知はありません", systemImage: "line.3.horizontal.decrease.circle",
+                                       message: "フィルターを変更してください")
+                    }
+                }
+            }
+            .safeAreaInset(edge: .top, spacing: 0) { header }
+            .refreshable { await onRefresh() }
+            .accessibilityIdentifier("notificationList")
+        }
+    }
+}
+
+/// "送信キュー" entry: pending replies, highlighting the ones that need a decision.
+struct ReplyQueueSummaryLabel: View {
+    let pending: Int
+    let attention: Int
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: attention > 0 ? "exclamationmark.bubble.fill" : "paperplane")
+                .foregroundStyle(attention > 0 ? Color.orange : Color.secondary)
+                .frame(width: 32)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("送信キュー").font(.subheadline.weight(.semibold))
+                Text(attention > 0 ? "確認が必要な返信が \(attention) 件あります" : "送信待ちの返信が \(pending) 件あります")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.vertical, 4)
     }
 }
 

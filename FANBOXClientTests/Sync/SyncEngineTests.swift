@@ -154,6 +154,8 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertEqual(first.newItemIDs, ["comment|cm1"])
         XCTAssertTrue(delivered.isEmpty, "history imported by the first sync is not re-announced")
 
+        // Automatic polling reads newsletter.list at most every `newsletterPollInterval`.
+        h.advanceClock(by: SyncEngine.newsletterPollInterval + 1)
         h.mock.update {
             $0.notifications[a.id] = [SyncFixtures.notification("r2", type: .newPost, postID: "p2"),
                                       SyncFixtures.notification("r3", type: .newPost, postID: "p3", unread: false),
@@ -171,6 +173,8 @@ final class SyncEngineTests: XCTestCase {
 
     func testSupportsSyncRecordsObservedChangeEvents() async throws {
         let h = try SyncHarness()
+        // Outside the 1st–5th: a disappearance is a 支援状態変化 (on the 1st–5th it becomes 決済要確認, see FixSync tests).
+        h.setClock(SyncFixtures.midMonthJST)
         let a = h.addAccount("A", pixivUserID: "pA", isMain: true)
         var delivered: [String] = []
         h.engine.onNewNotificationEvents = { ids in delivered += ids }

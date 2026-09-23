@@ -65,6 +65,8 @@ final class SyncNotificationTests: XCTestCase {
         }
         let ids = h.store.upsertNotifications([SyncFixtures.notification("r9", type: .comment, postID: "own1", commentID: "cm9",
                                                                          creatorID: "mine")], account: me.context)
+        // Time-sensitive delivery needs the entitlement; simulate an entitled build (fallback: FixSyncNotifyNotificationTests).
+        h.notifications.timeSensitiveAvailable = true
         await h.notifications.process(newEventIDs: ids)
 
         let event = try XCTUnwrap(h.store.notificationEvent(id: "comment|cm9"))

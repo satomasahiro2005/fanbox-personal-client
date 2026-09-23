@@ -25,13 +25,46 @@ final class SyncMockRemote: RemoteDataSource, @unchecked Sendable {
         var comments: [String: [RemoteComment]] = [:]
         /// Consumed in order by addComment; when empty, addComment echoes a successful comment.
         var addCommentResults: [RemoteError?] = []
+        /// When true, a failing addComment still stores the comment (the POST reached FANBOX, the response was lost).
+        var addCommentReachesServerOnError = false
+        /// Errors thrown by comments(postID:) (consumed in order; empty = success).
+        var commentErrors: [RemoteError] = []
         var homeDelayNanoseconds: UInt64 = 0
+        var commentsDelayNanoseconds: UInt64 = 0
+        var postDelayNanoseconds: UInt64 = 0
+        /// accountID → postID → error thrown by post(id:)
+        var postErrors: [String: [String: RemoteError]] = [:]
+        /// postID → metadata returned by postMetadata(id:)
+        var postMetadata: [String: RemotePostSummary] = [:]
+        /// accountID → unread bell count (nil = probe unavailable)
+        var unreadCounts: [String: Int] = [:]
+        /// accountID → payment status (nil = unsupported)
+        var paymentStatuses: [String: RemotePaymentStatus] = [:]
+        /// accountID → completeness problem of the supporting-plan listing
+        var supportProblems: [String: String] = [:]
+        /// accountID → posts embedded in notifications
+        var notificationPosts: [String: [RemotePostSummary]] = [:]
+        /// accountID → fans
+        var fans: [String: [RemoteFan]] = [:]
     }
 
     private let lock = NSLock()
     private var script = Script()
     private var log: [String] = []
+    private var priorityLog: [(String, RequestPriority)] = []
     private var sentCounter = 0
+
+    /// Request priority seen by the first call whose log entry starts with `prefix`.
+    func priority(of prefix: String) -> RequestPriority? {
+        lock.lock(); defer { lock.unlock() }
+        return priorityLog.first { $0.0.hasPrefix(prefix) }?.1
+    }
+
+    /// Priorities of every call whose log entry starts with `prefix`, in order.
+    func priorities(of prefix: String) -> [RequestPriority] {
+        lock.lock(); defer { lock.unlock() }
+        return priorityLog.filter { $0.0.hasPrefix(prefix) }.map(\.1)
+    }
 
     func update(_ change: (inout Script) -> Void) {
         lock.lock(); defer { lock.unlock() }
@@ -49,8 +82,10 @@ final class SyncMockRemote: RemoteDataSource, @unchecked Sendable {
     }
 
     private func record(_ entry: String, account: AccountContext) throws -> Script {
+        let priority = RequestContext.priority
         lock.lock(); defer { lock.unlock() }
         log.append(entry)
+        priorityLog.append((entry, priority))
         if let error = script.accountErrors[account.accountID] { throw error }
         return script
     }
@@ -80,8 +115,16 @@ final class SyncMockRemote: RemoteDataSource, @unchecked Sendable {
 
     func post(id: String, account: AccountContext) async throws -> RemotePostDetail {
         let s = try record("post|\(account.accountID)|\(id)", account: account)
+        if s.postDelayNanoseconds > 0 { try await Task.sleep(nanoseconds: s.postDelayNanoseconds) }
+        if let error = s.postErrors[account.accountID]?[id] { throw error }
         guard let detail = s.details[account.accountID]?[id] else { throw RemoteError.notFound }
         return detail
+    }
+
+    func postMetadata(id: String, account: AccountContext) async throws -> RemotePostSummary {
+        let s = try record("postMetadata|\(account.accountID)|\(id)", account: account)
+        guard let summary = s.postMetadata[id] else { throw RemoteError.unsupported(operation: "postMetadata") }
+        return summary
     }
 
     func creator(id: String, account: AccountContext) async throws -> RemoteCreator {
@@ -97,6 +140,19 @@ final class SyncMockRemote: RemoteDataSource, @unchecked Sendable {
         try record("supports|\(account.accountID)", account: account).supports[account.accountID] ?? []
     }
 
+    func supportingPlanListing(account: AccountContext) async throws -> RemoteSupportListing {
+        let s = try record("supports|\(account.accountID)", account: account)
+        return RemoteSupportListing(supports: s.supports[account.accountID] ?? [], problem: s.supportProblems[account.accountID])
+    }
+
+    func paymentStatus(account: AccountContext) async throws -> RemotePaymentStatus? {
+        try record("paymentStatus|\(account.accountID)", account: account).paymentStatuses[account.accountID]
+    }
+
+    func unreadNotificationCount(account: AccountContext) async throws -> Int? {
+        try record("unreadCount|\(account.accountID)", account: account).unreadCounts[account.accountID]
+    }
+
     func creatorPlans(creatorID: String, account: AccountContext) async throws -> [RemotePlan] {
         _ = try record("plans|\(creatorID)", account: account)
         return []
@@ -108,21 +164,34 @@ final class SyncMockRemote: RemoteDataSource, @unchecked Sendable {
 
     func comments(postID: String, account: AccountContext, cursor: String?) async throws -> RemotePage<RemoteComment> {
         let s = try record("comments|\(account.accountID)|\(postID)", account: account)
+        if s.commentsDelayNanoseconds > 0 { try await Task.sleep(nanoseconds: s.commentsDelayNanoseconds) }
+        let error: RemoteError? = {
+            lock.lock(); defer { lock.unlock() }
+            return script.commentErrors.isEmpty ? nil : script.commentErrors.removeFirst()
+        }()
+        if let error { throw error }
         return RemotePage(items: s.comments[postID] ?? [])
     }
 
     func addComment(postID: String, body: String, parentCommentID: String?, rootCommentID: String?,
                     account: AccountContext) async throws -> RemoteComment {
+        let priority = RequestContext.priority
         let (error, n): (RemoteError?, Int) = {
             lock.lock(); defer { lock.unlock() }
             log.append("addComment|\(account.accountID)|\(postID)")
+            priorityLog.append(("addComment|\(account.accountID)|\(postID)", priority))
             sentCounter += 1
             let next = script.addCommentResults.isEmpty ? nil : script.addCommentResults.removeFirst()
             return (next, sentCounter)
         }()
+        let comment = RemoteComment(id: "sent-\(n)", postID: postID, parentCommentID: parentCommentID, rootCommentID: rootCommentID,
+                                    authorUserID: account.pixivUserID ?? "", authorName: "me", body: body, createdAt: .now, isOwn: true)
+        // A successful POST (or one that reached FANBOX before its response was lost) is visible in the thread.
+        lock.withLock {
+            if error == nil || script.addCommentReachesServerOnError { script.comments[postID, default: []].append(comment) }
+        }
         if let error { throw error }
-        return RemoteComment(id: "sent-\(n)", postID: postID, parentCommentID: parentCommentID, rootCommentID: rootCommentID,
-                             authorUserID: account.pixivUserID ?? "", authorName: "me", body: body, createdAt: .now, isOwn: true)
+        return comment
     }
 
     func deleteComment(commentID: String, postID: String, account: AccountContext) async throws {
@@ -131,6 +200,12 @@ final class SyncMockRemote: RemoteDataSource, @unchecked Sendable {
 
     func notifications(account: AccountContext, cursor: String?) async throws -> RemotePage<RemoteNotification> {
         RemotePage(items: try record("notifications|\(account.accountID)", account: account).notifications[account.accountID] ?? [])
+    }
+
+    func notificationBatch(account: AccountContext, cursor: String?) async throws -> RemoteNotificationBatch {
+        let s = try record("notifications|\(account.accountID)", account: account)
+        return RemoteNotificationBatch(page: RemotePage(items: s.notifications[account.accountID] ?? []),
+                                       posts: s.notificationPosts[account.accountID] ?? [])
     }
 
     func newsletters(account: AccountContext) async throws -> [RemoteNewsletter] {
@@ -163,8 +238,8 @@ final class SyncMockRemote: RemoteDataSource, @unchecked Sendable {
     }
 
     func fans(account: AccountContext, cursor: String?) async throws -> RemotePage<RemoteFan> {
-        _ = try record("fans|\(account.accountID)", account: account)
-        return RemotePage(items: [])
+        let s = try record("fans|\(account.accountID)", account: account)
+        return RemotePage(items: s.fans[account.accountID] ?? [])
     }
 
     func creatorDashboard(account: AccountContext) async throws -> RemoteCreatorDashboard {
@@ -210,6 +285,11 @@ final class SyncHarness {
         service.poster = poster
         return service
     }()
+    lazy var coordinator: SyncCoordinator = {
+        let coordinator = SyncCoordinator(engine: engine, settings: settings, network: network, replies: replies)
+        coordinator.notifications = notifications
+        return coordinator
+    }()
     let poster = SyncRecordingPoster()
 
     init() throws {
@@ -221,6 +301,10 @@ final class SyncHarness {
         let provider = SyncMockProvider(mock: mock)
         engine = SyncEngine(store: store, remote: provider, settings: settings, network: network)
         replies = ReplyQueue(store: store, remote: provider, settings: settings, network: network)
+        // Same wiring as AppEnvironment.wire().
+        replies.onAttentionNeeded = { [weak self] itemID in
+            await self?.notifications.handleReplyAttention(itemID: itemID)
+        }
     }
 
     @discardableResult
@@ -236,10 +320,46 @@ final class SyncHarness {
         settings.networkModePreference = offline ? .offline : .normal
         network.recompute()
     }
+
+    // MARK: Engine clock (frequency rules / day-of-month rules)
+
+    private var clockBase: Date?
+    private var clockOffset: TimeInterval = 0
+
+    /// Pins the engine clock to `date` (sync-state timestamps and frequency rules use it).
+    func setClock(_ date: Date) {
+        clockBase = date
+        clockOffset = 0
+        installClock()
+    }
+
+    /// Moves the engine clock forward (pinned or real time).
+    func advanceClock(by seconds: TimeInterval) {
+        clockOffset += seconds
+        installClock()
+    }
+
+    private func installClock() {
+        let base = clockBase, offset = clockOffset
+        engine.clock = { (base ?? Date.now).addingTimeInterval(offset) }
+    }
 }
 
 enum SyncFixtures {
     static let base = Date(timeIntervalSince1970: 1_780_000_000)
+
+    /// Noon (JST) of `day` in the current month.
+    static func dayOfCurrentMonthJST(_ day: Int, now: Date = .now) -> Date {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "Asia/Tokyo")!
+        var c = calendar.dateComponents([.year, .month], from: now)
+        c.day = day
+        c.hour = 12
+        return calendar.date(from: c)!
+    }
+
+    /// The 15th of the current month (JST): outside the 1st–5th payment window.
+    static var midMonthJST: Date { dayOfCurrentMonthJST(15) }
 
     static func summary(_ id: String, creator: String = "c1", title: String? = nil, restricted: Bool = false, fee: Int = 0,
                         minutesAgo: Double = 0) -> RemotePostSummary {

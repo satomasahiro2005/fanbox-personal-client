@@ -43,13 +43,17 @@ section numbers below (§n) refer to it.
 - `Remote*` value types (`Core/Models/RemoteModels.swift`) are the boundary between the FANBOX adapter and the rest of
   the app. When the FANBOX API changes, the fix belongs in `Fanbox/API`, `Fanbox/DTO` or `Fanbox/Adapter` (§43).
 - `DefaultFanboxRepository` (`Core/Sync/FanboxRepository.swift`) implements the §43 repository façade on top of
-  `LocalStore` and `SyncEngine`.
+  `LocalStore` and `SyncEngine` (local-first reads; an error only when nothing is cached). The notification pipeline
+  reads post text through it; most screens still use `@Query` plus the services directly.
 
 ### Dependency container
 
 `AppEnvironment` (`App/AppEnvironment.swift`) creates every service once and wires the callbacks between them:
 
 - `SyncEngine.onNewNotificationEvents` → `NotificationService.process(newEventIDs:)`
+- `ReplyQueue.onAttentionNeeded` → `NotificationService.handleReplyAttention(itemID:)` (notice for notification replies)
+- `SyncCoordinator.notifications` → failed-prefetch retry and badge refresh when the app becomes active
+- `NotificationService.mediaPrefetcher` → `MediaService.load` (Priority 2 avatars / thumbnails, still gated by `MediaPolicy`)
 - `NetworkModeController.onConnectivityRestored` → `ReplyQueue.handleConnectivityRestored()`
 - `WebBridge.onDismiss` after a payment flow → `SyncEngine.sync(.supports, …, reason: .afterWrite)`
 
@@ -199,10 +203,22 @@ silent push (optional relay)     post title + body,                 Support     
                                                                no HTTP wait; reply -> ReplyQueue
 ```
 
-- New events come from `SyncEngine` (notifications resource) and are deduplicated across accounts.
-- Prefetch follows the §24.2 table (`NotificationEventType.prefetchTarget`) and records `prefetchState`.
-- The iOS notification is posted after the prefetch, so its text and the screen behind it are already local.
-- Inline replies are queued in `ReplyQueue` first (they work offline) and are sent as `interactiveWrite`.
+- New events come from `SyncEngine` (notifications resource) and are deduplicated across accounts. FANBOX comment
+  bells carry no comment id, so the same comment seen by two accounts is matched by post, text, author and time.
+- Automatic polling asks `bell.countUnread` first and lists `bell.list` only when the count changed or 15 minutes
+  passed; `newsletter.list` is polled at most every 10 minutes. Expired sessions are not polled.
+- Derived events (docs/API.md §18.8 B): 支援状態変化 from the supporting-plan diff, 決済要確認 from `hasUnpaidPayments`,
+  `payment.listUnpaid` or a plan that disappears on the 1st–5th, 新規支援 from the fan-list diff. The first sync of each
+  source is a silent baseline, and the texts state observed facts only (§15).
+- Prefetch follows the §24.2 table (`NotificationEventType.prefetchTarget`) and records `prefetchState`. For comment
+  events the commented comment is resolved from the thread (`NotificationCommentResolver`). After the text, avatars and
+  thumbnails are prefetched (§25 Priority 2). Failed or interrupted prefetches are retried when the app becomes active.
+- The iOS notification is posted after the prefetch, so its text and the screen behind it are already local. Critical
+  events use `.timeSensitive` only when the Time Sensitive entitlement is available; otherwise `.active`.
+- Inline replies are queued in `ReplyQueue` first (they work offline) and are sent as `interactiveWrite`, threaded under
+  the resolved comment. If the comment cannot be identified, the text is kept as a draft and a notice asks the user to
+  choose the target in the thread; a reply is never turned into a top-level comment.
+- Inbox: read events older than 90 days are pruned, and remote items older than that are not re-imported.
 - The optional APNs relay only wakes the app; see [NOTIFICATION_RELAY.md](NOTIFICATION_RELAY.md).
 
 ## Reply queue
@@ -211,6 +227,10 @@ silent push (optional relay)     post title + body,                 Support     
 `draft → queued → sending → sent | failed | needsConfirmation` (§22). Short outages are retried with backoff. Items that
 waited longer than `AppSettings.staleReplyThreshold` go to `needsConfirmation` unless `autoSendStaleReplies` is on
 (off by default). A send interrupted by an app kill also asks for confirmation, to avoid duplicate comments.
+`post.addComment` has no idempotency key, so before any re-send (automatic or manual) the thread is re-read and an own
+comment with the same text and parent is taken as the earlier send (docs/API.md §9.2); when that check is not possible,
+the item waits in `needsConfirmation`. Items that need a decision are shown in the 送信キュー screen, reachable from a
+banner on every tab and from the inbox. Queued replies are flushed before the launch / foreground refresh (§3.3).
 
 ## Media and offline library
 

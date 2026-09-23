@@ -155,7 +155,9 @@ struct NewsletterDetailView: View {
     }
 
     private func markRead() {
-        NotificationReadActions.markNewsletterRead(newsletterID: newsletterID, store: env.store)
+        if NotificationReadActions.markNewsletterRead(newsletterID: newsletterID, store: env.store) {
+            Task { await env.notifications.updateBadge() }
+        }
     }
 
     private func fetchBody(force: Bool) async {

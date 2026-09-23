@@ -231,50 +231,70 @@ enum NewsletterExcerpt {
 }
 
 /// Local read-state mutations used by the inbox / newsletter screens (local metadata only; never sent to FANBOX).
+/// An おたより and its inbox event always share one read state (both inbox segments show the same thing).
 @MainActor
 enum NotificationReadActions {
     /// Marks the newsletter and any inbox event pointing at it as read. Returns true when something changed.
     @discardableResult
     static func markNewsletterRead(newsletterID: String, store: LocalStore) -> Bool {
+        setNewsletterRead(newsletterID: newsletterID, read: true, store: store)
+    }
+
+    /// Sets the read state of a newsletter and of every inbox event pointing at it. Returns true when something changed.
+    @discardableResult
+    static func setNewsletterRead(newsletterID: String, read: Bool, store: LocalStore) -> Bool {
         var changed = false
-        if let newsletter = store.newsletter(id: newsletterID), !newsletter.isRead {
-            newsletter.isRead = true
+        if let newsletter = store.newsletter(id: newsletterID), newsletter.isRead != read {
+            newsletter.isRead = read
             changed = true
         }
         let id = newsletterID
         let events = store.fetch(FetchDescriptor<NotificationEvent>(predicate: #Predicate { $0.newsletterID == id }))
-        for event in events where !event.isRead {
-            event.isRead = true
+        for event in events where event.isRead != read {
+            event.isRead = read
             changed = true
         }
         if changed { store.save() }
         return changed
     }
 
+    /// Sets an event's read state (swipe action); an おたより event carries its newsletter along.
+    static func setEventRead(_ event: NotificationEvent, read: Bool, store: LocalStore) {
+        if let newsletterID = event.newsletterID {
+            setNewsletterRead(newsletterID: newsletterID, read: read, store: store)
+        }
+        if event.isRead != read {
+            event.isRead = read
+            store.save()
+        }
+    }
+
     /// "すべて既読" for the events matching `filter`. Returns the number of events changed.
     @discardableResult
     static func markAllRead(_ events: [NotificationEvent], filter: NotificationInboxFilter, store: LocalStore) -> Int {
         var count = 0
+        var newsletterIDs: [String] = []
         for event in events where !event.isRead && filter.matches(event) {
             event.isRead = true
             count += 1
+            if let id = event.newsletterID { newsletterIDs.append(id) }
         }
+        for id in newsletterIDs { setNewsletterRead(newsletterID: id, read: true, store: store) }
         if count > 0 { store.save() }
         return count
     }
 
-    /// "すべて既読" for newsletters matching `filter` (type filter is ignored for newsletters).
+    /// "すべて既読" for newsletters matching `filter` (type filter is ignored for newsletters); their events follow.
     @discardableResult
     static func markAllRead(_ newsletters: [Newsletter], filter: NotificationInboxFilter, store: LocalStore) -> Int {
         var newsletterFilter = filter
         newsletterFilter.type = nil
-        var count = 0
+        var ids: [String] = []
         for newsletter in newsletters where !newsletter.isRead
             && newsletterFilter.matches(type: .newsletter, accountIDs: newsletter.accountIDs, isRead: newsletter.isRead) {
-            newsletter.isRead = true
-            count += 1
+            ids.append(newsletter.newsletterID)
         }
-        if count > 0 { store.save() }
-        return count
+        for id in ids { setNewsletterRead(newsletterID: id, read: true, store: store) }
+        return ids.count
     }
 }

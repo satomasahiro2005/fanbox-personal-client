@@ -18,6 +18,8 @@ final class SyncCoordinator {
     @ObservationIgnored let settings: AppSettings
     @ObservationIgnored let network: NetworkModeController
     @ObservationIgnored let replies: ReplyQueue
+    /// Notification pipeline (failed prefetch retry, badge). Set by `AppEnvironment.wire()`.
+    @ObservationIgnored weak var notifications: NotificationService?
 
     /// Every Nth polling tick also refreshes the newest timeline page (lightweight).
     static let timelineEveryNthTick = 5
@@ -41,12 +43,17 @@ final class SyncCoordinator {
     func start() {
         guard !started else { return }
         started = true
+        // Queued replies go out first (SPEC §3.3 MUST: replies before other work). The flush runs concurrently with
+        // the launch refresh (interactiveWrite beats every other class), so it never waits for the multi-account sync.
+        Task { [weak self] in await self?.replies.flush() }
         // The UI already renders from the local DB; the network refresh runs afterwards (SPEC §3.1).
         Task { [weak self] in
             guard let self else { return }
             await self.engine.syncAll(reason: .appLaunch)
             self.absorbEngineState()
             await self.replies.flush()
+            await self.notifications?.retryFailedPrefetches()
+            self.pruneInbox()
         }
         startPolling()
     }
@@ -58,8 +65,10 @@ final class SyncCoordinator {
             startPolling()
             Task { [weak self] in
                 guard let self else { return }
-                await self.refreshNotifications(reason: .foregroundPolling)
                 await self.replies.flush()
+                await self.refreshNotifications(reason: .foregroundPolling)
+                await self.notifications?.retryFailedPrefetches()
+                await self.notifications?.updateBadge()
             }
         case .background:
             stopPolling()
@@ -84,8 +93,8 @@ final class SyncCoordinator {
     func pollOnce() async {
         pollTickCount += 1
         guard engine.canReachNetwork else { return }
-        await refreshNotifications(reason: .foregroundPolling)
         await replies.flush()
+        await refreshNotifications(reason: .foregroundPolling)
         if pollTickCount % Self.timelineEveryNthTick == 0 {
             await forEachAccount { engine, accountID in
                 await engine.sync(.timeline, accountID: accountID, reason: .foregroundPolling)
@@ -131,6 +140,11 @@ final class SyncCoordinator {
     private func absorbEngineState() {
         lastError = engine.lastError
         if let at = engine.lastSuccessAt { lastRefreshAt = at }
+    }
+
+    /// Inbox housekeeping (read events past the retention window). Cheap; also run by the maintenance task.
+    private func pruneInbox() {
+        engine.store.maintenancePruneNotificationEvents(before: Date(timeIntervalSinceNow: -LocalStore.notificationRetention))
     }
 }
 
@@ -193,8 +207,11 @@ enum BackgroundRefresh {
         }
         let completion = TaskCompletion(task)
         let work = Task { @MainActor in
+            // Replies first (SPEC §3.3), then the lightweight refresh, then a last flush for replies queued meanwhile.
+            await env.replies.flush()
             let outcomes = await env.sync.syncLightweightOutcomes(reason: .backgroundRefresh)
             await env.replies.flush()
+            await env.notifications.updateBadge()
             let failed = !outcomes.isEmpty && outcomes.allSatisfy { $0.error != nil }
             completion.complete(success: !failed && !Task.isCancelled)
         }
@@ -214,6 +231,7 @@ enum BackgroundRefresh {
         let work = Task { @MainActor in
             env.media.enforceCapacity()
             env.store.maintenancePruneResearchLogs(before: Date(timeIntervalSinceNow: -researchLogRetention))
+            env.store.maintenancePruneNotificationEvents(before: Date(timeIntervalSinceNow: -LocalStore.notificationRetention))
             completion.complete(success: !Task.isCancelled)
         }
         task.expirationHandler = {
