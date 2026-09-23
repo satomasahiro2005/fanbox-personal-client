@@ -52,10 +52,9 @@ struct LibraryRootView: View {
                 results = nil
                 return
             }
-            if results != nil {
-                try? await Task.sleep(for: .milliseconds(250))
-                guard !Task.isCancelled else { return }
-            }
+            // Debounce every keystroke, the first one included (the search runs on the main actor).
+            try? await Task.sleep(for: LibrarySearchDebounce.interval)
+            guard !Task.isCancelled else { return }
             results = env.librarySearch.search(query)
         }
         .task { env.media.refreshUsage() }

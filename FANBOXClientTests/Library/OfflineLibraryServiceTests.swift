@@ -106,16 +106,21 @@ final class OfflineLibraryServiceTests: XCTestCase {
         }
         await offline.saveRecent(creatorID: "c9", count: 2)
 
+        // Rule-saved posts carry their own state (updated: they used to be indistinguishable from explicit saves).
         XCTAssertEqual(creator.offlineRecentCount, 2)
-        XCTAssertEqual(h.env.store.post(id: "c9-4")?.offlineState, .saved)
-        XCTAssertEqual(h.env.store.post(id: "c9-3")?.offlineState, .saved)
+        XCTAssertEqual(h.env.store.post(id: "c9-4")?.offlineState, .ruleSaved)
+        XCTAssertEqual(h.env.store.post(id: "c9-3")?.offlineState, .ruleSaved)
         XCTAssertEqual(h.env.store.post(id: "c9-2")?.offlineState, OfflineState.none)
         XCTAssertEqual(h.entries(postID: "c9-4").count, 2)
+        XCTAssertTrue(h.entries(postID: "c9-4").allSatisfy(\.isPinned))
         XCTAssertTrue(h.entries(postID: "c9-0").isEmpty)
         XCTAssertTrue(offline.activeCreatorSaves.isEmpty)
 
+        // Removing the rule releases what it saved (files stay as ordinary cache).
         await offline.saveRecent(creatorID: "c9", count: 0)
         XCTAssertEqual(creator.offlineRecentCount, 0)
+        XCTAssertEqual(h.env.store.post(id: "c9-4")?.offlineState, OfflineState.none)
+        XCTAssertFalse(h.entries(postID: "c9-4").contains(where: \.isPinned))
     }
 
     func testPostViewedRecordsHistoryAndAutoSavesWhenEnabled() async throws {
@@ -134,7 +139,8 @@ final class OfflineLibraryServiceTests: XCTestCase {
         XCTAssertEqual(post.offlineState, .autoSaved)
         let entries = h.entries(postID: "v1")
         XCTAssertEqual(entries.map(\.variant), [.display], "auto-save prefetches display images only")
-        XCTAssertFalse(entries.contains(where: \.isPinned))
+        // Updated: auto-saved media is pinned like every save unit (it used to be evicted first).
+        XCTAssertTrue(entries.allSatisfy(\.isPinned))
 
         post.offlineState = .saved
         await offline.postViewed(postID: "v1")

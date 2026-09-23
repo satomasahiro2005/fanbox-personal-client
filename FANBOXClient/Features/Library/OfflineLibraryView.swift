@@ -19,23 +19,16 @@ enum OfflineLibrarySegment: String, CaseIterable, Identifiable {
 
 /// Offline Library (SPEC §31): saved posts, creator "recent N" rules, cached images and files, and cache usage.
 /// Save units are limited to: this post / a creator's recent N / auto-saved viewed posts (no unlimited crawl).
+///
+/// Each segment is its own view with its own queries, so only the visible segment touches SwiftData; rows receive plain
+/// values built once per render (no per-row fetches in `body`).
 struct OfflineLibraryView: View {
     @Environment(AppEnvironment.self) private var env
     @State private var segment: OfflineLibrarySegment = .posts
     @State private var isConfirmingClearAll = false
     @State private var isPickingCreator = false
     @State private var viewer: OfflineViewerSelection?
-
-    @Query(filter: #Predicate<Post> { $0.offlineStateRaw != "none" }, sort: \Post.publishedAt, order: .reverse)
-    private var posts: [Post]
-    @Query(filter: #Predicate<Creator> { $0.offlineRecentCount > 0 }, sort: \Creator.name)
-    private var creators: [Creator]
-    // Sorted by creation (not last access) so viewing an image does not reshuffle the grid.
-    @Query(filter: #Predicate<MediaCacheEntry> { $0.kindRaw == "image" && $0.postID != nil },
-           sort: \MediaCacheEntry.createdAt, order: .reverse)
-    private var imageEntries: [MediaCacheEntry]
-    @Query(filter: #Predicate<MediaCacheEntry> { $0.kindRaw != "image" }, sort: \MediaCacheEntry.createdAt, order: .reverse)
-    private var fileEntries: [MediaCacheEntry]
+    @State private var imageLimit = OfflineImagesSection.pageSize
 
     var body: some View {
         @Bindable var settings = env.settings
@@ -45,7 +38,8 @@ struct OfflineLibraryView: View {
                 Toggle("閲覧した投稿を自動保存", isOn: $settings.autoSaveViewedPosts)
                     .accessibilityIdentifier("offlineAutoSaveToggle")
             } footer: {
-                Text("保存単位: この投稿 / Creator の最近 N 件 / 今後閲覧した投稿。過去履歴の無制限な取得は行いません。")
+                Text("保存単位: この投稿 / Creator の最近 N 件 / 今後閲覧した投稿。過去履歴の無制限な取得は行いません。"
+                     + "保存したメディアは容量を超えたときに最後に削除され、その投稿の保存は解除されます。")
             }
 
             Section {
@@ -59,10 +53,10 @@ struct OfflineLibraryView: View {
             }
 
             switch segment {
-            case .posts: postsSection
-            case .creators: creatorsSection
-            case .images: imagesSection
-            case .files: filesSection
+            case .posts: OfflinePostsSection()
+            case .creators: OfflineCreatorsSection(isPickingCreator: $isPickingCreator)
+            case .images: OfflineImagesSection(limit: imageLimit, viewer: $viewer) { imageLimit += OfflineImagesSection.pageSize }
+            case .files: OfflineFilesSection()
             }
         }
         .listStyle(.insetGrouped)
@@ -99,11 +93,17 @@ struct OfflineLibraryView: View {
         .task { env.media.refreshUsage() }
         .accessibilityIdentifier("offlineLibrary")
     }
+}
 
-    // MARK: - Posts
+// MARK: - Posts
 
-    @ViewBuilder
-    private var postsSection: some View {
+private struct OfflinePostsSection: View {
+    @Environment(AppEnvironment.self) private var env
+    @Query(filter: #Predicate<Post> { $0.offlineStateRaw != "none" }, sort: \Post.publishedAt, order: .reverse)
+    private var posts: [Post]
+
+    var body: some View {
+        let bytes = OfflineLibraryIndex.bytesByPost(store: env.store)
         Section {
             if posts.isEmpty {
                 EmptyStateView(title: "保存した投稿はありません", systemImage: "arrow.down.circle",
@@ -113,7 +113,7 @@ struct OfflineLibraryView: View {
                 NavigationLink(value: AppRoute.post(postID: post.postID)) {
                     VStack(alignment: .leading, spacing: 4) {
                         LibraryPostRow(post: post)
-                        OfflinePostStatusLine(postID: post.postID)
+                        OfflinePostStatusLine(postID: post.postID, hasBody: post.hasCachedBody, mediaBytes: bytes[post.postID] ?? 0)
                     }
                 }
                 .swipeActions(edge: .trailing, allowsFullSwipe: false) {
@@ -141,11 +141,88 @@ struct OfflineLibraryView: View {
             Text("保存済みの投稿 \(posts.count) 件")
         }
     }
+}
 
-    // MARK: - Creators
+/// Lookup tables built once per render (instead of one SwiftData fetch per row).
+@MainActor
+enum OfflineLibraryIndex {
+    /// Cached media bytes per post, from one fetch of two columns.
+    static func bytesByPost(store: LocalStore) -> [String: Int64] {
+        var descriptor = FetchDescriptor<MediaCacheEntry>(predicate: #Predicate { $0.postID != nil })
+        descriptor.propertiesToFetch = [\.postID, \.byteSize]
+        var result: [String: Int64] = [:]
+        for entry in store.fetch(descriptor) {
+            guard let postID = entry.postID else { continue }
+            result[postID, default: 0] += Int64(entry.byteSize)
+        }
+        return result
+    }
 
-    @ViewBuilder
-    private var creatorsSection: some View {
+    /// File name per attachment URL and title per post, from one PostBlock fetch and one Post fetch.
+    static func fileNames(for entries: [OfflineFileItem], store: LocalStore) -> (names: [String: String], titles: [String: String]) {
+        let postIDs = Array(Set(entries.compactMap(\.postID)))
+        guard !postIDs.isEmpty else { return ([:], [:]) }
+        let kinds = [PostBlockKind.file.rawValue, PostBlockKind.audio.rawValue, PostBlockKind.video.rawValue]
+        var names: [String: String] = [:]
+        for block in store.fetch(FetchDescriptor<PostBlock>(predicate: #Predicate {
+            postIDs.contains($0.postID) && kinds.contains($0.kindRaw)
+        })) {
+            guard let name = block.fileName, !name.isEmpty else { continue }
+            var display = name
+            if let ext = block.fileExtension, !ext.isEmpty, !name.lowercased().hasSuffix(".\(ext.lowercased())") { display = "\(name).\(ext)" }
+            for url in [block.originalURL, block.url].compactMap({ $0 }) where names[url] == nil { names[url] = display }
+        }
+        var titles: [String: String] = [:]
+        for post in store.fetch(FetchDescriptor<Post>(predicate: #Predicate { postIDs.contains($0.postID) })) {
+            titles[post.postID] = post.title
+        }
+        return (names, titles)
+    }
+}
+
+/// "保存中 42%" / cached size / "本文未取得" line for an offline post.
+private struct OfflinePostStatusLine: View {
+    let postID: String
+    let hasBody: Bool
+    let mediaBytes: Int64
+    @Environment(AppEnvironment.self) private var env
+
+    var body: some View {
+        HStack(spacing: 6) {
+            if env.offline.activeSaves.contains(postID) {
+                ProgressView(value: env.offline.saveProgress[postID] ?? 0)
+                    .frame(maxWidth: 120)
+                Text("保存中").font(.caption2).foregroundStyle(.secondary)
+            } else {
+                if !hasBody {
+                    Label("本文未取得", systemImage: "exclamationmark.circle")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                }
+                if mediaBytes > 0 {
+                    Text("メディア \(Formatters.bytes(mediaBytes))").font(.caption2).foregroundStyle(.tertiary)
+                } else if hasBody {
+                    Text("テキストのみ").font(.caption2).foregroundStyle(.tertiary)
+                }
+                if let summary = env.offline.lastSummaries[postID], summary.mediaBlocked > 0 {
+                    Text("通信モードにより \(summary.mediaBlocked) 件未取得")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                }
+            }
+        }
+        .padding(.leading, 72)
+    }
+}
+
+// MARK: - Creators
+
+private struct OfflineCreatorsSection: View {
+    @Binding var isPickingCreator: Bool
+    @Query(filter: #Predicate<Creator> { $0.offlineRecentCount > 0 }, sort: \Creator.name)
+    private var creators: [Creator]
+
+    var body: some View {
         Section {
             if creators.isEmpty {
                 Text("クリエイターごとに「最近 N 件」を自動で保存できます。")
@@ -160,108 +237,202 @@ struct OfflineLibraryView: View {
         } header: {
             Text("Creator の最近 N 件")
         } footer: {
-            Text("最新ページを1回だけ取得して保存します。引っ張って更新すると各ルールを再適用します。")
+            Text("同期で見つかった新しい投稿は自動で保存され、最近 N 件から外れた投稿は保存が解除されます。"
+                 + "引っ張って更新すると、各クリエイターの最新ページを1回だけ取得して再適用します。")
         }
     }
+}
 
-    // MARK: - Images
+// MARK: - Images
 
-    /// Saved post images: display / original entries (thumbnails only when nothing larger exists), deduplicated by URL.
-    private var galleryEntries: [MediaCacheEntry] {
+/// Value snapshot of one cached image (no live model captured by rows or tap closures).
+struct OfflineImageItem: Hashable, Identifiable {
+    var key: String
+    var url: String
+    var variant: MediaVariant
+    var postID: String?
+    var isPinned: Bool
+    var id: String { key }
+
+    var viewerItem: ImageViewerItem {
+        ImageViewerItem(id: key,
+                        thumbnailURL: variant == .thumbnail ? url : nil,
+                        displayURL: variant == .display ? url : nil,
+                        originalURL: variant == .original ? url : nil)
+    }
+
+    /// Saved post images: display / original entries (thumbnails only when nothing larger exists for the post),
+    /// deduplicated by URL, in the input order.
+    static func gallery(_ entries: [OfflineImageItem]) -> [OfflineImageItem] {
         var seenURLs = Set<String>()
         var postsWithLarge = Set<String>()
-        var result: [MediaCacheEntry] = []
-        for entry in imageEntries where entry.variant != .thumbnail {
+        var result: [OfflineImageItem] = []
+        for entry in entries where entry.variant != .thumbnail {
             if seenURLs.insert(entry.url).inserted { result.append(entry) }
             if let postID = entry.postID { postsWithLarge.insert(postID) }
         }
-        for entry in imageEntries where entry.variant == .thumbnail {
+        for entry in entries where entry.variant == .thumbnail {
             guard let postID = entry.postID, !postsWithLarge.contains(postID) else { continue }
             if seenURLs.insert(entry.url).inserted { result.append(entry) }
         }
         return result
     }
 
-    @ViewBuilder
-    private var imagesSection: some View {
-        let entries = galleryEntries
+    /// Rows of `columns` items (each row is its own lazily created List row).
+    static func rows(_ items: [OfflineImageItem], columns: Int) -> [[OfflineImageItem]] {
+        guard columns > 0 else { return [] }
+        return stride(from: 0, to: items.count, by: columns).map { Array(items[$0..<min($0 + columns, items.count)]) }
+    }
+}
+
+struct OfflineImagesSection: View {
+    static let pageSize = 300
+    static let columns = 3
+
+    let limit: Int
+    @Binding var viewer: OfflineViewerSelection?
+    let loadMore: () -> Void
+
+    @Environment(AppEnvironment.self) private var env
+    // Sorted by creation (not last access) so viewing an image does not reshuffle the grid.
+    @Query private var entries: [MediaCacheEntry]
+
+    init(limit: Int, viewer: Binding<OfflineViewerSelection?>, loadMore: @escaping () -> Void) {
+        self.limit = limit
+        _viewer = viewer
+        self.loadMore = loadMore
+        var descriptor = FetchDescriptor<MediaCacheEntry>(predicate: #Predicate { $0.kindRaw == "image" && $0.postID != nil },
+                                                          sortBy: [SortDescriptor(\.createdAt, order: .reverse)])
+        descriptor.fetchLimit = limit
+        _entries = Query(descriptor)
+    }
+
+    var body: some View {
+        let items = OfflineImageItem.gallery(entries.map {
+            OfflineImageItem(key: $0.key, url: $0.url, variant: $0.variant, postID: $0.postID, isPinned: $0.isPinned)
+        })
+        let rows = OfflineImageItem.rows(items, columns: Self.columns)
         Section {
-            if entries.isEmpty {
+            if items.isEmpty {
                 EmptyStateView(title: "キャッシュ済みの画像はありません", systemImage: "photo.on.rectangle")
-            } else {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 96), spacing: 4)], spacing: 4) {
-                    ForEach(Array(entries.enumerated()), id: \.element.key) { index, entry in
-                        Button {
-                            viewer = OfflineViewerSelection(items: entries.map(Self.viewerItem), index: index)
-                        } label: {
-                            RemoteImageView(thumbnailURL: entry.url, maxVariant: .thumbnail, postID: entry.postID, allowsManualLoad: false)
-                                .aspectRatio(1, contentMode: .fit)
-                                .clipShape(RoundedRectangle(cornerRadius: 6))
-                                .overlay(alignment: .topTrailing) {
-                                    if entry.isPinned {
-                                        Image(systemName: "pin.fill")
-                                            .font(.caption2)
-                                            .foregroundStyle(.white)
-                                            .padding(4)
-                                            .background(.black.opacity(0.4), in: Circle())
-                                            .padding(4)
-                                    }
-                                }
-                        }
-                        .buttonStyle(.plain)
-                        .contextMenu {
-                            if let postID = entry.postID {
-                                Button("投稿を開く", systemImage: "doc.text") {
-                                    env.router.open(.post(postID: postID), in: .library)
-                                }
-                            }
-                            Button("この画像を削除", systemImage: "trash", role: .destructive) {
-                                env.media.removeEntry(key: entry.key)
-                            }
-                        }
+            }
+            ForEach(Array(rows.enumerated()), id: \.element.first?.key) { rowIndex, row in
+                HStack(spacing: 4) {
+                    ForEach(Array(row.enumerated()), id: \.element.key) { column, item in
+                        tile(item, index: rowIndex * Self.columns + column, items: items)
+                    }
+                    ForEach(row.count..<Self.columns, id: \.self) { _ in
+                        Color.clear.aspectRatio(1, contentMode: .fit).frame(maxWidth: .infinity)
                     }
                 }
-                .padding(.vertical, 4)
-                .accessibilityIdentifier("offlineImagesGrid")
+                .listRowInsets(EdgeInsets(top: 2, leading: 8, bottom: 2, trailing: 8))
+                .listRowSeparator(.hidden)
+                .accessibilityIdentifier(rowIndex == 0 ? "offlineImagesGrid" : "offlineImagesRow")
+            }
+            if entries.count >= limit {
+                Button("さらに表示", action: loadMore)
+                    .frame(maxWidth: .infinity)
+                    .accessibilityIdentifier("offlineImagesLoadMore")
             }
         } header: {
-            Text("画像 \(entries.count) 枚")
+            Text("画像 \(items.count) 枚")
         }
     }
 
-    private static func viewerItem(_ entry: MediaCacheEntry) -> ImageViewerItem {
-        ImageViewerItem(id: entry.key,
-                        thumbnailURL: entry.variant == .thumbnail ? entry.url : nil,
-                        displayURL: entry.variant == .display ? entry.url : nil,
-                        originalURL: entry.variant == .original ? entry.url : nil)
+    private func tile(_ item: OfflineImageItem, index: Int, items: [OfflineImageItem]) -> some View {
+        Button {
+            viewer = OfflineViewerSelection(items: items.map(\.viewerItem), index: index)
+        } label: {
+            Color.clear
+                .aspectRatio(1, contentMode: .fit)
+                .overlay {
+                    // The cached file under its real variant, decoded at thumbnail size.
+                    RemoteImageView(thumbnailURL: item.variant == .thumbnail ? item.url : nil,
+                                    displayURL: item.variant == .display ? item.url : nil,
+                                    originalURL: item.variant == .original ? item.url : nil,
+                                    maxVariant: .thumbnail, postID: item.postID, allowsManualLoad: false)
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .overlay(alignment: .topTrailing) {
+                    if item.isPinned {
+                        Image(systemName: "pin.fill")
+                            .font(.caption2)
+                            .foregroundStyle(.white)
+                            .padding(4)
+                            .background(.black.opacity(0.4), in: Circle())
+                            .padding(4)
+                    }
+                }
+        }
+        .buttonStyle(.plain)
+        .frame(maxWidth: .infinity)
+        .contextMenu {
+            if let postID = item.postID {
+                Button("投稿を開く", systemImage: "doc.text") {
+                    env.router.open(.post(postID: postID), in: .library)
+                }
+            }
+            Button("この画像を削除", systemImage: "trash", role: .destructive) {
+                env.media.removeEntry(key: item.key)
+            }
+        }
     }
+}
 
-    // MARK: - Files
+// MARK: - Files
 
-    @ViewBuilder
-    private var filesSection: some View {
+/// Value snapshot of one cached attachment.
+struct OfflineFileItem: Hashable, Identifiable {
+    var key: String
+    var url: String
+    var kind: MediaKind
+    var byteSize: Int
+    var relativePath: String
+    var postID: String?
+    var id: String { key }
+}
+
+private struct OfflineFilesSection: View {
+    @Environment(AppEnvironment.self) private var env
+    @Query(filter: #Predicate<MediaCacheEntry> { $0.kindRaw != "image" }, sort: \MediaCacheEntry.createdAt, order: .reverse)
+    private var entries: [MediaCacheEntry]
+
+    var body: some View {
+        let items = entries.map {
+            OfflineFileItem(key: $0.key, url: $0.url, kind: $0.kind, byteSize: $0.byteSize, relativePath: $0.relativePath, postID: $0.postID)
+        }
+        let index = OfflineLibraryIndex.fileNames(for: items, store: env.store)
         Section {
-            if fileEntries.isEmpty {
+            if items.isEmpty {
                 EmptyStateView(title: "保存済みのファイルはありません", systemImage: "doc",
                                message: "Offline 保存した投稿の添付ファイル・音声・動画がここに表示されます。")
             }
-            ForEach(fileEntries) { entry in
+            ForEach(items) { item in
+                let row = OfflineFileRow(item: item, displayName: Self.displayName(item, names: index.names),
+                                         postTitle: item.postID.flatMap { index.titles[$0] },
+                                         fileURL: env.media.fileCache.fileURL(relativePath: item.relativePath))
                 Group {
-                    if let postID = entry.postID {
-                        NavigationLink(value: AppRoute.post(postID: postID)) { OfflineFileRow(entry: entry) }
+                    if let postID = item.postID {
+                        NavigationLink(value: AppRoute.post(postID: postID)) { row }
                     } else {
-                        OfflineFileRow(entry: entry)
+                        row
                     }
                 }
-                    .swipeActions(edge: .trailing) {
-                        Button("削除", systemImage: "trash", role: .destructive) {
-                            env.media.removeEntry(key: entry.key)
-                        }
+                .swipeActions(edge: .trailing) {
+                    Button("削除", systemImage: "trash", role: .destructive) {
+                        env.media.removeEntry(key: item.key)
                     }
+                }
             }
         } header: {
-            Text("ファイル \(fileEntries.count) 件")
+            Text("ファイル \(items.count) 件")
         }
+    }
+
+    static func displayName(_ item: OfflineFileItem, names: [String: String]) -> String {
+        if let name = names[item.url] { return name }
+        if let demo = DemoMediaURL(item.url), case .file(let name, _) = demo { return name }
+        return URL(string: item.url)?.lastPathComponent ?? "ファイル"
     }
 }
 
@@ -269,33 +440,6 @@ struct OfflineViewerSelection: Identifiable {
     let id = UUID()
     var items: [ImageViewerItem]
     var index: Int
-}
-
-/// "保存中 42%" / cached size line for an offline post.
-private struct OfflinePostStatusLine: View {
-    let postID: String
-    @Environment(AppEnvironment.self) private var env
-
-    var body: some View {
-        HStack(spacing: 6) {
-            if env.offline.activeSaves.contains(postID) {
-                ProgressView(value: env.offline.saveProgress[postID] ?? 0)
-                    .frame(maxWidth: 120)
-                Text("保存中").font(.caption2).foregroundStyle(.secondary)
-            } else {
-                let bytes = env.media.cachedBytes(postID: postID)
-                Text(bytes > 0 ? "メディア \(Formatters.bytes(bytes))" : "テキストのみ")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                if let summary = env.offline.lastSummaries[postID], summary.mediaBlocked > 0 {
-                    Text("通信モードにより \(summary.mediaBlocked) 件未取得")
-                        .font(.caption2)
-                        .foregroundStyle(.orange)
-                }
-            }
-        }
-        .padding(.leading, 72)
-    }
 }
 
 /// One creator "recent N" rule.
@@ -325,7 +469,8 @@ private struct OfflineCreatorRuleRow: View {
                 Button("今すぐ保存", systemImage: "arrow.down.circle") { run(count: creator.offlineRecentCount) }
                 Divider()
                 Button("ルールを解除", systemImage: "xmark.circle", role: .destructive) {
-                    Task { await env.offline.saveRecent(creatorID: creator.creatorID, count: 0) }
+                    // Releases the posts this rule saved (explicitly saved posts stay).
+                    env.offline.setRecentRule(creatorID: creator.creatorID, count: 0)
                 }
             } label: {
                 Image(systemName: "slider.horizontal.3")
@@ -340,28 +485,15 @@ private struct OfflineCreatorRuleRow: View {
     }
 }
 
-/// Cached attachment row with share.
+/// Cached attachment row with share (plain values only).
 private struct OfflineFileRow: View {
-    let entry: MediaCacheEntry
-    @Environment(AppEnvironment.self) private var env
-
-    private var displayName: String {
-        if let postID = entry.postID {
-            let url = entry.url
-            let blocks = env.store.fetch(FetchDescriptor<PostBlock>(predicate: #Predicate { $0.postID == postID }))
-            if let block = blocks.first(where: { $0.originalURL == url || $0.url == url }), let name = block.fileName, !name.isEmpty {
-                if let ext = block.fileExtension, !ext.isEmpty, !name.lowercased().hasSuffix(".\(ext.lowercased())") {
-                    return "\(name).\(ext)"
-                }
-                return name
-            }
-        }
-        if let demo = DemoMediaURL(entry.url), case .file(let name, _) = demo { return name }
-        return URL(string: entry.url)?.lastPathComponent ?? "ファイル"
-    }
+    let item: OfflineFileItem
+    let displayName: String
+    let postTitle: String?
+    let fileURL: URL
 
     private var icon: String {
-        switch entry.kind {
+        switch item.kind {
         case .audio: return "music.note"
         case .video: return "film"
         case .image: return "photo"
@@ -370,7 +502,6 @@ private struct OfflineFileRow: View {
     }
 
     var body: some View {
-        let fileURL = env.media.fileCache.fileURL(relativePath: entry.relativePath)
         HStack(spacing: 12) {
             Image(systemName: icon)
                 .font(.title3)
@@ -379,9 +510,9 @@ private struct OfflineFileRow: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(displayName).font(.subheadline).lineLimit(1)
                 HStack(spacing: 6) {
-                    Text(Formatters.bytes(Int64(entry.byteSize)))
-                    if let postID = entry.postID, let post = env.store.post(id: postID) {
-                        Text(post.title).lineLimit(1)
+                    Text(Formatters.bytes(Int64(item.byteSize)))
+                    if let postTitle {
+                        Text(postTitle).lineLimit(1)
                     }
                 }
                 .font(.caption)

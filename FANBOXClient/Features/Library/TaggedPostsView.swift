@@ -24,8 +24,10 @@ struct TaggedPostsView: View {
     private var posts: [Post] {
         let ids = postTags.map(\.postID)
         guard !ids.isEmpty else { return [] }
-        return env.store.fetch(FetchDescriptor<Post>(predicate: #Predicate { ids.contains($0.postID) },
-                                                     sortBy: [SortDescriptor(\.publishedAt, order: .reverse)]))
+        let published = ReaderPostQueries.publishedStatus
+        return env.store.fetch(FetchDescriptor<Post>(predicate: #Predicate {
+            ids.contains($0.postID) && ($0.remoteStatusRaw == nil || $0.remoteStatusRaw == published)
+        }, sortBy: [SortDescriptor(\.publishedAt, order: .reverse)]))
     }
 
     var body: some View {

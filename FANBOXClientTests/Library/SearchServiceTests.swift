@@ -30,6 +30,8 @@ final class SearchServiceTests: XCTestCase {
         func post(_ id: String, _ title: String, hoursAgo: Double, creatorID: String = "c1", creatorName: String = "ピアノ工房") -> Post {
             let p = Post(postID: id, creatorID: creatorID, creatorName: creatorName, title: title,
                          publishedAt: base.addingTimeInterval(-hoursAgo * 3600))
+            // Timeline posts (the Library 未読 list follows the Home feed: supported / followed creators only).
+            p.isFromFollowedCreator = true
             store.context.insert(p)
             return p
         }

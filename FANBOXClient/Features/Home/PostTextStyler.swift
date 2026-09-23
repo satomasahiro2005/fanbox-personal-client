@@ -1,6 +1,21 @@
 import Foundation
 import SwiftUI
 
+extension RemoteTextStyle {
+    /// Type prefix of anchor-text link styles (`"link:<url>"`); the adapter encodes article block links this way because
+    /// `RemoteTextStyle` has no URL field.
+    static let linkTypePrefix = "link:"
+
+    /// Target of a link style (http / https only), nil for any other style.
+    var linkURL: URL? {
+        guard type.hasPrefix(Self.linkTypePrefix) else { return nil }
+        let raw = String(type.dropFirst(Self.linkTypePrefix.count)).trimmingCharacters(in: .whitespaces)
+        guard let url = URL(string: raw), let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https",
+              url.host != nil else { return nil }
+        return url
+    }
+}
+
 /// Converts a paragraph's text + FANBOX style ranges (`PostBlock.stylesJSON` = `[RemoteTextStyle]`) into an
 /// `AttributedString` (SPEC §6 native rendering).
 ///
@@ -95,7 +110,7 @@ enum PostTextStyler {
     // MARK: - AttributedString
 
     /// Styled paragraph for SwiftUI `Text`. Bold runs carry `.stronglyEmphasized` and a bold font; fontSize runs a sized font.
-    /// URLs in the text become tappable links.
+    /// URLs in the text become tappable links, and so do anchor-text links (`RemoteTextStyle.linkURL`, SPEC §6 Article).
     static func attributedString(text: String, stylesJSON: String?, detectLinks: Bool = true) -> AttributedString {
         attributedString(text: text, styles: decodeStyles(stylesJSON), detectLinks: detectLinks)
     }
@@ -116,7 +131,31 @@ enum PostTextStyler {
             result.append(piece)
         }
         if detectLinks { addLinks(to: &result) }
+        addStyleLinks(styles, to: &result)
         return result
+    }
+
+    /// Anchor-text links: `.link` on the style's UTF-16 range (clamped; surrogate pairs are never split). They win over
+    /// URLs detected in the same text. Only http(s) targets are linked; FANBOX hosts open in the account-aware WebView
+    /// through the post screen's `OpenURLAction`.
+    static func addStyleLinks(_ styles: [RemoteTextStyle], to attributed: inout AttributedString) {
+        let links = styles.compactMap { style in style.linkURL.map { (style, $0) } }
+        guard !links.isEmpty else { return }
+        // Index into the attributed string's own characters (same text as `text`, segment by segment).
+        let plain = String(attributed.characters)
+        let units = Array(plain.utf16)
+        let count = units.count
+        for (style, url) in links {
+            guard var range = clampedRange(offset: style.offset, length: style.length, count: count) else { continue }
+            // Widen to whole characters when an offset lands inside a surrogate pair.
+            if range.lowerBound > 0, UTF16.isTrailSurrogate(units[range.lowerBound]) { range = (range.lowerBound - 1)..<range.upperBound }
+            if range.upperBound < count, UTF16.isTrailSurrogate(units[range.upperBound]) { range = range.lowerBound..<(range.upperBound + 1) }
+            let lowerIndex = String.Index(utf16Offset: range.lowerBound, in: plain)
+            let upperIndex = String.Index(utf16Offset: range.upperBound, in: plain)
+            guard let lower = AttributedString.Index(lowerIndex, within: attributed),
+                  let upper = AttributedString.Index(upperIndex, within: attributed), lower < upper else { continue }
+            attributed[lower..<upper].link = url
+        }
     }
 
     /// Created once: `NSDataDetector` is expensive to build and immutable (safe to share).

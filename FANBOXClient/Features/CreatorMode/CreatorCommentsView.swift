@@ -62,6 +62,8 @@ private struct CreatorCommentsList: View {
     @State private var replyTarget: Comment?
     @State private var deleteTarget: Comment?
     @State private var errorMessage: String?
+    /// Post to open in the account-aware WebView after a failed native delete (SPEC §21 / §40).
+    @State private var webFallbackPost: (postID: String, creatorID: String)?
     @State private var syncError: RemoteError?
 
     init(account: Account, creatorAccounts: [Account]) {
@@ -167,7 +169,17 @@ private struct CreatorCommentsList: View {
         } message: { comment in
             Text("\(comment.authorName): \(comment.body)")
         }
-        .alert("エラー", isPresented: Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })) {
+        .alert("エラー", isPresented: Binding(get: { errorMessage != nil }, set: { if !$0 {
+            errorMessage = nil
+            webFallbackPost = nil
+        } })) {
+            if let target = webFallbackPost {
+                Button("Web で開く") {
+                    env.web.openWeb(account: accountID, destination: .post(creatorID: target.creatorID, postID: target.postID),
+                                    purpose: .fallback(reason: "コメントの削除"))
+                }
+                .accessibilityIdentifier("creatorCommentsOpenWeb")
+            }
             Button("OK", role: .cancel) {}
         } message: {
             Text(errorMessage ?? "")
@@ -212,10 +224,14 @@ private struct CreatorCommentsList: View {
     private func delete(_ comment: Comment) {
         let commentID = comment.commentID
         let postID = comment.postID
+        let creatorID = comment.creatorID ?? env.store.post(id: postID)?.creatorID
         Task {
             if let error = await env.sync.deleteComment(commentID: commentID, postID: postID, accountID: accountID) {
-                if case .unsupported = error {
-                    errorMessage = "この削除はアプリから行えません。Web で操作してください。"
+                // Unsupported / refused by the API (e.g. deleting another user's comment on my post): the web UI of this
+                // creator account is the fallback.
+                if PostAccountLogic.commentOperationOffersWeb(error), let creatorID {
+                    webFallbackPost = (postID, creatorID)
+                    errorMessage = "アプリから削除できませんでした（\(error.userMessage)）。Web で開いて、このアカウントで操作できます。"
                 } else {
                     errorMessage = "削除できませんでした: \(error.userMessage)"
                 }

@@ -15,10 +15,13 @@ struct MediaRequest: Sendable, Hashable {
     var accountID: String?
     /// Pin the cached file (offline saved content).
     var pin: Bool
+    /// Decode (downsample) size for `MediaService.image`. nil = the fetched variant. Lets a small tile show a larger
+    /// variant (e.g. FANBOX images that only have display / original URLs) without holding a 1600 px bitmap.
+    var decodeAs: MediaVariant?
 
     init(url: String, variant: MediaVariant, kind: MediaKind = .image, trigger: MediaTrigger = .automatic,
          priority: RequestPriority = .foregroundMedia, postID: String? = nil, creatorID: String? = nil, accountID: String? = nil,
-         pin: Bool = false) {
+         pin: Bool = false, decodeAs: MediaVariant? = nil) {
         self.url = url
         self.variant = variant
         self.kind = kind
@@ -28,7 +31,11 @@ struct MediaRequest: Sendable, Hashable {
         self.creatorID = creatorID
         self.accountID = accountID
         self.pin = pin
+        self.decodeAs = decodeAs
     }
+
+    /// Size the image is decoded at: never larger than the fetched variant.
+    var decodeVariant: MediaVariant { min(decodeAs ?? variant, variant) }
 }
 
 struct CacheUsage: Sendable, Equatable {
@@ -38,10 +45,13 @@ struct CacheUsage: Sendable, Equatable {
     var fileCount: Int = 0
 }
 
-/// Staged media loading + file cache (SPEC §6 / §32).
+/// Staged media loading + file cache (SPEC §6 / §31 / §32).
 /// - Consults `MediaPolicy` before any network fetch; offline / manual-only returns cached data or throws `.blockedByPolicy`.
-/// - Files live under Caches/Media with Data Protection; `MediaCacheEntry` rows track them.
-/// - Eviction order: unpinned → old → original → display → thumbnail. Text is never evicted here.
+/// - Ordinary files live under Caches/Media; pinned (saved) files under Application Support/OfflineMedia so the OS never
+///   purges them. Both use Data Protection; `MediaCacheEntry` rows track them.
+/// - Eviction order: unpinned → old → original → display → thumbnail. Text is never evicted here. When saved (pinned)
+///   media has to go (over capacity, or files vanished), the post's offline state is released so the UI never claims
+///   "Offline" for images that are gone.
 @MainActor
 @Observable
 final class MediaService {
@@ -66,12 +76,13 @@ final class MediaService {
     /// url → cached variants. Avoids scanning `MediaCacheEntry.url` (not indexed) on every lookup. Built lazily.
     @ObservationIgnored private var urlIndex: [String: Set<MediaVariant>]?
 
-    init(store: LocalStore, http: HTTPClient, network: NetworkModeController, settings: AppSettings, cacheRoot: URL? = nil) {
+    init(store: LocalStore, http: HTTPClient, network: NetworkModeController, settings: AppSettings, cacheRoot: URL? = nil,
+         pinnedRoot: URL? = nil) {
         self.store = store
         self.http = http
         self.network = network
         self.settings = settings
-        self.fileCache = MediaFileCache(root: cacheRoot ?? MediaFileCache.defaultRoot)
+        self.fileCache = MediaFileCache(root: cacheRoot ?? MediaFileCache.defaultRoot, pinnedRoot: pinnedRoot)
         let cache = NSCache<NSString, UIImage>()
         cache.totalCostLimit = 96 * 1024 * 1024
         cache.countLimit = 400
@@ -174,18 +185,19 @@ final class MediaService {
         return fileURL
     }
 
-    /// Decoded image for display (downsampled for thumbnail/display variants).
+    /// Decoded image for display (downsampled to `request.decodeVariant`).
     func image(_ request: MediaRequest) async throws -> UIImage {
         guard request.kind == .image else { throw RemoteError.invalidRequest("画像ではありません") }
-        let memoryKey = Self.memoryKey(url: request.url, variant: request.variant)
+        let memoryKey = Self.memoryKey(url: request.url, variant: request.decodeVariant)
         if let cached = memoryCache.object(forKey: memoryKey) {
             if request.pin { applyOwnership(url: request.url, variant: request.variant, request: request) }
             return cached
         }
         let fileURL = try await load(request)
         let variant = request.variant
+        let decodeVariant = request.decodeVariant
         let decoded = await Task.detached(priority: .userInitiated) {
-            ImageDownsampler.decode(fileURL: fileURL, variant: variant)
+            ImageDownsampler.decode(fileURL: fileURL, variant: decodeVariant)
         }.value
         guard let decoded else {
             // Corrupt / non-image payload: drop file + row so the next attempt re-fetches.
@@ -210,11 +222,14 @@ final class MediaService {
         memoryCachedImageWithVariant(urls: urls, upTo: maxVariant)?.image
     }
 
+    /// Variants above `maxVariant` in `urls` are looked up at the capped decode size (see `MediaRequest.decodeAs`);
+    /// the returned variant is the fetched one.
     func memoryCachedImageWithVariant(urls: [MediaVariant: String], upTo maxVariant: MediaVariant)
         -> (variant: MediaVariant, image: UIImage)? {
-        for variant in MediaVariant.allCases.reversed() where variant <= maxVariant {
+        for variant in MediaVariant.allCases.reversed() {
             guard let url = urls[variant] else { continue }
-            if let image = memoryCache.object(forKey: Self.memoryKey(url: url, variant: variant)) { return (variant, image) }
+            let decoded = min(variant, maxVariant)
+            if let image = memoryCache.object(forKey: Self.memoryKey(url: url, variant: decoded)) { return (variant, image) }
         }
         return nil
     }
@@ -255,6 +270,7 @@ final class MediaService {
         refreshUsage()
     }
 
+    /// `includePinned == false` keeps every saved post's media (explicit, "recent N" and auto-saved posts are pinned).
     func clearAll(includePinned: Bool) {
         if includePinned {
             for entry in store.fetch(FetchDescriptor<MediaCacheEntry>()) {
@@ -276,10 +292,13 @@ final class MediaService {
         refreshUsage()
     }
 
-    /// Deletes one cached file (e.g. from the Offline Library "Files" list).
+    /// Deletes one cached file (e.g. from the Offline Library "Files" list). Deleting a saved file releases the
+    /// post's offline state (it is no longer complete offline).
     func removeEntry(key: String) {
         guard let entry = store.first(#Predicate<MediaCacheEntry> { $0.key == key }) else { return }
+        let releasedPost = entry.isPinned ? entry.postID : nil
         remove(entry)
+        if let releasedPost { releaseOfflineState(postIDs: [releasedPost]) }
         store.save()
         refreshUsage()
     }
@@ -315,12 +334,32 @@ final class MediaService {
         }
         let victims = Set(MediaEvictionPlanner.victims(candidates, limit: limit))
         guard !victims.isEmpty else { return }
+        var releasedPosts: Set<String> = []
         for entry in entries where victims.contains(entry.key) {
+            if entry.isPinned, let postID = entry.postID { releasedPosts.insert(postID) }
             remove(entry)
         }
+        // Saved media had to go (pinned data alone exceeds the capacity): those posts are no longer fully offline.
+        releaseOfflineState(postIDs: releasedPosts)
         store.save()
         refreshUsage()
-        AppLog.media.info("evicted \(victims.count, privacy: .public) cached media files")
+        AppLog.media.info("evicted \(victims.count, privacy: .public) cached media files (\(releasedPosts.count, privacy: .public) saved posts released)")
+    }
+
+    /// Resets the offline state of posts whose saved media is (partly) gone and unpins what is left of it, so the post
+    /// no longer shows "Offline" and its remaining files become ordinary cache. Text is kept. Caller saves.
+    func releaseOfflineState(postIDs: Set<String>) {
+        guard !postIDs.isEmpty else { return }
+        let ids = Array(postIDs)
+        for post in store.fetch(FetchDescriptor<Post>(predicate: #Predicate { ids.contains($0.postID) })) where post.offlineState != .none {
+            post.offlineState = .none
+        }
+        for postID in ids {
+            for entry in entries(postID: postID) where entry.isPinned {
+                entry.isPinned = false
+                relocate(entry)
+            }
+        }
     }
 
     func isCached(postID: String) -> Bool {
@@ -329,18 +368,34 @@ final class MediaService {
         return ((try? store.context.fetchCount(descriptor)) ?? 0) > 0
     }
 
-    /// Removes rows whose files vanished and files without rows (e.g. after a crash mid-write). Never touches text data.
+    /// Removes rows whose files vanished and files without rows (e.g. after a crash mid-write), and moves files whose
+    /// location does not match their pin state (older builds kept pinned files in Caches). Posts whose saved files
+    /// vanished (e.g. purged by iOS before they moved out of Caches) lose their offline state. Never touches text data.
     func reconcile() async {
         let cache = fileCache
         let cutoff = Date.now.addingTimeInterval(-300)
         let onDisk = await Task.detached(priority: .background) { cache.relativePaths(modifiedBefore: cutoff) }.value
         let entries = store.fetch(FetchDescriptor<MediaCacheEntry>())
-        let known = Set(entries.map(\.relativePath))
         var changed = false
-        for entry in entries where !cache.exists(relativePath: entry.relativePath) {
-            indexRemove(url: entry.url, variant: entry.variant)
-            store.context.delete(entry)
-            changed = true
+        var releasedPosts: Set<String> = []
+        var known: Set<String> = []
+        for entry in entries {
+            if !cache.exists(relativePath: entry.relativePath) {
+                if entry.isPinned, let postID = entry.postID { releasedPosts.insert(postID) }
+                indexRemove(url: entry.url, variant: entry.variant)
+                store.context.delete(entry)
+                changed = true
+                continue
+            }
+            if entry.isPinned != MediaFileCache.isPinnedPath(entry.relativePath) {
+                relocate(entry)
+                changed = true
+            }
+            known.insert(entry.relativePath)
+        }
+        if !releasedPosts.isEmpty {
+            releaseOfflineState(postIDs: releasedPosts)
+            AppLog.media.info("saved media vanished for \(releasedPosts.count, privacy: .public) posts; offline state released")
         }
         let orphans = onDisk.filter { !known.contains($0) }
         if !orphans.isEmpty {
@@ -357,7 +412,9 @@ final class MediaService {
     // MARK: - Private
 
     private func fetchAndStore(_ request: MediaRequest, key: String) async throws -> URL {
-        let relativePath = MediaFileCache.relativePath(url: request.url, variant: request.variant, kind: request.kind)
+        // Saved media goes straight to the pinned (non-purgeable) root.
+        let pinned = request.pin || store.first(#Predicate<MediaCacheEntry> { $0.key == key })?.isPinned == true
+        let relativePath = MediaFileCache.relativePath(url: request.url, variant: request.variant, kind: request.kind, pinned: pinned)
         let cache = fileCache
         let byteSize: Int
         if DemoMediaRenderer.canRender(request.url) {
@@ -397,6 +454,12 @@ final class MediaService {
             if request.pin { existing.isPinned = true }
             if existing.postID == nil { existing.postID = request.postID }
             if existing.creatorID == nil { existing.creatorID = request.creatorID }
+            // The pin state may have changed while downloading.
+            relocate(existing)
+            store.save()
+            indexInsert(url: request.url, variant: request.variant)
+            scheduleMaintenance()
+            return fileCache.fileURL(relativePath: existing.relativePath)
         } else {
             let entry = MediaCacheEntry(key: key, url: request.url, variant: request.variant, kind: request.kind,
                                         relativePath: relativePath, byteSize: byteSize, postID: request.postID,
@@ -427,7 +490,10 @@ final class MediaService {
     private func applyOwnership(url: String, variant: MediaVariant, request: MediaRequest) {
         guard request.pin || request.postID != nil || request.creatorID != nil,
               let entry = cachedEntry(url: url, variant: variant) else { return }
-        if request.pin, !entry.isPinned { entry.isPinned = true }
+        if request.pin, !entry.isPinned {
+            entry.isPinned = true
+            relocate(entry)
+        }
         if entry.postID == nil, let postID = request.postID { entry.postID = postID }
         if entry.creatorID == nil, let creatorID = request.creatorID { entry.creatorID = creatorID }
     }
@@ -436,11 +502,22 @@ final class MediaService {
         var changed = false
         for entry in entries(postID: postID) where entry.isPinned != pinned {
             entry.isPinned = pinned
+            relocate(entry)
             changed = true
         }
         if changed {
             store.save()
             refreshUsage()
+        }
+    }
+
+    /// Moves the entry's file to the root matching its pin state (pinned → Application Support, else Caches) and
+    /// updates `relativePath`. A missing file keeps the old path (reconcile / the next lookup drops the row).
+    private func relocate(_ entry: MediaCacheEntry) {
+        let target = MediaFileCache.relocatedPath(entry.relativePath, pinned: entry.isPinned)
+        guard target != entry.relativePath else { return }
+        if fileCache.moveFile(from: entry.relativePath, to: target) {
+            entry.relativePath = target
         }
     }
 
@@ -450,11 +527,13 @@ final class MediaService {
         if now.timeIntervalSince(entry.lastAccessedAt) > 60 { entry.lastAccessedAt = now }
     }
 
-    /// Deletes the row of a file that no longer exists.
+    /// Deletes the row of a file that no longer exists (a saved file that vanished releases its post's offline state).
     private func forget(_ entry: MediaCacheEntry) {
+        let releasedPost = entry.isPinned ? entry.postID : nil
         purgeMemory(url: entry.url)
         indexRemove(url: entry.url, variant: entry.variant)
         store.context.delete(entry)
+        if let releasedPost { releaseOfflineState(postIDs: [releasedPost]) }
         store.save()
     }
 

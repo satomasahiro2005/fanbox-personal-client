@@ -37,6 +37,9 @@ final class SyncEngine {
     @ObservationIgnored let network: NetworkModeController
     /// Called with ids of newly detected NotificationEvents (wired to NotificationService by AppEnvironment).
     @ObservationIgnored var onNewNotificationEvents: (([String]) async -> Void)?
+    /// Called once per finished (coalesced) `sync`, success or failure. Wired by AppEnvironment to the offline
+    /// "recent N" rules and media prefetch; implementations must not block (they schedule their own work).
+    @ObservationIgnored var onSyncFinished: ((SyncOutcome, SyncReason) -> Void)?
 
     /// Hard cap for differential feed paging (SPEC §3.7: never crawl history).
     static let maxFeedPages = 3
@@ -88,6 +91,7 @@ final class SyncEngine {
             }
             self.inFlight[key] = nil
             self.endActivity()
+            self.onSyncFinished?(outcome, reason)
             // Notification pipeline runs after the coalesced sync finished (no re-entrancy into this key).
             if !deliver.isEmpty, let callback = self.onNewNotificationEvents {
                 await callback(deliver)

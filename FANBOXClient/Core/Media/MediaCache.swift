@@ -1,25 +1,50 @@
 import CryptoKit
 import Foundation
 
-/// On-disk layout of the media file cache (SPEC §32 / §39).
+/// On-disk layout of the media file cache (SPEC §31 / §32 / §39).
 ///
-///     Caches/Media/<variant>/<sha256(url)>.<ext>
+///     Caches/Media/<variant>/<sha256(url)>.<ext>                        ordinary (evictable) cache
+///     Application Support/OfflineMedia/<variant>/<sha256(url)>.<ext>    pinned = explicitly / automatically saved media
 ///
+/// - Pinned files live outside Caches so iOS never purges saved offline content under storage pressure; that
+///   directory is excluded from backups (it can always be re-downloaded). `MediaCacheEntry.relativePath` of a pinned
+///   entry starts with `pinnedPrefix`, so one path string always resolves to exactly one file.
 /// - Files are protected with `completeUntilFirstUserAuthentication` so background refresh can still read them.
 /// - Pure value type: safe to use from detached tasks for file I/O off the main actor.
 /// - Only media files live here. Text (post bodies, comments, metadata) lives in SwiftData and is never touched.
 struct MediaFileCache: Sendable {
     let root: URL
+    /// Root for pinned (saved) files. Not purgeable by the OS, excluded from backup.
+    let pinnedRoot: URL
 
     static let protection = FileProtectionType.completeUntilFirstUserAuthentication
+    /// `relativePath` prefix of files stored under `pinnedRoot`.
+    static let pinnedPrefix = "pinned/"
 
     static var defaultRoot: URL {
         FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Media", isDirectory: true)
     }
 
-    init(root: URL = MediaFileCache.defaultRoot) {
+    static var defaultPinnedRoot: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("OfflineMedia", isDirectory: true)
+    }
+
+    /// Pinned root used next to a custom cache root (tests): a sibling directory "<root>-Pinned".
+    static func pinnedRoot(besides root: URL) -> URL {
+        root.deletingLastPathComponent().appendingPathComponent(root.lastPathComponent + "-Pinned", isDirectory: true)
+    }
+
+    init(root: URL = MediaFileCache.defaultRoot, pinnedRoot: URL? = nil) {
         self.root = root
+        if let pinnedRoot {
+            self.pinnedRoot = pinnedRoot
+        } else if root == MediaFileCache.defaultRoot {
+            self.pinnedRoot = MediaFileCache.defaultPinnedRoot
+        } else {
+            self.pinnedRoot = MediaFileCache.pinnedRoot(besides: root)
+        }
     }
 
     // MARK: - Naming
@@ -55,12 +80,25 @@ struct MediaFileCache: Sendable {
         return ext
     }
 
-    static func relativePath(url: String, variant: MediaVariant, kind: MediaKind) -> String {
-        "\(variant.rawValue)/\(hash(url)).\(fileExtension(for: url, kind: kind))"
+    static func relativePath(url: String, variant: MediaVariant, kind: MediaKind, pinned: Bool = false) -> String {
+        (pinned ? pinnedPrefix : "") + "\(variant.rawValue)/\(hash(url)).\(fileExtension(for: url, kind: kind))"
+    }
+
+    static func isPinnedPath(_ relativePath: String) -> Bool {
+        relativePath.hasPrefix(pinnedPrefix)
+    }
+
+    /// The same file name under the other storage root (pinned ⇄ ordinary cache).
+    static func relocatedPath(_ relativePath: String, pinned: Bool) -> String {
+        let bare = isPinnedPath(relativePath) ? String(relativePath.dropFirst(pinnedPrefix.count)) : relativePath
+        return pinned ? pinnedPrefix + bare : bare
     }
 
     func fileURL(relativePath: String) -> URL {
-        root.appendingPathComponent(relativePath, isDirectory: false)
+        if Self.isPinnedPath(relativePath) {
+            return pinnedRoot.appendingPathComponent(String(relativePath.dropFirst(Self.pinnedPrefix.count)), isDirectory: false)
+        }
+        return root.appendingPathComponent(relativePath, isDirectory: false)
     }
 
     // MARK: - File operations (callable off the main actor)
@@ -70,6 +108,35 @@ struct MediaFileCache: Sendable {
         let fm = FileManager.default
         if !fm.fileExists(atPath: dir.path) {
             try fm.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.protectionKey: Self.protection])
+        }
+        if Self.isPinnedPath(relativePath) { excludePinnedRootFromBackup() }
+    }
+
+    /// Saved media can always be downloaded again: keep it out of iCloud / device backups (Apple storage guidelines).
+    private func excludePinnedRootFromBackup() {
+        var url = pinnedRoot
+        if (try? url.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup) == true { return }
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        try? url.setResourceValues(values)
+    }
+
+    /// Moves a cached file between the two roots (a rename inside the app container). Returns false when the source
+    /// is missing; an existing destination is replaced.
+    @discardableResult
+    func moveFile(from source: String, to destination: String) -> Bool {
+        guard source != destination else { return exists(relativePath: source) }
+        let fm = FileManager.default
+        let from = fileURL(relativePath: source)
+        guard fm.fileExists(atPath: from.path) else { return false }
+        do {
+            try ensureDirectory(for: destination)
+            let to = fileURL(relativePath: destination)
+            if fm.fileExists(atPath: to.path) { try? fm.removeItem(at: to) }
+            try fm.moveItem(at: from, to: to)
+            return true
+        } catch {
+            return false
         }
     }
 
@@ -110,29 +177,35 @@ struct MediaFileCache: Sendable {
         try? FileManager.default.removeItem(at: fileURL(relativePath: relativePath))
     }
 
-    /// Atomically detaches the whole cache directory (rename) and deletes it in the background.
+    /// Atomically detaches both cache directories (rename) and deletes them in the background.
     func removeEverything() {
-        let fm = FileManager.default
-        guard fm.fileExists(atPath: root.path) else { return }
-        let trash = root.deletingLastPathComponent()
-            .appendingPathComponent(".media-trash-\(UUID().uuidString)", isDirectory: true)
-        do {
-            try fm.moveItem(at: root, to: trash)
-            Task.detached(priority: .background) {
-                try? FileManager.default.removeItem(at: trash)
+        for directory in [root, pinnedRoot] {
+            let fm = FileManager.default
+            guard fm.fileExists(atPath: directory.path) else { continue }
+            let trash = directory.deletingLastPathComponent()
+                .appendingPathComponent(".media-trash-\(UUID().uuidString)", isDirectory: true)
+            do {
+                try fm.moveItem(at: directory, to: trash)
+                Task.detached(priority: .background) {
+                    try? FileManager.default.removeItem(at: trash)
+                }
+            } catch {
+                try? fm.removeItem(at: directory)
             }
-        } catch {
-            try? fm.removeItem(at: root)
         }
     }
 
-    /// Relative paths of files on disk that were last modified before `cutoff`
+    /// Relative paths (pinned ones carry `pinnedPrefix`) of files on disk that were last modified before `cutoff`
     /// (recent files are skipped so an in-progress move is never mistaken for an orphan).
     func relativePaths(modifiedBefore cutoff: Date) -> [String] {
+        Self.files(in: root, modifiedBefore: cutoff) + Self.files(in: pinnedRoot, modifiedBefore: cutoff).map { Self.pinnedPrefix + $0 }
+    }
+
+    private static func files(in directory: URL, modifiedBefore cutoff: Date) -> [String] {
         let fm = FileManager.default
-        guard let enumerator = fm.enumerator(at: root, includingPropertiesForKeys: [.isRegularFileKey, .contentModificationDateKey],
+        guard let enumerator = fm.enumerator(at: directory, includingPropertiesForKeys: [.isRegularFileKey, .contentModificationDateKey],
                                              options: [.skipsHiddenFiles]) else { return [] }
-        let rootPath = root.standardizedFileURL.path
+        let rootPath = directory.standardizedFileURL.path
         var result: [String] = []
         for case let url as URL in enumerator {
             guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .contentModificationDateKey]),

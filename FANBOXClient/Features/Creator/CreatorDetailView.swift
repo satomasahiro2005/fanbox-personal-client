@@ -48,7 +48,8 @@ struct CreatorDetailView: View {
         _supportRows = Query(filter: #Predicate<Support> { $0.creatorID == creatorID })
         _plans = Query(filter: #Predicate<Plan> { $0.creatorID == creatorID },
                        sort: [SortDescriptor(\Plan.fee), SortDescriptor(\Plan.sortOrder)])
-        _posts = Query(FetchDescriptorFactory.postsByCreator(creatorID))
+        // Reader page: my own FANBOX drafts / scheduled posts are Creator Mode only.
+        _posts = Query(ReaderPostQueries.byCreator(creatorID))
     }
 
     private var creator: Creator? { creatorRows.first }

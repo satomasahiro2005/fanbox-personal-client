@@ -141,6 +141,8 @@ struct PostDetailGalleryView: View {
                         Color.clear
                             .aspectRatio(1, contentMode: .fit)
                             .overlay {
+                                // FANBOX images have no thumbnail URL: the tile then loads the display image under the
+                                // display policy (manual in Extreme) and decodes it at thumbnail size (RemoteImageSources).
                                 RemoteImageView(thumbnailURL: block.thumbnailURL, displayURL: block.displayURL, originalURL: block.originalURL,
                                                 maxVariant: .thumbnail, postID: context.postID, creatorID: context.creatorID,
                                                 accountID: context.accountID, contentMode: .fill)

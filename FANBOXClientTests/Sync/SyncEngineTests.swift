@@ -112,7 +112,10 @@ final class SyncEngineTests: XCTestCase {
         let post = try XCTUnwrap(h.store.post(id: "p1"))
         XCTAssertEqual(post.bodyText, "B で読める本文")
         XCTAssertEqual(post.detailAccountID, b.id)
-        XCTAssertEqual(h.mock.calls.filter { $0.hasPrefix("post|") }, ["post|\(a.id)|p1", "post|\(b.id)|p1"])
+        // Updated for the tri-state ranking (SPEC §8): B (access unknown) ranks above the main account A, whose listing
+        // already said "restricted", so B is fetched directly and A is not tried at all (it used to be fetched first).
+        // The restricted-first fallback itself is covered by FixReaderHomeTests.testAutomaticRefreshFallsBackToAnotherAccount.
+        XCTAssertEqual(h.mock.calls.filter { $0.hasPrefix("post|") }, ["post|\(b.id)|p1"])
         XCTAssertEqual(h.store.postAccesses(postID: "p1").first { $0.accountID == b.id }?.bodyCached, true)
 
         // Explicit account: no fallback.

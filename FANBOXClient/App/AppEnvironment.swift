@@ -24,6 +24,7 @@ final class AppEnvironment {
     @ObservationIgnored let notifications: NotificationService
     @ObservationIgnored let media: MediaService
     @ObservationIgnored let offline: OfflineLibraryService
+    @ObservationIgnored let prefetcher: MediaPrefetcher
     @ObservationIgnored let web: WebBridge
     @ObservationIgnored let webSessions: WebSessionStore
     @ObservationIgnored let accounts: AccountService
@@ -51,6 +52,7 @@ final class AppEnvironment {
         notifications = NotificationService(store: store, engine: sync, replies: replies, router: router, settings: settings)
         media = MediaService(store: store, http: http, network: networkMode, settings: settings)
         offline = OfflineLibraryService(store: store, engine: sync, media: media, settings: settings)
+        prefetcher = MediaPrefetcher(store: store, media: media)
         web = WebBridge()
         webSessions = WebSessionStore()
         accounts = AccountService(store: store, credentials: credentials, webSessions: webSessions, remote: remote)
@@ -67,6 +69,13 @@ final class AppEnvironment {
     private func wire() {
         sync.onNewNotificationEvents = { [weak self] ids in
             await self?.notifications.process(newEventIDs: ids)
+            // Text is local now (Priority 0/1); avatars / thumbnails / display images follow at mediaPrefetch (SPEC §25).
+            self?.prefetcher.notificationEventsProcessed(ids)
+        }
+        sync.onSyncFinished = { [weak self] outcome, reason in
+            // Offline "recent N" rules keep applying to new posts (SPEC §31); Normal-mode media prefetch (SPEC §30).
+            self?.offline.syncFinished(outcome, reason: reason)
+            self?.prefetcher.syncFinished(outcome, reason: reason)
         }
         networkMode.onConnectivityRestored = { [weak self] in
             self?.replies.handleConnectivityRestored()

@@ -5,8 +5,12 @@ import UIKit
 ///
 /// - Shows the best cached image instantly (memory cache in `body`; disk-cached files are decoded off the main thread),
 ///   then progressively loads higher variants up to `maxVariant` through `MediaService` (network-mode policy, SPEC §30).
+/// - No URL at or below `maxVariant` (FANBOX images have no thumbnail URL): the smallest larger variant is used, fetched
+///   under its real variant (its own policy applies, e.g. "タップして読み込み" in Extreme) and decoded at `maxVariant` size.
 /// - Manual-only (e.g. Extreme / Low Data originals): shows "タップして読み込み"; the tap loads with trigger `.manual`.
-/// - Blocked / Offline: keeps whatever is cached, otherwise a placeholder with an offline glyph.
+/// - Blocked / Offline: keeps whatever is cached, otherwise a placeholder with an offline glyph; reloads by itself when
+///   connectivity returns.
+/// - Failed: one automatic retry for transient errors, then a tap-to-retry control.
 struct RemoteImageView: View {
     var thumbnailURL: String?
     var displayURL: String?
@@ -30,7 +34,14 @@ struct RemoteImageView: View {
     @State private var phase: RemoteImagePhase = .idle
     @State private var trigger: MediaTrigger = .automatic
     @State private var manualNonce = 0
+    /// Bumped to re-run the load after a failure (automatic retry once, then the retry button).
+    @State private var retryNonce = 0
+    @State private var autoRetries = 0
     @State private var width: CGFloat = 0
+
+    /// Automatic retries after a transient failure (per URL set).
+    static let maxAutoRetries = 1
+    static let autoRetryDelay: Duration = .seconds(2)
 
     init(thumbnailURL: String? = nil, displayURL: String? = nil, originalURL: String? = nil, maxVariant: MediaVariant = .display,
          postID: String? = nil, creatorID: String? = nil, accountID: String? = nil, contentMode: ContentMode = .fill,
@@ -48,17 +59,14 @@ struct RemoteImageView: View {
         self.placeholderSystemImage = placeholderSystemImage
     }
 
-    /// Non-nil URLs of the variants this view may show (≤ maxVariant).
+    /// URLs this view may load, keyed by their real variant (see `RemoteImageSources`).
     private var urls: [MediaVariant: String] {
-        var map: [MediaVariant: String] = [:]
-        if let thumbnailURL, !thumbnailURL.isEmpty { map[.thumbnail] = thumbnailURL }
-        if maxVariant >= .display, let displayURL, !displayURL.isEmpty { map[.display] = displayURL }
-        if maxVariant >= .original, let originalURL, !originalURL.isEmpty { map[.original] = originalURL }
-        return map
+        RemoteImageSources.make(thumbnail: thumbnailURL, display: displayURL, original: originalURL, maxVariant: maxVariant)
     }
 
     private var loadKey: RemoteImageLoadKey {
-        RemoteImageLoadKey(urls: urls, mode: env.networkMode.effectiveMode, trigger: trigger, nonce: manualNonce)
+        RemoteImageLoadKey(urls: urls, mode: env.networkMode.effectiveMode, online: env.networkMode.isOnline, trigger: trigger,
+                           nonce: manualNonce, retry: retryNonce)
     }
 
     var body: some View {
@@ -97,6 +105,8 @@ struct RemoteImageView: View {
                 Image(systemName: phase == .blocked ? "wifi.slash" : (phase == .failed ? "exclamationmark.triangle" : placeholderSystemImage))
                     .font(width > 0 && width < 60 ? .caption : .title3)
                     .foregroundStyle(.secondary)
+                    // The retry button takes the center when it is shown.
+                    .opacity(phase == .failed && allowsManualLoad ? 0 : 1)
             }
     }
 
@@ -139,7 +149,31 @@ struct RemoteImageView: View {
     private func centerOverlay(hasImage: Bool) -> some View {
         if phase == .manualRequired, !hasImage, allowsManualLoad {
             manualButton(compact: width > 0 && width < 110)
+        } else if phase == .failed, !hasImage, allowsManualLoad {
+            retryButton(compact: width > 0 && width < 110)
         }
+    }
+
+    /// Tap-to-retry after a failed load (connection dropped, timeout, CDN error …).
+    private func retryButton(compact: Bool) -> some View {
+        Button {
+            retryNonce += 1
+        } label: {
+            if compact {
+                Image(systemName: "arrow.clockwise.circle.fill")
+                    .font(.body)
+                    .foregroundStyle(.white, .black.opacity(0.45))
+            } else {
+                Label("再読み込み", systemImage: "arrow.clockwise")
+                    .font(.caption.weight(.semibold))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(.thinMaterial, in: Capsule())
+            }
+        }
+        .buttonStyle(.borderless)
+        .accessibilityLabel(Text("画像を再読み込み"))
+        .accessibilityIdentifier("remoteImageRetry")
     }
 
     private func manualButton(compact: Bool) -> some View {
@@ -173,6 +207,7 @@ struct RemoteImageView: View {
             image = nil
             shownVariant = nil
             loadedURLs = currentURLs
+            autoRetries = 0
         }
         guard !currentURLs.isEmpty else {
             phase = .idle
@@ -217,6 +252,13 @@ struct RemoteImageView: View {
                 } catch {
                     if Task.isCancelled { return }
                     phase = image == nil ? .failed : .idle
+                    // Transient failure (dropped connection, timeout, 5xx): retry once by itself after a short pause.
+                    if autoRetries < Self.maxAutoRetries, RemoteImageSources.isTransient(error) {
+                        autoRetries += 1
+                        try? await Task.sleep(for: Self.autoRetryDelay)
+                        guard !Task.isCancelled else { return }
+                        retryNonce += 1
+                    }
                     return
                 }
             case .manualOnly:
@@ -232,7 +274,7 @@ struct RemoteImageView: View {
 
     private func request(_ variant: MediaVariant, url: String) -> MediaRequest {
         MediaRequest(url: url, variant: variant, kind: .image, trigger: trigger, priority: priority, postID: postID,
-                     creatorID: creatorID, accountID: accountID)
+                     creatorID: creatorID, accountID: accountID, decodeAs: variant > maxVariant ? maxVariant : nil)
     }
 
     private func show(_ decoded: UIImage, variant: MediaVariant) {
@@ -254,8 +296,35 @@ enum RemoteImagePhase: Equatable {
 private struct RemoteImageLoadKey: Hashable {
     var urls: [MediaVariant: String]
     var mode: NetworkMode
+    /// Path / Offline changes re-run the load (a fixed network mode does not change when the path drops).
+    var online: Bool
     var trigger: MediaTrigger
     var nonce: Int
+    var retry: Int
+}
+
+/// Pure source selection for `RemoteImageView` (unit-tested).
+enum RemoteImageSources {
+    /// URLs at or below `maxVariant`. When none exists — FANBOX image blocks carry only display / original URLs — the
+    /// smallest larger variant is used instead, under its real variant key: the network policy of that size applies and
+    /// cached files of it (e.g. Offline-saved display images) are found. The view decodes it at `maxVariant` size.
+    static func make(thumbnail: String?, display: String?, original: String?, maxVariant: MediaVariant) -> [MediaVariant: String] {
+        var all: [MediaVariant: String] = [:]
+        if let thumbnail, !thumbnail.isEmpty { all[.thumbnail] = thumbnail }
+        if let display, !display.isEmpty { all[.display] = display }
+        if let original, !original.isEmpty { all[.original] = original }
+        var map = all.filter { $0.key <= maxVariant }
+        if map.isEmpty, let fallback = MediaVariant.allCases.first(where: { $0 > maxVariant && all[$0] != nil }) {
+            map[fallback] = all[fallback]
+        }
+        return map
+    }
+
+    /// Worth an automatic retry: network / timeout / rate limit / 5xx (anything that is not a definite answer).
+    static func isTransient(_ error: Error) -> Bool {
+        guard let remote = error as? RemoteError else { return !(error is CancellationError) }
+        return remote.isTransient
+    }
 }
 
 /// Circular avatar.

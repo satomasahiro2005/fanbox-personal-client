@@ -57,6 +57,7 @@ struct CacheSettingsSection: View {
             Text("オフライン / キャッシュ")
         } footer: {
             Text("容量を超えると、保存していないもの → 古いもの → Original → Display → Thumbnail の順に削除します。"
+                 + "保存済みのメディアは最後に削除され、その投稿の Offline 保存は解除されます。"
                  + "本文・タイトル・Creator 情報などの軽量データは削除しません。")
         }
         .task { env.media.refreshUsage() }
@@ -118,6 +119,12 @@ enum CacheUsageText {
         return "\(used) / \(Formatters.bytes(limit))"
     }
 
+    /// Saved (pinned) media alone does not fit the capacity: it will be evicted too.
+    static func savedExceedsCapacity(usage: CacheUsage, capacity: CacheCapacity) -> Bool {
+        guard let limit = capacity.bytes else { return false }
+        return usage.pinnedBytes > limit
+    }
+
     /// 0...1, nil when unlimited.
     static func fraction(usage: CacheUsage, capacity: CacheCapacity) -> Double? {
         guard let limit = capacity.bytes, limit > 0 else { return nil }
@@ -132,10 +139,21 @@ struct CacheUsageDetailView: View {
     var body: some View {
         let usage = env.media.usage
         List {
-            Section("合計") {
+            Section {
                 LabeledContent("使用量", value: Formatters.bytes(usage.totalBytes))
                 LabeledContent("ファイル数", value: "\(usage.fileCount)")
-                LabeledContent("保存済み（削除対象外）", value: Formatters.bytes(usage.pinnedBytes))
+                LabeledContent("保存済み", value: Formatters.bytes(usage.pinnedBytes))
+                if CacheUsageText.savedExceedsCapacity(usage: usage, capacity: env.settings.cacheCapacity) {
+                    Label("保存済みのメディアがキャッシュ容量を超えています。古いものから削除され、その投稿の Offline 保存は解除されます。",
+                          systemImage: "exclamationmark.triangle")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .accessibilityIdentifier("cacheSavedOverCapacity")
+                }
+            } header: {
+                Text("合計")
+            } footer: {
+                Text("保存済み（この投稿・Creator の最近 N 件・自動保存）は、容量を超えたときに最後に削除されます。")
             }
             Section("種類別") {
                 ForEach(MediaVariant.allCases.sorted(by: >), id: \.self) { variant in

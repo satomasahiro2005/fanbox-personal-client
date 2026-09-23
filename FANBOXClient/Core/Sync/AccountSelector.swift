@@ -23,15 +23,26 @@ enum AccountSelector {
         return usable.sorted(by: isPreferred).first?.accountID
     }
 
-    /// Strict ordering used by `select`.
+    /// Strict ordering used by `select` (and by the engine's cross-account fallback order).
     static func isPreferred(_ a: AccountCandidate, over b: AccountCandidate) -> Bool {
         if a.isCached != b.isCached { return a.isCached }
-        let av = a.canView == true, bv = b.canView == true
-        if av != bv { return av }
+        // Tri-state: can view > unknown > known restricted. An account that never listed the post may well be able to
+        // read it; one that got a restricted copy cannot.
+        let av = viewScore(a.canView), bv = viewScore(b.canView)
+        if av != bv { return av > bv }
         if a.sessionValid != b.sessionValid { return a.sessionValid }
         if a.planFee != b.planFee { return a.planFee > b.planFee }
         if a.isMain != b.isMain { return a.isMain }
         return a.accountID < b.accountID
+    }
+
+    /// true = 2, unknown = 1, false = 0.
+    static func viewScore(_ canView: Bool?) -> Int {
+        switch canView {
+        case true?: return 2
+        case nil: return 1
+        case false?: return 0
+        }
     }
 
     @MainActor
