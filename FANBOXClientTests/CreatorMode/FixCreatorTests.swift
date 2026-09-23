@@ -45,8 +45,12 @@ final class FixCreatorFanboxHarness {
 
     var http: FanboxFakeHTTPClient { fanbox.http }
 
-    /// Text of every multipart body sent (post.update forms).
-    var updateBodies: [String] { http.uploadBodies.map { String(data: $0, encoding: .utf8) ?? "" } }
+    /// Text of every multipart body sent (post.update forms). Forms without file parts are sent from memory through
+    /// `send` (the CSRF token never touches disk), forms with files through `upload`.
+    var updateBodies: [String] {
+        let inMemory = http.requests(for: "post.update").compactMap(\.body)
+        return (inMemory + http.uploadBodies).map { String(data: $0, encoding: .utf8) ?? "" }
+    }
 
     func cleanUp() { try? FileManager.default.removeItem(at: root) }
 }
@@ -438,8 +442,9 @@ final class FixCreatorTests: XCTestCase {
         XCTAssertEqual(h.remote.snapshot.dashboardCalls, 2)
 
         let now = Date()
-        XCTAssertTrue(CreatorReadPolicy.isFresh(.fans, scope: "", reason: .onDemand, lastSuccess: now.addingTimeInterval(-23 * 3600), now: now))
-        XCTAssertFalse(CreatorReadPolicy.isFresh(.fans, scope: "", reason: .onDemand, lastSuccess: now.addingTimeInterval(-25 * 3600), now: now))
+        // The fan list is throttled inside SyncEngine (fansOnDemandInterval / fansAutomaticInterval, asserted above).
+        XCTAssertTrue(CreatorReadPolicy.isFresh(.creatorDashboard, scope: "", reason: .onDemand, lastSuccess: now.addingTimeInterval(-5 * 60), now: now))
+        XCTAssertFalse(CreatorReadPolicy.isFresh(.creatorDashboard, scope: "", reason: .onDemand, lastSuccess: now.addingTimeInterval(-11 * 60), now: now))
         XCTAssertFalse(CreatorReadPolicy.isFresh(.creatorComments, scope: "", reason: .onDemand, lastSuccess: now.addingTimeInterval(-11 * 60), now: now))
         XCTAssertFalse(CreatorReadPolicy.isFresh(.creatorPosts, scope: "someone", reason: .onDemand, lastSuccess: now, now: now),
                        "reader creator pages are not throttled here")

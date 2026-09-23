@@ -165,9 +165,9 @@ final class FixSupportSyncTests: XCTestCase {
         h.mock.update { $0.supports[a.id] = [SyncFixtures.support("c1", plan: "p2", fee: 1_000)] }
         await h.engine.sync(.supports, accountID: a.id, reason: .afterWrite)
         let rows = history(h.store, creatorID: "c1")
-        XCTAssertEqual(rows.map(\.kind), [.started, .planChanged])
+        // The first sync is a baseline (supports that already existed are not "支援開始"), so only the change is recorded.
+        XCTAssertEqual(rows.map(\.kind), [.planChanged])
         XCTAssertEqual(rows.last?.observedSource, .webBridge)
-        XCTAssertEqual(rows.first?.observedSource, .sync)
         XCTAssertEqual(h.mock.count("following|"), 0, "no support vanished → listFollowing is not read")
     }
 

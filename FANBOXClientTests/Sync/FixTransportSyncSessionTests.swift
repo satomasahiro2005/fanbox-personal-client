@@ -58,8 +58,10 @@ final class FixTransportSyncSessionTests: XCTestCase {
             $0.details[b.id] = ["p1": SyncFixtures.detail("p1", text: "B")]
         }
         _ = await h.engine.refreshPost(postID: "p1")
-        XCTAssertEqual(h.mock.calls.filter { $0.hasPrefix("post|") }, ["post|\(a.id)|p1"],
-                       "B supports nothing at ¥500: another post.info would only spend the budget (docs/API.md §1.8)")
+        // Tri-state ranking (AccountSelector): A is KNOWN restricted, B is unknown, so B is asked first and A is never
+        // re-asked. Exactly one post.info is spent (docs/API.md §1.8), on the only account that might be entitled.
+        XCTAssertEqual(h.mock.calls.filter { $0.hasPrefix("post|") }, ["post|\(b.id)|p1"],
+                       "one post.info only, never on the account already known to be restricted")
     }
 
     func testEdgeBlockedDetailDoesNotTryOtherAccounts() async throws {

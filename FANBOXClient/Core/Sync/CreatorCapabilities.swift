@@ -87,7 +87,7 @@ struct RemotePostCreatedPartially: Error, Sendable, Equatable {
 enum CreatorReadPolicy {
     static func minimumInterval(for resource: SyncResource, scope: String) -> TimeInterval? {
         switch resource {
-        case .fans: return 24 * 3600                       // "at most about once a day"
+        // .fans is throttled inside SyncEngine (fansAutomaticInterval / fansOnDemandInterval), not here.
         case .creatorDashboard: return 10 * 60
         case .creatorComments: return 10 * 60
         case .creatorPosts: return scope.isEmpty ? 5 * 60 : nil   // only my own managed list

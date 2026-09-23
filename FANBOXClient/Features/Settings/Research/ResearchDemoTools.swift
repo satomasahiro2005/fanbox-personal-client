@@ -78,7 +78,15 @@ enum ResearchDemoTools {
         case .newsletter:
             label = "おたより \(await world.simulateIncomingNewsletter())"
         }
-        await poll()
+        if action == .newsletter {
+            // Automatic polling reads newsletters at most every `SyncEngine.newsletterPollInterval`; ask explicitly
+            // (the same path as pull-to-refresh in the inbox) so the item arrives now.
+            for account in demoAccounts {
+                await engine.sync(.notifications, accountID: account.id, reason: .userRefresh)
+            }
+        } else {
+            await poll()
+        }
         let created = max(0, eventCount(store) - before)
         return Outcome(message: "\(label) を追加してポーリングしました。新しい通知イベント: \(created) 件", createdEvents: created)
     }

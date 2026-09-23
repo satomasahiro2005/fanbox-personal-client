@@ -127,7 +127,8 @@ final class SyncEngine {
         }
         // Creator reads on screen appear / launch are bounded by a minimum interval (CreatorReadPolicy, docs/API.md §1.8).
         if CreatorReadPolicy.isFresh(resource, scope: scope, reason: reason,
-                                     lastSuccess: store.existingSyncState(accountID: accountID, resource: resource, scope: scope)?.lastSuccessfulSync) {
+                                     lastSuccess: store.existingSyncState(accountID: accountID, resource: resource, scope: scope)?.lastSuccessfulSync,
+                                     now: clock()) {
             return .skipped(resource, accountID: accountID, scope: scope)
         }
 
