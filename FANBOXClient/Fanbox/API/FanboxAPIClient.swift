@@ -56,7 +56,13 @@ final class FanboxAPIClient: Sendable {
     /// GET/POST returning a decoded body DTO.
     func send<Body: FanboxResponseBody>(_ endpoint: FanboxEndpoint, as type: Body.Type, accountID: String?) async throws -> Body {
         let response = try await execute(endpoint, accountID: accountID)
-        return try decode(response, endpoint: endpoint, as: Body.self)
+        do {
+            return try decode(response, endpoint: endpoint, as: Body.self)
+        } catch {
+            // A 2xx response the DTO cannot use is the strongest API-change signal: make it a research event (SPEC §36).
+            inspector.recordFailure(endpointKey: endpoint.key, accountID: accountID, statusCode: response.statusCode, error: error)
+            throw error
+        }
     }
 
     /// Write call whose response content is undocumented; returns the `body` JSON if any.
@@ -65,7 +71,7 @@ final class FanboxAPIClient: Sendable {
         let response = try await execute(endpoint, accountID: accountID)
         guard !response.data.isEmpty, let json = try? JSONValue.parse(response.data) else { return nil }
         if let code = json["error"]?.stringValue, json["body"] == nil {
-            throw FanboxResponseHandling.mapErrorCode(code, statusCode: response.statusCode)
+            throw reportFailure(FanboxResponseHandling.mapErrorCode(code, statusCode: response.statusCode), endpoint, response, accountID)
         }
         observe(endpoint.key, data: response.data, known: [:])
         return json["body"]
@@ -102,11 +108,11 @@ final class FanboxAPIClient: Sendable {
         let endpoint = FanboxEndpoint.homepageMetadata()
         let response = try await execute(endpoint, accountID: accountID, allowCSRFRetry: false)
         guard let html = String(data: response.data, encoding: .utf8) ?? String(data: response.data, encoding: .isoLatin1) else {
-            throw RemoteError.decoding(endpoint: endpoint.key, detail: "HTML を読めません")
+            throw reportFailure(.decoding(endpoint: endpoint.key, detail: "HTML を読めません"), endpoint, response, accountID)
         }
         guard let jsonText = FanboxMetadataParser.metadataJSON(fromHTML: html) else {
             // No metadata: a challenge page or an unexpected layout. Not proof of logout.
-            throw RemoteError.decoding(endpoint: endpoint.key, detail: "metadata が見つかりません")
+            throw reportFailure(.decoding(endpoint: endpoint.key, detail: "metadata が見つかりません"), endpoint, response, accountID)
         }
         let data = Data(jsonText.utf8)
         if let json = try? JSONValue.parse(data) {
@@ -118,7 +124,7 @@ final class FanboxAPIClient: Sendable {
         do {
             metadata = try JSONDecoder().decode(FanboxMetadataDTO.self, from: data)
         } catch {
-            throw RemoteError.decoding(endpoint: endpoint.key, detail: FanboxResponseHandling.describe(error))
+            throw reportFailure(.decoding(endpoint: endpoint.key, detail: FanboxResponseHandling.describe(error)), endpoint, response, accountID)
         }
         // The token is bound to the session that fetched the page: keep the account's stored token current.
         if let token = metadata.csrfToken, let accountID, let credentials {
@@ -184,6 +190,12 @@ final class FanboxAPIClient: Sendable {
         // Observe BEFORE decoding: a schema change that breaks decoding is exactly what the inspector should record.
         observe(endpoint.key, data: response.data, known: Body.responseSchema)
         return try FanboxResponseHandling.decodeBody(Body.self, from: response.data, endpointKey: endpoint.key, statusCode: response.statusCode)
+    }
+
+    /// Records a 2xx response the client could not use as a research event, then returns the error to throw.
+    private func reportFailure(_ error: RemoteError, _ endpoint: FanboxEndpoint, _ response: HTTPResponse, _ accountID: String?) -> RemoteError {
+        inspector.recordFailure(endpointKey: endpoint.key, accountID: accountID, statusCode: response.statusCode, error: error)
+        return error
     }
 
     private func observe(_ key: String, data: Data, known: [String: Set<String>]) {

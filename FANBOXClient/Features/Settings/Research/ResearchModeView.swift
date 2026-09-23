@@ -99,6 +99,10 @@ struct ResearchModeView: View {
                 .accessibilityIdentifier("researchSchedulerLink")
             }
 
+            #if DEBUG
+            ResearchDemoToolsSection()
+            #endif
+
             Section {
                 Button {
                     prepareExport()

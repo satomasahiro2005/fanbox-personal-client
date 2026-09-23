@@ -161,26 +161,28 @@ struct ResearchStatusBadge: View {
 }
 
 /// SPEC §44 Research display: HTTP Status / Endpoint / Method / Safe Response Body / headers / Account / Timestamp.
+///
+/// The row is read once and rendered off the main actor (`ResearchLogRendering`): no `@Query`, so background saves
+/// by the recorder never re-run the redaction / formatting while the screen is open; the pretty-JSON toggle and the
+/// share button only use cached strings; bodies render as lazy rows.
 struct ResearchLogDetailView: View {
     let logID: String
     var focus: ResearchLogListMode = .requests
     @Environment(AppEnvironment.self) private var env
-    @Query private var matches: [ResearchLog]
+    @State private var rendering: ResearchLogRendering?
+    @State private var isMissing = false
     @State private var prettyJSON = true
 
     init(logID: String, focus: ResearchLogListMode = .requests) {
         self.logID = logID
         self.focus = focus
-        _matches = Query(filter: #Predicate<ResearchLog> { $0.id == logID })
     }
 
     var body: some View {
         List {
-            if let log = matches.first {
-                let entry = ResearchLogSnapshot(log, accountName: log.accountID.flatMap { env.store.account(id: $0)?.displayName })
-                let fields = ResearchLogFormatter.fields(for: entry)
+            if let rendering {
                 Section("概要") {
-                    ForEach(fields.filter { !$0.isBlock }) { field in
+                    ForEach(rendering.summary) { field in
                         LabeledContent(field.label) {
                             Text(field.value)
                                 .font(.callout.monospaced())
@@ -189,35 +191,34 @@ struct ResearchLogDetailView: View {
                         }
                     }
                 }
-                ForEach(orderedBlocks(fields)) { field in
-                    Section {
-                        if field.label == "Safe Response Body" {
-                            Toggle("JSON を整形", isOn: $prettyJSON)
-                            BlockText(text: bodyText(entry))
-                        } else {
-                            BlockText(text: field.value)
-                        }
-                    } header: {
-                        Text(field.label)
-                    }
+                if focus == .responses {
+                    bodySection(rendering)
+                    headerSections(rendering)
+                } else {
+                    headerSections(rendering)
+                    bodySection(rendering)
                 }
-                if entry.responseBody.isEmpty && !env.settings.researchModeEnabled {
+                if !rendering.hasBody && !env.settings.researchModeEnabled {
                     Section {
                         Text("Research Mode がオフの間はレスポンス本文を記録しません。").font(.caption).foregroundStyle(.secondary)
                     }
                 }
-            } else {
+            } else if isMissing {
                 EmptyStateView(title: "ログが見つかりません", systemImage: "trash", message: "削除された可能性があります。")
+            } else {
+                HStack {
+                    Spacer()
+                    ProgressView("整形中…")
+                    Spacer()
+                }
             }
         }
         .navigationTitle(focus == .responses ? "Response" : (focus == .navigation ? "Navigation" : "Request"))
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            if let log = matches.first {
+            if let rendering {
                 ToolbarItem(placement: .primaryAction) {
-                    ShareLink(item: ResearchLogFormatter.text(
-                        for: ResearchLogSnapshot(log, accountName: log.accountID.flatMap { env.store.account(id: $0)?.displayName }),
-                        bodyLimit: ResearchLogFormatter.displayBodyLimit)) {
+                    ShareLink(item: rendering.shareText) {
                         Image(systemName: "square.and.arrow.up")
                     }
                     .accessibilityLabel("このログを共有")
@@ -225,20 +226,50 @@ struct ResearchLogDetailView: View {
             }
         }
         .accessibilityIdentifier("researchLogDetail")
+        .task(id: logID) { await load() }
     }
 
-    /// Responses show the body first; requests show request headers first.
-    private func orderedBlocks(_ fields: [ResearchLogFormatter.Field]) -> [ResearchLogFormatter.Field] {
-        let blocks = fields.filter(\.isBlock)
-        guard focus == .responses else { return blocks }
-        let isBody: (ResearchLogFormatter.Field) -> Bool = { $0.label == "Safe Response Body" }
-        return blocks.filter(isBody) + blocks.filter { !isBody($0) }
+    private func headerSections(_ rendering: ResearchLogRendering) -> some View {
+        ForEach(rendering.headerBlocks) { block in
+            Section {
+                ForEach(block.chunks) { chunk in
+                    BlockText(text: chunk.text)
+                }
+            } header: {
+                Text(block.label)
+            }
+        }
     }
 
-    private func bodyText(_ entry: ResearchLogSnapshot) -> String {
-        let result = ResearchLogFormatter.displayBody(entry.responseBody, prettyJSON: prettyJSON)
-        if result.text.isEmpty { return "(なし)" }
-        return result.truncatedCount > 0 ? result.text + "\n… (\(result.truncatedCount) 文字省略)" : result.text
+    private func bodySection(_ rendering: ResearchLogRendering) -> some View {
+        let body = (prettyJSON ? rendering.prettyBody : nil) ?? rendering.plainBody
+        return Section {
+            if rendering.prettyBody != nil {
+                Toggle("JSON を整形", isOn: $prettyJSON)
+            }
+            ForEach(body.chunks) { chunk in
+                BlockText(text: chunk.text)
+            }
+        } header: {
+            Text(ResearchLogRendering.bodyLabel)
+        } footer: {
+            if body.truncatedCount > 0 {
+                Text("… (\(body.truncatedCount) 文字省略)")
+            }
+        }
+    }
+
+    /// Reads the row once, then redacts / formats it on a background thread.
+    private func load() async {
+        let id = logID
+        guard let log = env.store.first(#Predicate<ResearchLog> { $0.id == id }) else {
+            isMissing = true
+            return
+        }
+        let snapshot = ResearchLogSnapshot(log, accountName: log.accountID.flatMap { env.store.account(id: $0)?.displayName })
+        let result = await Task.detached(priority: .userInitiated) { ResearchLogRendering.make(snapshot) }.value
+        guard !Task.isCancelled else { return }
+        rendering = result
     }
 }
 

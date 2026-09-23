@@ -62,6 +62,7 @@ final class AppEnvironment {
 
         research.attach(store: store, settings: settings)
         schemaInspector.attach(store: store)
+        schemaInspector.attach(recorder: research)
         wire()
     }
 
@@ -85,6 +86,9 @@ final class AppEnvironment {
         notifications.mediaPrefetcher = { [weak self] request in
             guard let media = self?.media else { return }
             Task { _ = try? await media.load(request) }
+        }
+        sync.onFailure = { [research] operation, accountID, error in
+            research.recordSyncFailure(operation: operation, accountID: accountID, error: error)
         }
         networkMode.onConnectivityRestored = { [weak self] in
             self?.replies.handleConnectivityRestored()

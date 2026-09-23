@@ -66,6 +66,8 @@ actor DemoWorld {
     /// file name → number of upload attempts.
     private var uploadAttempts: [String: Int] = [:]
     private var dynamicNotifications: [DynamicNotification] = []
+    /// おたより created at runtime by `simulateIncomingNewsletter` (DemoWorld+Research.swift).
+    var dynamicNewsletters: [DemoDynamicNewsletter] = []
     private var sequence = 0
 
     private struct DynamicNotification: Sendable {
@@ -304,11 +306,13 @@ actor DemoWorld {
     func newsletters(account: AccountContext) -> [RemoteNewsletter] {
         let v = viewer(account)
         let items = (DemoFixtures.newsletters[v.profile] ?? []).map(makeNewsletter)
+            + dynamicNewsletters.filter { $0.audience.contains(v.profile) }.map(\.letter)
         return DemoWorld.sortedNewestFirst(items, key: { ($0.createdAt, $0.id) })
     }
 
     func newsletter(id: String, account: AccountContext) throws -> RemoteNewsletter {
         let v = viewer(account)
+        if let live = dynamicNewsletters.first(where: { $0.letter.id == id && $0.audience.contains(v.profile) }) { return live.letter }
         guard let fixture = DemoFixtures.newsletters[v.profile]?.first(where: { $0.id == id }) else { throw RemoteError.notFound }
         return makeNewsletter(fixture)
     }

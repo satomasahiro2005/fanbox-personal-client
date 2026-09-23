@@ -132,10 +132,18 @@ enum ResearchLogFormatter {
 
     /// Body text for display: pretty-printed when it is JSON, truncated to `limit` characters, redacted.
     static func displayBody(_ body: String, prettyJSON: Bool, limit: Int = displayBodyLimit) -> (text: String, truncatedCount: Int) {
-        var text = safe(body)
-        if prettyJSON, let pretty = prettyPrintedJSON(text) { text = safe(pretty) }
-        guard text.count > limit else { return (text, 0) }
-        return (String(text.prefix(limit)), text.count - limit)
+        let text = safe(body)
+        if prettyJSON, let pretty = prettyPrintedJSON(text) { return truncated(safe(pretty), limit: limit) }
+        return truncated(text, limit: limit)
+    }
+
+    /// First `limit` characters and the number of characters cut off.
+    static func truncated(_ text: String, limit: Int) -> (text: String, truncatedCount: Int) {
+        let limit = max(0, limit)
+        guard let cut = text.index(text.startIndex, offsetBy: limit, limitedBy: text.endIndex), cut < text.endIndex else {
+            return (text, 0)
+        }
+        return (String(text[..<cut]), text[cut...].count)
     }
 
     /// Pretty-prints a JSON document; nil when `text` is not valid JSON.
@@ -153,6 +161,12 @@ enum ResearchLogFormatter {
 
     /// Fields of the detail screen in display order. All strings are redacted.
     static func fields(for entry: ResearchLogSnapshot, bodyLimit: Int = displayBodyLimit) -> [Field] {
+        fields(for: entry, body: displayBody(entry.responseBody, prettyJSON: false, limit: bodyLimit))
+    }
+
+    /// Fields with an already redacted + truncated body (`displayBody` / `truncated(safe(…))`), so callers that also need
+    /// the body text on its own do the expensive body pass only once.
+    static func fields(for entry: ResearchLogSnapshot, body: (text: String, truncatedCount: Int)) -> [Field] {
         var fields: [Field] = [
             Field(label: "HTTP Status", value: statusText(entry.statusCode)),
             Field(label: "Endpoint", value: safe(entry.endpoint)),
@@ -169,7 +183,6 @@ enum ResearchLogFormatter {
         }
         fields.append(Field(label: "Request Headers", value: blockText(entry.requestHeaders), isBlock: true))
         fields.append(Field(label: "Response Headers", value: blockText(entry.responseHeaders), isBlock: true))
-        let body = displayBody(entry.responseBody, prettyJSON: false, limit: bodyLimit)
         var bodyText = body.text.isEmpty ? "(なし)" : body.text
         if body.truncatedCount > 0 { bodyText += "\n… (\(body.truncatedCount) 文字省略)" }
         fields.append(Field(label: "Safe Response Body", value: bodyText, isBlock: true))
@@ -204,8 +217,13 @@ enum ResearchLogFormatter {
 
     /// Full plain-text rendering of one entry (share sheet / export). Redacted.
     static func text(for entry: ResearchLogSnapshot, bodyLimit: Int = exportBodyLimit) -> String {
+        text(for: entry, fields: fields(for: entry, bodyLimit: bodyLimit))
+    }
+
+    /// Plain-text rendering from fields computed by `fields(for:…)`. Redacted again as a whole.
+    static func text(for entry: ResearchLogSnapshot, fields: [Field]) -> String {
         var lines: [String] = ["[\(timestampText(entry.timestamp))] \(entry.kind.rawValue.uppercased()) \(summaryLine(entry))"]
-        for field in fields(for: entry, bodyLimit: bodyLimit) {
+        for field in fields {
             if field.isBlock {
                 lines.append("\(field.label):")
                 lines.append(contentsOf: field.value.split(separator: "\n", omittingEmptySubsequences: false).map { "  " + $0 })
@@ -271,15 +289,21 @@ enum ResearchDisplayRedaction {
         let headers = sensitiveHeaderNames.map(NSRegularExpression.escapedPattern(for:)).joined(separator: "|")
         let keys = sensitiveKeyNames.joined(separator: "|")
         let jsonKeys = jsonKeyNames.map(NSRegularExpression.escapedPattern(for:)).joined(separator: "|")
+        let quote = SecretRedactor.encodedQuotePattern
+        let colon = SecretRedactor.encodedColonPattern
         let specs: [(String, String)] = [
-            // "Cookie: a=b; c=d" / "X-CSRF-Token: …" header lines (whole value).
+            // "Cookie: a=b; c=d" / "X-CSRF-Token: …" header lines (whole value). Line-anchored: single-line HTML / JS keeps
+            // everything after a mid-line "cookie:".
             ("(?im)^([ \\t]*\"?(?:\(headers))\"?[ \\t]*[:=][ \\t]*)(?!\(placeholder)$)(\\S.*)$", "$1\(placeholder)"),
             // "\"Cookie\": \"…\"" (JSON-style header dumps / bodies).
             ("(?i)(\"(?:\(jsonKeys))\"\\s*:\\s*)\"(?:[^\"\\\\]|\\\\.)*\"", "$1\"\(placeholder)\""),
+            // Escaped JSON in HTML attributes / JS strings / URLs: &quot;csrfToken&quot;:&quot;…&quot;, &#34;…, &#x22;…, \\"…\\".
+            ("(?i)(\(quote)(?:\(jsonKeys))\(quote)[ \\t]*\(colon)[ \\t]*)(\(quote))(?:(?!\\2)[^\\r\\n])*", "$1$2\(placeholder)"),
             // key=value / key: value pairs anywhere (cookies, query strings, form bodies).
             ("(?i)(?<![A-Za-z0-9_])((?:\(keys)))(\\s*[=:]\\s*)[^\\s;&,\"'<>]+", "$1$2\(placeholder)"),
-            // Authorization schemes.
-            ("(?i)\\b(bearer|basic)\\s+[A-Za-z0-9\\-._~+/]+=*", "$1 \(placeholder)"),
+            // Authorization schemes. "Basic" only before a credential-looking token (so "Basic プラン" / "basic plan" stay).
+            ("(?i)\\b(bearer)\\s+[A-Za-z0-9\\-._~+/]+=*", "$1 \(placeholder)"),
+            ("(?i)\\b(basic)\\s+(?=[A-Za-z0-9+/]*[0-9+/=])[A-Za-z0-9+/]{8,}={0,2}", "$1 \(placeholder)"),
         ]
         return specs.compactMap { pattern, template in
             guard let regex = try? NSRegularExpression(pattern: pattern) else {
@@ -289,9 +313,6 @@ enum ResearchDisplayRedaction {
             return (regex, template)
         }
     }()
-
-    /// 13–19 digits, optionally grouped by spaces / hyphens.
-    private static let cardCandidate = try? NSRegularExpression(pattern: "(?<![0-9])(?:[0-9][ -]?){12,18}[0-9](?![0-9])")
 
     static func apply(_ text: String) -> String {
         guard !text.isEmpty else { return text }
@@ -303,20 +324,11 @@ enum ResearchDisplayRedaction {
         return redactCardNumbers(result)
     }
 
-    /// Replaces Luhn-valid 13–19 digit sequences (card numbers, SPEC §12 / §38). Shorter ids (post / user ids) are kept.
+    /// Replaces Luhn-valid card numbers (SPEC §12 / §38) with the placeholder. Uses `SecretRedactor`'s guarded candidate
+    /// scan, so digits inside URL paths, file names, hashes and `id_…` identifiers, shorter ids (post / user ids) and
+    /// millisecond timestamps are kept.
     static func redactCardNumbers(_ text: String) -> String {
-        guard let cardCandidate else { return text }
-        let ns = text as NSString
-        let matches = cardCandidate.matches(in: text, options: [], range: NSRange(location: 0, length: ns.length))
-        guard !matches.isEmpty else { return text }
-        var result = text
-        for match in matches.reversed() {
-            let candidate = ns.substring(with: match.range)
-            let digits = candidate.filter(\.isNumber)
-            guard (13...19).contains(digits.count), luhnValid(digits), let range = Range(match.range, in: result) else { continue }
-            result.replaceSubrange(range, with: placeholder)
-        }
-        return result
+        SecretRedactor.redactCardNumbers(text, mask: { _ in placeholder })
     }
 
     static func luhnValid(_ digits: String) -> Bool {
