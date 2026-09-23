@@ -43,7 +43,7 @@ final class AppEnvironment {
         schemaInspector = SchemaInspector()
         http = AccountHTTPClient(credentials: credentials, scheduler: scheduler, recorder: research)
         let api = FanboxAPIClient(http: http, inspector: schemaInspector)
-        remote = DefaultRemoteDataSourceProvider(fanbox: FanboxRemoteDataSource(api: api), demo: DemoRemoteDataSource())
+        remote = DefaultRemoteDataSourceProvider(fanbox: FanboxRemoteDataSource(api: api), demo: DemoRemoteDataSource(policy: policyStore))
         sync = SyncEngine(store: store, remote: remote, settings: settings, network: networkMode)
         replies = ReplyQueue(store: store, remote: remote, settings: settings, network: networkMode)
         coordinator = SyncCoordinator(engine: sync, settings: settings, network: networkMode, replies: replies)

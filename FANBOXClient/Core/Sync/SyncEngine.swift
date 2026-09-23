@@ -69,4 +69,8 @@ final class SyncEngine {
     func refreshNewsletter(id: String, accountID: String? = nil, priority: RequestPriority = .interactiveRead) async -> RemoteError? { nil }
 
     func setLike(postID: String, liked: Bool) async -> RemoteError? { nil }
+
+    /// Deletes a comment (own comment, or a comment on my creator post) and updates the local DB.
+    @discardableResult
+    func deleteComment(commentID: String, postID: String, accountID: String) async -> RemoteError? { nil }
 }

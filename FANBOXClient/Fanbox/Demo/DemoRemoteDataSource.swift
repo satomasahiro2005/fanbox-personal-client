@@ -3,7 +3,12 @@ import Foundation
 /// Offline, deterministic fixture data for `AccountKind.demo` accounts (previews, tests, simulator UI checks).
 /// Never touches the network. Content is synthetic and clearly labeled as demo.
 struct DemoRemoteDataSource: RemoteDataSource {
-    init() {}
+    /// When given, the demo source honors Offline mode (throws `.offline`) so offline UX can be exercised.
+    let policy: NetworkPolicyStore?
+
+    init(policy: NetworkPolicyStore? = nil) {
+        self.policy = policy
+    }
 
     func currentUser(account: AccountContext) async throws -> RemoteUser {
         RemoteUser(pixivUserID: account.pixivUserID ?? "demo", fanboxUserID: nil, name: "Demo", iconURL: nil, creatorID: account.creatorID)
