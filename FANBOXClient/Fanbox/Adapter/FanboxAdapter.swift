@@ -330,7 +330,7 @@ enum FanboxAdapter {
             creatorID: creatorID, pixivUserID: dto.user?.userId ?? dto.userId, name: nonEmpty(dto.user?.name) ?? nonEmpty(dto.name) ?? creatorID,
             iconURL: dto.user?.iconUrl ?? dto.iconUrl, coverImageURL: dto.coverImageUrl, profileText: dto.description ?? "",
             profileLinks: dto.profileLinks ?? [], hasAdultContent: dto.hasAdultContent ?? false, isFollowed: dto.isFollowed,
-            isSupported: dto.isSupported)
+            isSupported: dto.isSupported, isStopped: dto.isStopped)
     }
 
     static func plan(_ dto: FanboxPlanDTO, fallbackCreatorID: String? = nil) -> RemotePlan? {
@@ -461,8 +461,10 @@ enum FanboxAdapter {
 
     static func payment(_ dto: FanboxPaymentDTO) -> RemotePayment? {
         guard let id = dto.id, let paidAt = dto.paymentDatetime else { return nil }
-        return RemotePayment(id: id, creatorID: dto.creator?.creatorId, creatorName: nonEmpty(dto.creator?.user?.name), amount: dto.paidAmount ?? 0,
-                             paidAt: paidAt, paymentMethod: dto.paymentMethod)
+        // A missing paidAmount is flagged, not turned into a ¥0 payment.
+        return RemotePayment(id: id, creatorID: dto.creator?.creatorId, creatorName: nonEmpty(dto.creator?.user?.name),
+                             amount: dto.paidAmount ?? 0, paidAt: paidAt, paymentMethod: dto.paymentMethod,
+                             isAmountReported: dto.paidAmount != nil)
     }
 
     /// Payment records newest first.

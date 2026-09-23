@@ -56,6 +56,37 @@ enum SupportMutations {
         store.save()
     }
 
+    // MARK: Scheduled stop (SPEC §10.3 来月予定)
+
+    /// Records or clears the user's own "停止予定" for a support. USER-ENTERED: shown as "自分で記録", never as a FANBOX
+    /// observation, and only for the current billing month (`SupportStopRule`). Only an active support can be marked.
+    /// Returns false when nothing was written.
+    @discardableResult
+    static func setUserStopMark(_ support: Support, marked: Bool, store: LocalStore, now: Date = .now) -> Bool {
+        if marked {
+            guard support.isActive else { return false }
+            support.userStopMarkedAt = now
+        } else {
+            guard support.userStopMarkedAt != nil else { return false }
+            support.userStopMarkedAt = nil
+        }
+        store.save()
+        return true
+    }
+
+    @discardableResult
+    static func setUserStopMark(store: LocalStore, accountID: String, creatorID: String, marked: Bool, now: Date = .now) -> Bool {
+        let key = Support.key(accountID: accountID, creatorID: creatorID)
+        guard let support = store.first(#Predicate<Support> { $0.key == key }) else { return false }
+        return setUserStopMark(support, marked: marked, store: store, now: now)
+    }
+
+    /// True when the user's stop record applies to the billing month of `now`.
+    static func hasEffectiveUserStopMark(_ support: Support, now: Date = .now) -> Bool {
+        guard support.isActive, let marked = support.userStopMarkedAt else { return false }
+        return SupportBilling.isSameMonth(marked, now)
+    }
+
     // MARK: Assignments (SPEC §13)
 
     static func assignment(store: LocalStore, accountID: String, creatorID: String) -> SupportPaymentAssignment? {

@@ -22,6 +22,12 @@ final class AccountWebController {
     /// User-facing message of the last failed main-frame load (nil once a new load starts).
     var loadError: String?
     var popup: AccountWebPopup?
+    /// Fallback page shown instead of the requested one (nil = the requested page). See `WebDestination.fallbackSteps`.
+    private(set) var activeFallback: WebFallbackStep?
+    /// Remaining automatic fallbacks, tried in order when the requested page answers 404 / 410.
+    @ObservationIgnored var fallbackSteps: [WebFallbackStep] = []
+    /// True until the first main-frame response of the requested page (or of an automatic fallback) arrived.
+    @ObservationIgnored private var awaitingInitialResponse = true
 
     /// Called on the main actor after each main-frame navigation finishes.
     @ObservationIgnored var onMainFrameFinished: ((URL) -> Void)?
@@ -82,6 +88,28 @@ final class AccountWebController {
     func load(_ url: URL) {
         loadError = nil
         webView?.load(URLRequest(url: url))
+    }
+
+    /// First main-frame response of the requested page: a missing page (404 / 410) is replaced by the next fallback.
+    /// Returns true when the response must be cancelled because a fallback is being loaded instead.
+    func handleMainFrameResponse(status: Int?) -> Bool {
+        guard awaitingInitialResponse else { return false }
+        guard WebDestination.isMissingPageStatus(status), !fallbackSteps.isEmpty else {
+            awaitingInitialResponse = false
+            return false
+        }
+        let next = fallbackSteps.removeFirst()
+        activeFallback = next
+        AppLog.web.notice("requested page missing; opening fallback \(next.title, privacy: .public)")
+        DispatchQueue.main.async { [weak self] in self?.load(next.url) }
+        return true
+    }
+
+    /// Manual choice from the web screen ("ページが表示されない場合").
+    func openFallback(_ step: WebFallbackStep) {
+        awaitingInitialResponse = false
+        activeFallback = step
+        load(step.url)
     }
 
     /// Reads page metadata (CSRF token, logged-in user, navigator.userAgent) from the current page.
@@ -190,6 +218,11 @@ final class AccountWebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate 
         if navigationResponse.isForMainFrame {
             let status = (navigationResponse.response as? HTTPURLResponse)?.statusCode
             recordNavigation(url: navigationResponse.response.url, method: isMain(webView) ? "NAVIGATE" : "POPUP", status: status, error: nil)
+            // Unverified destinations (docs/API.md §20): never leave the user on a missing page.
+            if isMain(webView), controller?.handleMainFrameResponse(status: status) == true {
+                decisionHandler(.cancel)
+                return
+            }
         }
         decisionHandler(.allow)
     }

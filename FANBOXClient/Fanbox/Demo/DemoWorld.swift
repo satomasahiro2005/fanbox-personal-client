@@ -84,6 +84,7 @@ actor DemoWorld {
 
         func planFee(creatorID: String) -> Int { supports.first { $0.creatorID == creatorID }?.fee ?? 0 }
         func isSupporting(_ creatorID: String) -> Bool { supports.contains { $0.creatorID == creatorID } }
+        func isStopping(_ creatorID: String) -> Bool { supports.contains { $0.creatorID == creatorID && $0.stopping } }
         var ownsSelfCreator: Bool { profile == .creator }
     }
 
@@ -545,7 +546,8 @@ actor DemoWorld {
                              iconURL: fixture.iconURL, coverImageURL: fixture.coverURL, profileText: fixture.profileText,
                              profileLinks: fixture.links, hasAdultContent: false,
                              isFollowed: isSelf ? false : viewer.following.contains(fixture.id),
-                             isSupported: isSelf ? false : viewer.isSupporting(fixture.id))
+                             isSupported: isSelf ? false : viewer.isSupporting(fixture.id),
+                             isStopped: isSelf ? false : viewer.isStopping(fixture.id))
     }
 
     /// The self creator's pixiv user id is the id of the demo account that owns it (when known).

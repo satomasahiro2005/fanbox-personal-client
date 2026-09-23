@@ -61,6 +61,21 @@ struct SupportAccountDetailView: View {
                 Text("\(group?.activeCreatorCount ?? 0) クリエイターを支援中")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                let stopping = group?.lines.filter { $0.support.scheduledStop() != nil } ?? []
+                if !stopping.isEmpty {
+                    Text("うち停止予定 \(Formatters.yen(stopping.reduce(0) { $0 + $1.support.amount }))（来月予定には含みません）")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if let account, account.enabled, account.hasUnpaidPayments == true {
+                Section {
+                    PaymentStateAttentionCard(account: account)
+                } header: {
+                    Label("要確認", systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                }
             }
 
             Section {
@@ -118,7 +133,7 @@ struct SupportAccountDetailView: View {
                 paymentSection(title: "今月のお支払い",
                                records: recordsIn(SupportAnalyzer.monthRange(containing: now)))
                 paymentSection(title: "先月のお支払い",
-                               records: recordsIn(previousMonthRange(now)))
+                               records: recordsIn(SupportAnalyzer.previousMonthRange(before: now)))
             }
         }
         .navigationTitle(account?.displayName ?? "アカウント")
@@ -131,12 +146,6 @@ struct SupportAccountDetailView: View {
     private func recordsIn(_ range: Range<Date>?) -> [PaymentRecord] {
         guard let range else { return [] }
         return payments.filter { range.contains($0.paidAt) }
-    }
-
-    private func previousMonthRange(_ now: Date) -> Range<Date>? {
-        guard let current = SupportAnalyzer.monthRange(containing: now),
-              let previous = Calendar.current.date(byAdding: .month, value: -1, to: current.lowerBound) else { return nil }
-        return SupportAnalyzer.monthRange(containing: previous)
     }
 
     @ViewBuilder
@@ -156,8 +165,14 @@ struct SupportAccountDetailView: View {
                 Text(title)
                 Spacer()
                 if !records.isEmpty {
-                    Text(Formatters.yen(records.reduce(0) { $0 + $1.amount })).monospacedDigit()
+                    // Records without a reported amount are listed but never summed as ¥0.
+                    Text(Formatters.yen(records.filter { $0.amountUnknown != true }.reduce(0) { $0 + $1.amount })).monospacedDigit()
                 }
+            }
+        } footer: {
+            let unknown = records.filter { $0.amountUnknown == true }.count
+            if unknown > 0 {
+                Text("金額不明のお支払い \(unknown) 件は合計に含みません")
             }
         }
     }
@@ -182,6 +197,9 @@ struct SupportAccountLineRow: View {
                     Text(line.support.planTitle).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 }
                 SupportStatusPill(status: line.support.status)
+                if let stop = line.support.scheduledStop() {
+                    StopScheduledPill(source: stop)
+                }
                 Spacer()
                 if let profile, let a = line.assignment, a.paymentProfileID != nil {
                     Text(profile.nickname).font(.caption2).foregroundStyle(.secondary)
@@ -209,7 +227,11 @@ struct PaymentRecordRow: View {
                 .foregroundStyle(.secondary)
             }
             Spacer()
-            Text(Formatters.yen(record.amount)).monospacedDigit()
+            if record.amountUnknown == true {
+                Text("金額不明").foregroundStyle(.secondary)
+            } else {
+                Text(Formatters.yen(record.amount)).monospacedDigit()
+            }
         }
         .accessibilityElement(children: .combine)
     }

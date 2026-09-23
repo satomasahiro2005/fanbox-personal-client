@@ -60,6 +60,8 @@ struct DemoSupportFixture: Sendable, Hashable {
     var fee: Int
     /// Raw FANBOX-style payment method kind.
     var paymentMethod: String
+    /// Stopped by the viewer, still valid until month end (`isSupported && isStopped`, SPEC §10.3 来月予定 demo).
+    var stopping: Bool = false
 }
 
 struct DemoProfileFixture: Sendable, Hashable {

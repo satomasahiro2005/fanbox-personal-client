@@ -356,10 +356,16 @@ final class SyncEngine {
 
             case .supports:
                 let supports = try await ds.supportingPlans(account: context)
-                let observed: ObservedSource = context.kind == .demo ? .demo
-                    : (reason == .backgroundRefresh ? .backgroundSync : (reason == .notification ? .notification : .sync))
+                // A stopped support may leave plan.listSupporting while creator.listFollowing still reports
+                // isSupported && isStopped (docs/API.md §8.1 / §18.10). Only when a support would vanish, read the
+                // following list (best effort) so the change is recorded as 支援終了 rather than an unexplained anomaly.
+                if store.hasActiveSupports(absentFrom: supports, accountID: accountID),
+                   let following = try? await ds.followingCreators(account: context) {
+                    store.applyFollowing(following, account: context)
+                }
+                let observed = Self.supportObservedSource(reason: reason, kind: context.kind)
                 let (diff, history) = store.applySupportsDetailed(supports, account: context, source: observed)
-                newIDs = diff.started + diff.changed + diff.restored + diff.disappeared
+                newIDs = diff.observedCreatorIDs
                 if !isFirstSync, !history.isEmpty {
                     let name = store.account(id: accountID)?.displayName ?? ""
                     deliver += store.recordSupportChangeEvents(history, account: context, accountName: name)

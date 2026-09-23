@@ -144,10 +144,12 @@ struct RemoteCreator: Sendable, Hashable {
     /// As seen by the requesting account; nil if unknown.
     var isFollowed: Bool?
     var isSupported: Bool?
+    /// `isSupported && isStopped` = the account stopped its support, still valid until month end (docs/API.md §18.10).
+    var isStopped: Bool?
 
     init(creatorID: String, pixivUserID: String? = nil, name: String, iconURL: String? = nil, coverImageURL: String? = nil,
          profileText: String = "", profileLinks: [String] = [], hasAdultContent: Bool = false, isFollowed: Bool? = nil,
-         isSupported: Bool? = nil) {
+         isSupported: Bool? = nil, isStopped: Bool? = nil) {
         self.creatorID = creatorID
         self.pixivUserID = pixivUserID
         self.name = name
@@ -158,6 +160,7 @@ struct RemoteCreator: Sendable, Hashable {
         self.hasAdultContent = hasAdultContent
         self.isFollowed = isFollowed
         self.isSupported = isSupported
+        self.isStopped = isStopped
     }
 }
 
@@ -257,9 +260,12 @@ struct RemotePayment: Sendable, Hashable {
     var id: String
     var creatorID: String?
     var creatorName: String?
+    /// 0 when `isAmountReported` is false.
     var amount: Int
     var paidAt: Date
     var paymentMethod: String?
+    /// false when FANBOX omitted the paid amount: the record is kept but never counted as ¥0 (SPEC §10.3).
+    var isAmountReported: Bool = true
 }
 
 struct RemoteFan: Sendable, Hashable {

@@ -100,7 +100,10 @@ final class WebBridge {
     init() {}
 
     func openWeb(account accountID: String, destination: WebDestination, purpose: WebPurpose = .browse) {
+        let replaced = presented
         presented = WebSessionRequest(accountID: accountID, destination: destination, purpose: purpose)
+        // The replaced session is gone for good: run its dismissal work (e.g. the post-payment re-sync) too.
+        if let replaced { onDismiss?(replaced) }
     }
 
     func dismiss() {

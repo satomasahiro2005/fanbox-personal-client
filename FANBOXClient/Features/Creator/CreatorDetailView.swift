@@ -17,12 +17,6 @@ enum CreatorDetailSection: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
-/// Sheet target for "このプランで支援".
-struct CreatorPaymentTarget: Identifiable, Hashable {
-    let planID: String
-    var id: String { planID }
-}
-
 /// Creator 統合表示 (SPEC §9 / §10.1). Renders from the local DB immediately, then refreshes in the background.
 struct CreatorDetailView: View {
     let creatorID: String
@@ -38,7 +32,8 @@ struct CreatorDetailView: View {
     @State private var refreshError: RemoteError?
     @State private var isRefreshing = false
     @State private var didInitialRefresh = false
-    @State private var paymentTarget: CreatorPaymentTarget?
+    /// "このプランで支援" → payment flow sheet (SPEC §14).
+    @State private var paymentRequest: PaymentFlowRequest?
     @State private var isEditingMemo = false
 
     init(creatorID: String, initialSection: CreatorDetailSection = .posts) {
@@ -101,7 +96,7 @@ struct CreatorDetailView: View {
                 CreatorPostsSection(creatorID: creatorID, posts: posts, accountsByID: accountsByID)
             case .plans:
                 CreatorPlansSection(plans: plans, activeSupports: supportRows.filter(\.isActive), accountOrder: accounts.map(\.id)) { plan in
-                    paymentTarget = CreatorPaymentTarget(planID: plan.planID)
+                    paymentRequest = PaymentFlowRequest(creatorID: creatorID, planID: plan.planID)
                 }
             case .support:
                 CreatorSupportSection(creatorID: creatorID, summary: summary)
@@ -138,11 +133,7 @@ struct CreatorDetailView: View {
             didInitialRefresh = true
             await refresh()
         }
-        .sheet(item: $paymentTarget) { target in
-            NavigationStack {
-                PaymentFlowView(creatorID: creatorID, planID: target.planID)
-            }
-        }
+        .paymentFlowSheet($paymentRequest)
         .sheet(isPresented: $isEditingMemo) {
             if let creator {
                 CreatorMemoEditor(creator: creator)

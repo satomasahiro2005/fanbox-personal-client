@@ -17,8 +17,12 @@ struct SupportDiff: Sendable, Equatable {
     var changed: [String] = []
     var disappeared: [String] = []
     var restored: [String] = []
+    /// No longer listed, explained by a stop of this / the previous billing month (SPEC §10.3): 支援終了, not an anomaly.
+    var ended: [String] = []
 
-    var isEmpty: Bool { started.isEmpty && changed.isEmpty && disappeared.isEmpty && restored.isEmpty }
+    var isEmpty: Bool { started.isEmpty && changed.isEmpty && disappeared.isEmpty && restored.isEmpty && ended.isEmpty }
+    /// Every creator whose support changed in this diff.
+    var observedCreatorIDs: [String] { started + changed + restored + disappeared + ended }
 }
 
 /// Local data source (SPEC §43). The ONLY writer of normalized FANBOX data into SwiftData.

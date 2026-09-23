@@ -128,6 +128,25 @@ struct SupportStatusPill: View {
     }
 }
 
+/// "停止予定" pill of an active support. FANBOX-observed and user-entered stops look different (SPEC §13 spirit:
+/// what the user typed is never shown as if FANBOX had reported it).
+struct StopScheduledPill: View {
+    let source: SupportStopSource
+
+    var body: some View {
+        switch source {
+        case .observed:
+            PillLabel(text: SupportStopRule.shortLabel(source), systemImage: "calendar.badge.minus", tint: .orange)
+                .accessibilityLabel(SupportStopRule.label(source))
+                .accessibilityIdentifier("stopScheduled-observed")
+        case .userMarked:
+            PillLabel(text: SupportStopRule.shortLabel(source), systemImage: "hand.raised", tint: .blue)
+                .accessibilityLabel(SupportStopRule.label(source))
+                .accessibilityIdentifier("stopScheduled-userMarked")
+        }
+    }
+}
+
 /// Last sync time + error of the `.supports` resource, for `SyncStatusBanner`.
 struct SupportSyncStatus {
     var lastSync: Date?
@@ -178,8 +197,9 @@ enum SupportSync {
     }
 }
 
-/// A web session to open once the sheet that requested it has been dismissed
-/// (the account-aware web cover is presented from the root and cannot appear on top of a sheet).
+/// A web session to open once the sheet that requested it has been dismissed. The web session is presented above the
+/// top-most screen, but it closes together with the sheet below it — so a sheet that hands off to the web must be gone
+/// first (see `paymentFlowSheet`).
 struct PendingWebOpen: Equatable {
     var accountID: String
     var destination: WebDestination
@@ -200,6 +220,41 @@ struct PaymentFlowRequest: Identifiable, Hashable {
     var creatorID: String
     var planID: String?
     var accountID: String?
+
+    init(creatorID: String, planID: String? = nil, accountID: String? = nil) {
+        self.creatorID = creatorID
+        self.planID = planID
+        self.accountID = accountID
+    }
+}
+
+/// Presents `PaymentFlowView` (SPEC §14) as a sheet and opens the account-aware web once the sheet is gone.
+/// Every entry point uses this, so the flow is always the sheet's root (it owns its NavigationStack — hosts must NOT
+/// wrap it in another one) and the hand-off never races the sheet's dismissal.
+struct PaymentFlowSheetModifier: ViewModifier {
+    @Binding var request: PaymentFlowRequest?
+
+    @Environment(AppEnvironment.self) private var env
+    @State private var pendingWeb: PendingWebOpen?
+
+    func body(content: Content) -> some View {
+        content.sheet(item: $request, onDismiss: {
+            SupportSync.open(pendingWeb, env: env)
+            pendingWeb = nil
+        }) { request in
+            PaymentFlowView(creatorID: request.creatorID, planID: request.planID, preselectedAccountID: request.accountID) { pending in
+                pendingWeb = pending
+                self.request = nil
+            }
+        }
+    }
+}
+
+extension View {
+    /// See `PaymentFlowSheetModifier`.
+    func paymentFlowSheet(_ request: Binding<PaymentFlowRequest?>) -> some View {
+        modifier(PaymentFlowSheetModifier(request: request))
+    }
 }
 
 /// Identifiable payload for presenting the assignment editor.

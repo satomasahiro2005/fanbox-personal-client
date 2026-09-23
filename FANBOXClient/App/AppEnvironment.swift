@@ -25,6 +25,8 @@ final class AppEnvironment {
     @ObservationIgnored let media: MediaService
     @ObservationIgnored let offline: OfflineLibraryService
     @ObservationIgnored let web: WebBridge
+    /// SPEC §14 状態再同期 after payment web sessions (immediate + follow-up checks).
+    @ObservationIgnored let paymentResync: PaymentResyncScheduler
     @ObservationIgnored let webSessions: WebSessionStore
     @ObservationIgnored let accounts: AccountService
     @ObservationIgnored let uploads: UploadQueue
@@ -52,6 +54,7 @@ final class AppEnvironment {
         media = MediaService(store: store, http: http, network: networkMode, settings: settings)
         offline = OfflineLibraryService(store: store, engine: sync, media: media, settings: settings)
         web = WebBridge()
+        paymentResync = PaymentResyncScheduler(engine: sync)
         webSessions = WebSessionStore()
         accounts = AccountService(store: store, credentials: credentials, webSessions: webSessions, remote: remote)
         uploads = UploadQueue(store: store, remote: remote, network: networkMode)
@@ -73,10 +76,7 @@ final class AppEnvironment {
             self?.uploads.start()
         }
         web.onDismiss = { [weak self] request in
-            guard let self else { return }
-            if case .payment = request.purpose {
-                Task { await self.sync.sync(.supports, accountID: request.accountID, reason: .afterWrite) }
-            }
+            self?.paymentResync.handleDismissedPaymentSession(request)
         }
     }
 

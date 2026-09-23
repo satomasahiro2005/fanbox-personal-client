@@ -6,6 +6,8 @@ enum PaymentProfileIssue: Equatable, Sendable {
     case looksLikeCardNumber(field: String)
     /// A field looks like it contains a CVC / PIN / expiry — rejected.
     case looksLikeSecurityCode(field: String)
+    /// A field looks like it contains a card / account password, a 3-D Secure credential or a one-time code — rejected.
+    case looksLikeCredential(field: String)
     case nicknameRequired
 
     var message: String {
@@ -13,6 +15,8 @@ enum PaymentProfileIssue: Equatable, Sendable {
         case .last4MustBeFourDigits: return "下4桁は数字4桁で入力してください"
         case .looksLikeCardNumber(let field): return "\(field) にカード番号のような数字列があります。カード番号は保存できません"
         case .looksLikeSecurityCode(let field): return "\(field) にセキュリティコード/PIN/有効期限のような値があります。保存できません"
+        case .looksLikeCredential(let field):
+            return "\(field) にパスワード/3Dセキュア/ワンタイムパスワードのような値があります。保存できません"
         case .nicknameRequired: return "名前を入力してください"
         }
     }
@@ -20,6 +24,7 @@ enum PaymentProfileIssue: Equatable, Sendable {
 
 /// Enforces the Payment Profile storage policy (SPEC §12 / §39):
 /// PAN, CVC, PIN, 3D Secure credentials, card passwords and (in principle) expiry dates are never stored.
+/// The app never asks for any of them; these checks keep them out of the free-text fields (nickname / brand / memo).
 /// Detection is deliberately conservative — a false positive only blocks saving; a false negative would persist a secret.
 enum PaymentProfileValidator {
     /// Field names used in `PaymentProfileIssue` (shown to the user).
@@ -54,11 +59,13 @@ enum PaymentProfileValidator {
                 issues.append(.looksLikeCardNumber(field: name))
             }
         }
-        // Security-code checks do not apply to last4 (4 digits are allowed there by design).
+        // Security-code / credential checks do not apply to last4 (4 digits are allowed there by design).
         for (name, value) in textFields where name != Field.last4 {
             guard let value, !value.isEmpty else { continue }
             if containsSecurityCode(value) {
                 issues.append(.looksLikeSecurityCode(field: name))
+            } else if containsCredential(value) {
+                issues.append(.looksLikeCredential(field: name))
             }
         }
         return issues
@@ -101,7 +108,42 @@ enum PaymentProfileValidator {
         return matches(s, expiryPattern)
     }
 
+    /// True when the text looks like it carries a password, 3-D Secure credential or one-time code (SPEC §12 MUST NOT):
+    /// - a credential keyword with digits anywhere outside the keyword ("3Dセキュア 1234abcd", "OTP 482913"),
+    /// - a keyword used as a label: "パスワード: abcd", "password=hunter", "パスワード＝…",
+    /// - "パスワードは abcdef" / "password is abcdef" (4+ ASCII characters after は / is).
+    /// Mentions without a value ("3Dセキュア対応", "パスワードは手帳で管理") are allowed.
+    static func containsCredential(_ text: String) -> Bool {
+        let s = normalize(text)
+        guard let regex = credentialRegex else { return false }
+        let ns = s as NSString
+        let found = regex.matches(in: s, range: NSRange(location: 0, length: ns.length))
+        guard !found.isEmpty else { return false }
+        var outside = s
+        for match in found.reversed() {
+            if let range = Range(match.range, in: outside) { outside.replaceSubrange(range, with: " ") }
+        }
+        if outside.unicodeScalars.contains(where: { $0.value >= 48 && $0.value <= 57 }) { return true }
+        for match in found {
+            let rest = ns.substring(from: match.range.location + match.range.length)
+            if matches(rest, credentialValuePattern) { return true }
+        }
+        return false
+    }
+
     // MARK: - Internals
+
+    /// Password / 3-D Secure / one-time-code keywords (after `normalize`, so full-width "３Ｄ" is "3D").
+    private static let credentialKeywordPattern =
+        "(?i)(?<![a-z])(pass\\s*words?|passwd|pwd|pass\\s*codes?|3\\s*-?\\s*d\\s*-?\\s*secure|3ds(ecure)?|otp|"
+        + "one\\s*-?\\s*time\\s*(pass\\s*(word|code)|code))(?![a-z])"
+        + "|パスワード|ﾊﾟｽﾜｰﾄﾞ|パスコード|ﾊﾟｽｺｰﾄﾞ|3\\s*-?\\s*d\\s*セキュア|3\\s*-?\\s*d\\s*ｾｷｭｱ|本人認証|セキュアコード|ｾｷｭｱｺｰﾄﾞ"
+        + "|ワンタイム|ﾜﾝﾀｲﾑ|認証コード|確認コード|暗証番号"
+
+    /// What follows a credential keyword when a value is being written down.
+    private static let credentialValuePattern = "^\\s*([:：=＝]\\s*\\S|(は|is\\s)\\s*[\\x21-\\x7E]{4,})"
+
+    private static let credentialRegex = try? NSRegularExpression(pattern: credentialKeywordPattern)
 
     /// ASCII keywords must not be part of a longer word ("shopping" is not "PIN"); digits may touch them ("CVC123").
     private static let keywordPattern =

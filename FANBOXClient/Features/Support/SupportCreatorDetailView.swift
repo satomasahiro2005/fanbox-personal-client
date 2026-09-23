@@ -58,6 +58,13 @@ struct SupportCreatorDetailView: View {
                         .font(.title2.monospacedDigit().weight(.semibold))
                         .accessibilityIdentifier("supportCreatorTotal")
                 }
+                let stopping = group?.lines.filter { $0.support.scheduledStop() != nil } ?? []
+                if !stopping.isEmpty {
+                    Text("うち停止予定 \(Formatters.yen(stopping.reduce(0) { $0 + $1.support.amount }))（来月予定には含みません）")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("supportCreatorStopping")
+                }
             }
 
             Section {
@@ -84,12 +91,12 @@ struct SupportCreatorDetailView: View {
             } header: {
                 Text("アカウント別")
             } footer: {
-                Text("タップして支払い方法（Payment Profile）を設定します。「推定」「手動設定」は FANBOX 上で確認された情報ではありません。")
+                Text("タップして支払い方法（Payment Profile）や停止予定を設定します。「推定（未確認）」「手動設定」「停止予定（自分で記録）」は FANBOX 上で確認された情報ではありません。")
             }
 
             Section {
                 Button {
-                    flowRequest = PaymentFlowRequest(creatorID: creatorID, planID: nil, accountID: nil)
+                    flowRequest = PaymentFlowRequest(creatorID: creatorID)
                 } label: {
                     Label("プラン変更 / 再支援", systemImage: "heart.circle")
                 }
@@ -128,12 +135,7 @@ struct SupportCreatorDetailView: View {
                 editRequest = nil
             }
         }
-        .sheet(item: $flowRequest, onDismiss: openPending) { request in
-            PaymentFlowView(creatorID: request.creatorID, planID: request.planID, preselectedAccountID: request.accountID) { pending in
-                pendingWeb = pending
-                flowRequest = nil
-            }
-        }
+        .paymentFlowSheet($flowRequest)
     }
 
     private func openPending() {
@@ -161,6 +163,9 @@ struct SupportCreatorLineRow: View {
             HStack {
                 AccountBadge(accountID: line.support.accountID)
                 Spacer()
+                if let stop = line.support.scheduledStop() {
+                    StopScheduledPill(source: stop)
+                }
                 SupportStatusPill(status: line.support.status)
                 Image(systemName: "chevron.right")
                     .font(.caption)
@@ -205,6 +210,9 @@ struct AssignmentEditorSheet: View {
     @State private var loaded = false
     @State private var original: AssignmentSnapshot?
     @State private var isAddingProfile = false
+    /// User-entered "停止予定" of the current billing month (SPEC §10.3 来月予定).
+    @State private var stopMarked = false
+    @State private var originalStopMarked = false
 
     init(request: AssignmentEditRequest, onOpenWeb: @escaping (PendingWebOpen) -> Void) {
         self.request = request
@@ -270,9 +278,26 @@ struct AssignmentEditorSheet: View {
                     }
                 }
 
+                if let support, support.isActive {
+                    Section {
+                        if SupportSnapshot(support).scheduledStop() == .observed {
+                            Label("FANBOX で停止予定を観測しました。来月予定には含みません。", systemImage: "calendar.badge.minus")
+                                .font(.footnote)
+                                .accessibilityIdentifier("assignmentObservedStop")
+                        }
+                        Toggle("停止予定として記録（自分で記録）", isOn: $stopMarked)
+                            .accessibilityIdentifier("assignmentStopToggle")
+                    } header: {
+                        Text("来月の予定")
+                    } footer: {
+                        Text("FANBOX で支援を停止した場合などに記録します。自分で記録した内容で、FANBOX 上で確認された情報ではありません。今月（日本時間）の間だけ有効で、来月予定の合計から除外します。")
+                    }
+                }
+
                 Section {
                     Button {
                         saveIfChanged(forcing: .manual)
+                        saveStopMarkIfChanged()
                         onOpenWeb(PendingWebOpen(accountID: request.accountID, destination: .paymentSettings, purpose: .payment))
                     } label: {
                         Label("このアカウントのお支払い方法を Web で確認", systemImage: "safari")
@@ -282,7 +307,7 @@ struct AssignmentEditorSheet: View {
                     Text("選択中の内容は「手動設定」として保存してから開きます。確認後、この画面で「Web で確認した」を選んでください。カード情報はアプリに保存されません。")
                 }
             }
-            .navigationTitle("支払い方法の割り当て")
+            .navigationTitle("支払い方法・停止予定")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -291,6 +316,7 @@ struct AssignmentEditorSheet: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("保存") {
                         saveIfChanged(forcing: nil)
+                        saveStopMarkIfChanged()
                         dismiss()
                     }
                     .accessibilityIdentifier("assignmentSave")
@@ -308,12 +334,22 @@ struct AssignmentEditorSheet: View {
     private func load() {
         guard !loaded else { return }
         loaded = true
+        if let support = supports.first {
+            stopMarked = SupportMutations.hasEffectiveUserStopMark(support)
+            originalStopMarked = stopMarked
+        }
         if let existing = SupportMutations.assignment(store: env.store, accountID: request.accountID, creatorID: request.creatorID) {
             let snapshot = AssignmentSnapshot(existing)
             original = snapshot
             selectedProfileID = snapshot.paymentProfileID
             confirmation = snapshot.verificationState == .verified ? .verifiedInWeb : .manual
         }
+    }
+
+    private func saveStopMarkIfChanged() {
+        guard stopMarked != originalStopMarked, let support = supports.first else { return }
+        SupportMutations.setUserStopMark(support, marked: stopMarked, store: env.store)
+        originalStopMarked = stopMarked
     }
 
     /// Writes only when something changed, so re-saving never refreshes `lastVerifiedAt` without a new check.

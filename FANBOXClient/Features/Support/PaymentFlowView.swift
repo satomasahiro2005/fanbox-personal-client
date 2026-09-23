@@ -3,7 +3,8 @@ import SwiftData
 
 /// SPEC §14 payment web bridge: Plan 選択 → Account 選択 → Payment Profile 選択 → account-aware WebView → 状態再同期.
 /// Card entry / payment is NEVER implemented natively; the FANBOX / pixiv page does it in the chosen account's session.
-/// Present as a sheet. Hosts that can open the web only after the sheet is dismissed pass `onHandoff`.
+/// Present it with `.paymentFlowSheet(_:)`: the view is the sheet's root and owns its NavigationStack, and the host opens
+/// the web session (`onHandoff`) after the sheet is gone. The re-sync after the web session is `PaymentResyncScheduler`.
 struct PaymentFlowView: View {
     enum Step: Int, CaseIterable, Hashable {
         case plan, account, profile, confirm
@@ -21,9 +22,8 @@ struct PaymentFlowView: View {
     let creatorID: String
     var planID: String? = nil
     var preselectedAccountID: String? = nil
-    /// Receives the web session to open after the host dismissed this sheet. When nil the flow dismisses itself and
-    /// opens the account-aware web right after.
-    var onHandoff: ((PendingWebOpen) -> Void)? = nil
+    /// Receives the web session to open; the host dismisses this sheet and opens it from the sheet's `onDismiss`.
+    let onHandoff: (PendingWebOpen) -> Void
 
     @Environment(AppEnvironment.self) private var env
     @Environment(\.dismiss) private var dismiss
@@ -42,7 +42,7 @@ struct PaymentFlowView: View {
     @State private var didSetUp = false
     @State private var isAddingProfile = false
 
-    init(creatorID: String, planID: String? = nil, preselectedAccountID: String? = nil, onHandoff: ((PendingWebOpen) -> Void)? = nil) {
+    init(creatorID: String, planID: String? = nil, preselectedAccountID: String? = nil, onHandoff: @escaping (PendingWebOpen) -> Void) {
         self.creatorID = creatorID
         self.planID = planID
         self.preselectedAccountID = preselectedAccountID
@@ -252,7 +252,8 @@ struct PaymentFlowView: View {
             Section {
                 Label("決済はアプリ内では行いません。選択したアカウントの FANBOX / pixiv の画面が開きます。", systemImage: "lock.shield")
                 Label(SupportText.paymentChoiceNote, systemImage: "creditcard")
-                Label("画面を閉じると支援状態を再同期します。", systemImage: "arrow.clockwise")
+                Label("画面を閉じると支援状態を再同期します。FANBOX への反映が遅れる場合に備え、数分後にも確認します。", systemImage: "arrow.clockwise")
+                Label("ページが表示されない場合は、Web 画面上部の「ページが表示されない場合」から別のページを開けます。", systemImage: "arrow.triangle.branch")
             }
             .font(.footnote)
             .foregroundStyle(.secondary)
@@ -387,18 +388,7 @@ struct PaymentFlowView: View {
         SupportMutations.recordPaymentIntent(store: env.store, accountID: accountID, creatorID: creatorID,
                                              planID: selectedPlanID, profileID: selectedProfileID)
         let destination: WebDestination = selectedPlanID.map { .plan(creatorID: creatorID, planID: $0) } ?? .creatorPlans(creatorID: creatorID)
-        let pending = PendingWebOpen(accountID: accountID, destination: destination, purpose: .payment)
-        if let onHandoff {
-            onHandoff(pending)
-        } else {
-            // The web cover is presented from the root; give this sheet time to go away first.
-            let env = self.env
-            dismiss()
-            Task { @MainActor in
-                try? await Task.sleep(for: .milliseconds(600))
-                SupportSync.open(pending, env: env)
-            }
-        }
+        onHandoff(PendingWebOpen(accountID: accountID, destination: destination, purpose: .payment))
     }
 }
 
@@ -483,7 +473,11 @@ struct AccountChoiceRow: View {
         guard let support else { return "未支援" }
         switch support.status {
         case .active:
-            return "支援中: \(support.planTitle.isEmpty ? "プラン" : support.planTitle) \(SupportText.monthly(support.amount))"
+            let plan = "支援中: \(support.planTitle.isEmpty ? "プラン" : support.planTitle) \(SupportText.monthly(support.amount))"
+            if let stop = SupportSnapshot(support).scheduledStop() {
+                return "\(plan)・\(SupportStopRule.label(stop))"
+            }
+            return plan
         case .missing:
             return "支援中一覧から消えました（以前: \(SupportText.monthly(support.amount))）"
         case .ended:
