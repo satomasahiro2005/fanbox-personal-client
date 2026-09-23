@@ -37,6 +37,8 @@ final class SyncEngine {
     @ObservationIgnored let network: NetworkModeController
     /// Called with ids of newly detected NotificationEvents (wired to NotificationService by AppEnvironment).
     @ObservationIgnored var onNewNotificationEvents: (([String]) async -> Void)?
+    /// Called for every failed sync / refresh except cancellation (wired to Research Mode events by AppEnvironment).
+    @ObservationIgnored var onFailure: ((_ operation: String, _ accountID: String, _ error: RemoteError) -> Void)?
 
     /// Hard cap for differential feed paging (SPEC §3.7: never crawl history).
     static let maxFeedPages = 3
@@ -421,7 +423,7 @@ final class SyncEngine {
             markSuccess(state: state, accountID: accountID)
             return (SyncOutcome(resource: resource, accountID: accountID, scope: scope, newItemIDs: newIDs, error: nil), deliver)
         } catch {
-            let mapped = handleFailure(error, accountID: accountID)
+            let mapped = handleFailure(error, accountID: accountID, operation: scope.isEmpty ? resource.rawValue : "\(resource.rawValue):\(scope)")
             markFailure(state: state, error: mapped)
             AppLog.sync.error("sync \(resource.rawValue, privacy: .public) failed: \(mapped.userMessage, privacy: .public)")
             return (SyncOutcome(resource: resource, accountID: accountID, scope: scope, newItemIDs: [], error: mapped), deliver)
@@ -589,7 +591,7 @@ final class SyncEngine {
                 if !detail.summary.isRestricted { return nil }
                 lastError = nil     // restricted is a valid answer, not an error
             } catch {
-                let mapped = handleFailure(error, accountID: accountID)
+                let mapped = handleFailure(error, accountID: accountID, operation: "post:\(postID)")
                 store.recordPostAccessError(postID: postID, accountID: accountID, message: mapped.userMessage)
                 lastError = mapped
                 // Only session / permission problems make another account worth trying; network errors would repeat.
@@ -699,9 +701,12 @@ final class SyncEngine {
 
     /// Maps any error to RemoteError, records it and expires the session on `.unauthorized`.
     @discardableResult
-    private func handleFailure(_ error: Error, accountID: String) -> RemoteError {
+    private func handleFailure(_ error: Error, accountID: String, operation: String = "sync") -> RemoteError {
         let mapped = Self.map(error)
-        if mapped != .cancelled { lastError = mapped }
+        if mapped != .cancelled {
+            lastError = mapped
+            onFailure?(operation, accountID, mapped)
+        }
         if mapped == .unauthorized, let account = store.account(id: accountID) {
             account.sessionState = .expired
             account.sessionCheckedAt = .now

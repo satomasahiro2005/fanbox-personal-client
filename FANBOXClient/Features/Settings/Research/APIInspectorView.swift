@@ -81,7 +81,9 @@ struct APIInspectorView: View {
                         .font(.callout)
                 }
             } footer: {
-                Text("Decoder は未知のフィールドがあっても失敗しません。ここでは DTO が知っているフィールドと実際のレスポンスの差分を表示します。")
+                Text("Decoder は未知のフィールドがあっても失敗しません。ここでは DTO が知っているフィールドと実際のレスポンスの差分を表示します。"
+                     + "パスの [] は配列の各要素、{} は ID をキーにした辞書（imageMap など）の各値です。"
+                     + "解釈できなかったレスポンスは「Sync / Errors」に記録されます。")
             }
 
             if groups.isEmpty {

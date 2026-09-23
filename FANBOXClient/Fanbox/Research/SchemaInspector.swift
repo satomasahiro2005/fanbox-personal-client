@@ -6,9 +6,13 @@ import SwiftData
 /// and records new / missing fields per endpoint + object path into `APISchemaSnapshot`.
 /// Decoders are tolerant, so unknown fields never break decoding; this only reports them.
 ///
-/// Path syntax for `known`: dot-separated object keys, `[]` = array elements (keys are the union over elements):
-/// `"body"`, `"body.items[]"`, `"body.body.blocks[]"`; `""` / `"$"` = the root object.
-/// Snapshots are keyed `"<endpointKey>:<path>"`.
+/// Path syntax for `known` (see `SchemaDescribed`): dot-separated object keys; a component may end with suffixes that
+/// are applied left to right — `[]` = array elements, `{}` = dictionary VALUES (dynamic-id maps such as `imageMap{}`).
+/// Keys are the union over all resolved objects:
+/// `"body"`, `"body.items[]"`, `"body.post.body.imageMap{}"`, `"body.post.body.urlEmbedMap{}.postInfo"`;
+/// `""` / `"$"` = the root object. Snapshots are keyed `"<endpointKey>:<path>"`.
+///
+/// Decoding failures of a 2xx response are reported through `recordFailure` as `.error` research events (SPEC §36).
 ///
 /// `observe` never throws and returns immediately; parsing runs on a utility task, persistence on the main actor.
 /// Unchanged observations of a path are coalesced (sample counts accumulate) for `persistInterval` seconds.
@@ -33,6 +37,8 @@ final class SchemaInspector: @unchecked Sendable {
 
     let persistInterval: TimeInterval
     private let states = OSAllocatedUnfairLock(initialState: [String: PathState]())
+    /// Sink for `.error` research events (`recordFailure`); set once by AppEnvironment, readable from any thread.
+    private let recorder = OSAllocatedUnfairLock<ResearchRecorder?>(initialState: nil)
     @MainActor private var store: LocalStore?
 
     init() {
@@ -47,6 +53,26 @@ final class SchemaInspector: @unchecked Sendable {
     @MainActor
     func attach(store: LocalStore) {
         self.store = store
+    }
+
+    /// Where `recordFailure` sends its research events.
+    func attach(recorder: ResearchRecorder) {
+        self.recorder.withLock { $0 = recorder }
+    }
+
+    // MARK: - Failures (research events)
+
+    /// Reports a response that reached the client with a 2xx status but could not be used — an undecodable body or an
+    /// `{ "error": … }` envelope. Such a failure is the strongest sign of an API change, so it becomes a `.error` research
+    /// event (Sync / Errors list, "エラーのみ") instead of hiding behind a plain `200` request row. Callable from any thread;
+    /// never throws. The description holds the endpoint key, the status and a secret-free reason (key path, never the payload).
+    func recordFailure(endpointKey: String, accountID: String?, statusCode: Int?, error: Error) {
+        if let remote = error as? RemoteError, remote == .cancelled { return }
+        let reason = ResearchRecorder.describe(error)
+        AppLog.research.error("\(SecretRedactor.redact(endpointKey), privacy: .public) unusable response: \(SecretRedactor.redact(reason), privacy: .public)")
+        guard let sink = recorder.withLock({ $0 }) else { return }
+        let status = statusCode.map { "HTTP \($0) · " } ?? ""
+        sink.recordError("\(status)\(reason)", accountID: accountID, endpoint: endpointKey)
     }
 
     /// - Parameters:
@@ -85,35 +111,73 @@ final class SchemaInspector: @unchecked Sendable {
         return result
     }
 
-    /// Objects (dictionaries) found at `path`. `[]` flattens arrays; non-object elements are ignored.
+    /// Objects (dictionaries) found at `path`. Non-object results are ignored.
+    /// - `[]` flattens array elements.
+    /// - `{}` flattens dictionary values. A JSON array in that position (PHP encodes an empty map as `[]`, and a map with
+    ///   sequential keys as a list) contributes its elements, mirroring the tolerant `LenientObject.map` decoding.
     static func resolve(path: String, in root: Any) -> [[String: Any]] {
         let trimmed = path.trimmingCharacters(in: .whitespaces)
         var current: [Any] = [root]
         if !(trimmed.isEmpty || trimmed == "$") {
             for rawComponent in trimmed.split(separator: ".", omittingEmptySubsequences: true) {
-                var component = Substring(rawComponent)
-                if component == "$" { continue }
-                var arrayDepth = 0
-                while component.hasSuffix("[]") {
-                    component = component.dropLast(2)
-                    arrayDepth += 1
-                }
+                let component = PathComponent(rawComponent)
+                if component.name == "$" && component.suffixes.isEmpty { continue }
                 var next: [Any] = []
                 for value in current {
-                    if component.isEmpty {
+                    if component.name.isEmpty {
                         next.append(value)
-                    } else if let dict = value as? [String: Any], let child = dict[String(component)] {
+                    } else if let dict = value as? [String: Any], let child = dict[component.name] {
                         next.append(child)
                     }
                 }
-                for _ in 0..<arrayDepth {
-                    next = next.flatMap { ($0 as? [Any]) ?? [] }
+                for suffix in component.suffixes {
+                    next = next.flatMap { suffix.children(of: $0) }
                 }
                 current = next
                 if current.isEmpty { break }
             }
         }
         return current.compactMap { $0 as? [String: Any] }
+    }
+
+    /// One dot-separated path component: `name` plus its collection suffixes in application order.
+    struct PathComponent: Equatable {
+        enum Suffix: Equatable {
+            /// `[]`: elements of an array.
+            case arrayElements
+            /// `{}`: values of a dictionary keyed by dynamic ids.
+            case mapValues
+
+            func children(of value: Any) -> [Any] {
+                switch self {
+                case .arrayElements:
+                    return (value as? [Any]) ?? []
+                case .mapValues:
+                    if let dict = value as? [String: Any] { return dict.keys.sorted().compactMap { dict[$0] } }
+                    return (value as? [Any]) ?? []
+                }
+            }
+        }
+
+        var name: String
+        var suffixes: [Suffix]
+
+        init(_ raw: Substring) {
+            var rest = raw
+            var reversed: [Suffix] = []
+            while true {
+                if rest.hasSuffix("[]") {
+                    reversed.append(.arrayElements)
+                } else if rest.hasSuffix("{}") {
+                    reversed.append(.mapValues)
+                } else {
+                    break
+                }
+                rest = rest.dropLast(2)
+            }
+            name = String(rest)
+            suffixes = reversed.reversed()
+        }
     }
 
     // MARK: - Coalescing

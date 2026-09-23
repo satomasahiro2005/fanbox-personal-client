@@ -101,9 +101,38 @@ final class ResearchRecorder: @unchecked Sendable {
         record(ResearchEntry(kind: .note, accountID: accountID, endpoint: endpoint, responseBody: text))
     }
 
-    /// Records an error that did not come from an HTTP request (kind `.error`).
+    /// Records an error that did not come from an HTTP request (kind `.error`), e.g. an undecodable 2xx response.
     func recordError(_ description: String, accountID: String? = nil, endpoint: String) {
         record(ResearchEntry(kind: .error, accountID: accountID, endpoint: endpoint, errorDescription: description))
+    }
+
+    /// Records a failed sync / refresh (kind `.sync`), e.g. `timeline` failing with a decoding error.
+    /// Expected, non-research outcomes are skipped: cancellation, the network-mode policy and being offline.
+    func recordSyncFailure(operation: String, accountID: String?, error: RemoteError) {
+        guard Self.isResearchRelevant(error) else { return }
+        record(ResearchEntry(kind: .sync, accountID: accountID, endpoint: operation, errorDescription: Self.describe(error)))
+    }
+
+    /// Whether a sync failure is worth a research event (API / session / server problems, not local conditions).
+    static func isResearchRelevant(_ error: RemoteError) -> Bool {
+        switch error {
+        case .cancelled, .blockedByPolicy, .offline: return false
+        default: return true
+        }
+    }
+
+    /// Short, secret-free description of an error for research events (redacted again when recorded).
+    static func describe(_ error: Error) -> String {
+        guard let remote = error as? RemoteError else { return String(describing: type(of: error)) }
+        switch remote {
+        case .decoding(let endpoint, let detail): return "decoding(\(endpoint)): \(detail)"
+        case .network(let code, let detail): return "network(\(code)): \(detail)"
+        case .server(let status): return "server(\(status))"
+        case .rateLimited(let retryAfter): return "rateLimited(retryAfter: \(retryAfter.map { String(Int($0)) } ?? "-"))"
+        case .unsupported(let operation): return "unsupported(\(operation))"
+        case .invalidRequest(let detail): return "invalidRequest: \(detail)"
+        default: return "\(remote)"
+        }
     }
 
     /// Persists everything recorded so far (tests / before showing the Research screen).

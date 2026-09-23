@@ -60,6 +60,7 @@ final class AppEnvironment {
 
         research.attach(store: store, settings: settings)
         schemaInspector.attach(store: store)
+        schemaInspector.attach(recorder: research)
         wire()
     }
 
@@ -67,6 +68,9 @@ final class AppEnvironment {
     private func wire() {
         sync.onNewNotificationEvents = { [weak self] ids in
             await self?.notifications.process(newEventIDs: ids)
+        }
+        sync.onFailure = { [research] operation, accountID, error in
+            research.recordSyncFailure(operation: operation, accountID: accountID, error: error)
         }
         networkMode.onConnectivityRestored = { [weak self] in
             self?.replies.handleConnectivityRestored()

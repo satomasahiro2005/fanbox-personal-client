@@ -96,7 +96,8 @@ enum SecretRedactor {
             if value.isEmpty { return String(pair) }
             if isSensitiveParameterName(name) { return rawName + "=" + placeholder }
             let decoded = String(value).removingPercentEncoding ?? String(value)
-            let scanned = redactCardNumbers(redactInlineSecrets(decoded))
+            // Full free-text scan: a value may carry JSON (`state={"csrfToken":"…"}`) or header-like text.
+            let scanned = redact(decoded)
             return scanned == decoded ? String(pair) : rawName + "=" + scanned
         }.joined(separator: "&")
     }
@@ -271,13 +272,30 @@ enum SecretRedactor {
     // MARK: - Free text
 
     /// Redacts secrets in arbitrary text (cookie pairs, tokens, card numbers, ...).
+    ///
+    /// Escaped JSON is recognized in every quote encoding used by HTML attributes, JS strings and URLs
+    /// (`&quot;` `&#34;` `&#034;` `&#x22;` `&apos;` `&#39;` `\"` `\u0022` `\x22` `%22` …), e.g. the www.fanbox.cc
+    /// `<meta name="metadata" content="{&quot;csrfToken&quot;:…}">`.
+    /// Fail-safe for encodings no pattern knows (key letters written as entities, double-encoded `&amp;quot;`, …): text that
+    /// contains entities / backslash escapes is also decoded once and scanned; when only the decoded form reveals a secret,
+    /// the decoded, redacted text is returned instead (safety over byte-for-byte fidelity).
     static func redact(_ text: String) -> String {
         guard !text.isEmpty else { return text }
+        let s = redactPatterns(text)
+        guard s.contains("&") || s.contains("\\"), let decoded = decodeEscapes(s) else { return s }
+        let redactedDecoded = redactPatterns(decoded)
+        return redactedDecoded == decoded ? s : redactedDecoded
+    }
+
+    private static func redactPatterns(_ text: String) -> String {
         var s = text
-        s = replace(headerLineRegex, in: s, template: "$1$2\(placeholder)")
+        s = replace(headerLineRegex, in: s, template: "$1$2$3\(placeholder)")
+        s = replace(headerInlineRegex, in: s, template: "$1$2\(placeholder)")
         s = replace(jsonQuotedKeyRegex, in: s, template: "$1\"\(placeholder)\"")
         s = replace(jsonSingleQuotedKeyRegex, in: s, template: "$1'\(placeholder)'")
-        s = replace(htmlEntityKeyRegex, in: s, template: "$1\(placeholder)")
+        s = replace(encodedQuotedKeyRegex, in: s, template: "$1$2\(placeholder)")
+        s = replace(htmlNamedValueRegex, in: s, template: "$1$3\(placeholder)$3")
+        s = replace(htmlValueNamedRegex, in: s, template: "$1$2\(placeholder)$2$3")
         s = redactInlineSecrets(s)
         s = replace(bearerRegex, in: s, template: "$1 \(placeholder)")
         s = replace(cvcRegex, in: s, template: "$1\(placeholder)")
@@ -291,9 +309,27 @@ enum SecretRedactor {
         return replace(inlineKeyValueRegex, in: text, template: "$1$2\(placeholder)")
     }
 
-    // Header-like lines: "Cookie: …", "Set-Cookie: …", "Authorization: …", "X-CSRF-Token: …" (rest of the line).
+    /// A double / single quote as escaped JSON writes it inside HTML attributes, JS strings and URLs:
+    /// `&quot;` `&#34;` `&#034;` `&#x22;` `&#x0022;` `&apos;` `&#39;` `&#x27;` (`;` optional), `\"` `\\\"` `\'`, `\u0022`
+    /// `\u0027`, `\x22`, `%22` `%27`. Plain `"` / `'` are handled by the dedicated JSON rules.
+    static let encodedQuotePattern =
+        #"(?:&(?:quot|apos|#0*3[49]|#[xX]0*2[27]);?|\\+(?:["']|[uU]00(?:22|27)|[xX](?:22|27))|%2[27])"#
+    /// A colon, literal or encoded the same ways.
+    static let encodedColonPattern = #"(?::|&(?:colon|#0*58|#[xX]0*3[aA]);|\\+[uU]003[aA]|%3[aA])"#
+
+    private static let headerNamesPattern =
+        #"Set-Cookie2?|Cookie|Proxy-Authorization|Authorization|X-CSRF-Token|X-XSRF-Token|X-Auth-Token|X-API-Key"#
+
+    // Header dump lines ("Cookie: …", "> Authorization: …", "-H 'X-CSRF-Token: …'"): the whole rest of the line.
+    // Line-anchored, so a "cookie:" inside minified single-line HTML / JS never wipes the rest of the page.
     private static let headerLineRegex = makeRegex(
-        #"(?i)(?<![A-Za-z0-9_-])(Set-Cookie2?|Cookie|Proxy-Authorization|Authorization|X-CSRF-Token|X-XSRF-Token|X-Auth-Token|X-API-Key)(\s*:[ \t]*+)(?!<REDACTED>)[^\r\n]+"#)
+        #"(?im)^([ \t]*(?:[<>*+-]+[ \t]*)?(?:-H[ \t]*)?["']?)("# + headerNamesPattern + #")([ \t]*:[ \t]*+)(?!<REDACTED>)[^\r\n]+"#)
+    // The same names in the middle of a line: only the value — a quoted string, or an optional auth scheme plus one token,
+    // followed by further `; name=value` cookie pairs.
+    private static let headerInlineRegex = makeRegex(
+        #"(?i)(?<![A-Za-z0-9_.$-])("# + headerNamesPattern + #")([ \t]*:[ \t]*+)(?!<REDACTED>)"#
+            + #"(?:"[^"\r\n]*"|'[^'\r\n]*'|(?:(?:Bearer|Basic|Digest|Token|Negotiate|NTLM)[ \t]+)?[^\s;,"'<>(){}\[\]]+"#
+            + #"(?:;[ \t]*[^\s;,"'<>(){}\[\]=]+=[^\s;,"'<>(){}\[\]]*)*)"#)
 
     private static let sensitiveKeyPattern =
         #"[A-Za-z0-9_\-]*(?:token|password|passwd|secret|csrf|xsrf|sessid|cookie|authorization|card_?number|security_?code|cvc|cvv|threeds|3ds|api_?key)[A-Za-z0-9_\-]*|pan|pin|otp|pwd"#
@@ -303,13 +339,26 @@ enum SecretRedactor {
         #"(?i)("(?:"# + sensitiveKeyPattern + #")"\s*:\s*)(?:"(?:[^"\\]|\\.)*"|-?[0-9][0-9.eE+-]*|true|false)"#)
     private static let jsonSingleQuotedKeyRegex = makeRegex(
         #"(?i)('(?:"# + sensitiveKeyPattern + #")'\s*:\s*)'(?:[^'\\]|\\.)*'"#)
-    // HTML-escaped JSON in meta tags: &quot;csrfToken&quot;:&quot;…&quot;
-    private static let htmlEntityKeyRegex = makeRegex(
-        #"(?i)(&quot;(?:"# + sensitiveKeyPattern + #")&quot;\s*:\s*&quot;)(?:(?!&quot;).)*"#)
+    // Escaped JSON (HTML attribute / JS string / URL): &quot;csrfToken&quot;:&quot;…&quot;, &#34;…&#34;, \"csrfToken\":\"…\".
+    // The value runs to the next quote in the same encoding as its opening quote (or to the end of the line).
+    private static let encodedQuotedKeyRegex = makeRegex(
+        #"(?i)("# + encodedQuotePattern + #"(?:"# + sensitiveKeyPattern + #")"# + encodedQuotePattern
+            + #"[ \t]*"# + encodedColonPattern + #"[ \t]*)(?:("# + encodedQuotePattern + #")(?:(?!\2)[^\r\n])*|-?[0-9][0-9.eE+-]*|true|false)"#)
+
+    // HTML tags whose name / id / property is a secret key: <meta name="csrf-token" content="…">,
+    // <input type="hidden" name="_token" value="…"> (either attribute order).
+    private static let htmlNamedValueRegex = makeRegex(
+        #"(?i)(<[^<>]*?\b(?:name|id|property|itemprop)\s*=\s*(["']?)(?:"# + sensitiveKeyPattern
+            + #")\2(?=[\s/>])[^<>]*?\b(?:content|value)\s*=\s*)(["'])(?!<REDACTED>)[^"'<>]*\3"#)
+    private static let htmlValueNamedRegex = makeRegex(
+        #"(?i)(<[^<>]*?\b(?:content|value)\s*=\s*)(["'])(?!<REDACTED>)[^"'<>]*\2([^<>]*?\b(?:name|id|property|itemprop)\s*=\s*(["']?)(?:"#
+            + sensitiveKeyPattern + #")\4(?=[\s/>]))"#)
 
     // Unquoted key=value / key: value. The key must not be preceded by a word character (so "keyword=" or "author=" never match).
+    // The value may be quoted, also with an encoded quote (`csrfToken: &quot;…&quot;`).
     private static let inlineKeyValueRegex = makeRegex(
-        #"(?i)(?<![A-Za-z0-9])((?:[A-Za-z0-9_\-]*(?:token|password|passwd|secret|csrf|xsrf|sessid|api_?key|card_?number)[A-Za-z0-9_\-]*|pwd|otp))(\s*[=:]\s*+)(?!<REDACTED>)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s&;,"'<>(){}\[\]]+)"#)
+        #"(?i)(?<![A-Za-z0-9])((?:[A-Za-z0-9_\-]*(?:token|password|passwd|secret|csrf|xsrf|sessid|api_?key|card_?number)[A-Za-z0-9_\-]*|pwd|otp))(\s*[=:]\s*+)(?!<REDACTED>)"#
+            + #"(?:"[^"\r\n]*"|'[^'\r\n]*'|("# + encodedQuotePattern + #")(?:(?!\3)[^\r\n])*\3?|[^\s&;,"'<>(){}\[\]]+)"#)
 
     private static let bearerRegex = makeRegex(#"(?i)\b(Bearer)\s+(?!<REDACTED>)[A-Za-z0-9\-._~+/]+=*"#)
 
@@ -317,13 +366,16 @@ enum SecretRedactor {
     private static let cvcRegex = makeRegex(
         #"(?i)(?<![A-Za-z])((?:cvc2?|cvv2?|csc|security[ _-]?code|セキュリティ(?:ー)?コード)["']?\s*[:=：]?\s*["']?)\d{3,4}(?!\d)"#)
 
-    // 13–19 digits, optionally grouped by single spaces or hyphens, not glued to other word characters or path slashes.
-    private static let cardCandidateRegex = makeRegex(#"(?<![0-9A-Za-z/_.])\d(?:[ -]?\d){12,18}(?![0-9A-Za-z/_])"#)
+    // 13–19 digits, optionally grouped by single spaces or hyphens, not glued to other word characters, path slashes,
+    // dots / hyphens or a following file extension (URL paths, `file-….jpeg`, hashes and `id_…` identifiers stay intact).
+    private static let cardCandidateRegex = makeRegex(#"(?<![0-9A-Za-z/_.\-])\d(?:[ -]?\d){12,18}(?![0-9A-Za-z/_]|[.\-][0-9A-Za-z])"#)
 
-    /// Masks Luhn-valid card-like numbers, keeping at most the last 4 digits: `<REDACTED CARD ••••1234>`.
+    /// Masks Luhn-valid card-like numbers, keeping at most the last 4 digits: `<REDACTED CARD ••••1234>` (or `mask(last4)`).
     /// A candidate run (13–19 digits, optionally grouped by spaces / hyphens) is masked when the whole run, or any
-    /// contiguous span of its groups (≥ 3 digits each) holding 13–19 digits, passes the Luhn check.
-    static func redactCardNumbers(_ text: String) -> String {
+    /// contiguous span of its groups (≥ 3 digits each) holding 13–19 digits, passes the Luhn check and starts like a
+    /// payment card (major industry identifier 2–6: Visa, Mastercard, JCB, Amex, Diners, Discover, UnionPay). Runs starting
+    /// with 0 / 1 / 7–9 — millisecond timestamps (`17…`), snowflake ids — are kept.
+    static func redactCardNumbers(_ text: String, mask: (_ last4: String) -> String = { "<REDACTED CARD ••••\($0)>" }) -> String {
         guard let regex = cardCandidateRegex, text.utf16.count >= 13 else { return text }
         let ns = text as NSString
         let matches = regex.matches(in: text, range: NSRange(location: 0, length: ns.length))
@@ -332,7 +384,7 @@ enum SecretRedactor {
         for match in matches.reversed() {
             let candidate = ns.substring(with: match.range)
             guard let last4 = luhnCardLast4(in: candidate), let range = Range(match.range, in: result) else { continue }
-            result.replaceSubrange(range, with: "<REDACTED CARD ••••\(last4)>")
+            result.replaceSubrange(range, with: mask(last4))
         }
         return result
     }
@@ -340,7 +392,7 @@ enum SecretRedactor {
     /// Last 4 digits of the card number found in a candidate run, or nil when none passes Luhn.
     private static func luhnCardLast4(in candidate: String) -> String? {
         let digits = candidate.filter(\.isASCIIDigitCharacter)
-        if (13...19).contains(digits.count), luhnValid(digits) { return String(digits.suffix(4)) }
+        if isCardNumber(digits) { return String(digits.suffix(4)) }
         let groups = candidate.split(whereSeparator: { $0 == " " || $0 == "-" }).map(String.init)
         guard groups.count > 1 else { return nil }
         for length in stride(from: groups.count, through: 1, by: -1) {
@@ -348,10 +400,16 @@ enum SecretRedactor {
                 let span = groups[start..<(start + length)]
                 guard span.allSatisfy({ $0.count >= 3 }) else { continue }
                 let joined = span.joined()
-                if (13...19).contains(joined.count), luhnValid(joined) { return String(joined.suffix(4)) }
+                if isCardNumber(joined) { return String(joined.suffix(4)) }
             }
         }
         return nil
+    }
+
+    /// 13–19 ASCII digits, payment-card industry prefix (2–6) and a valid Luhn checksum.
+    static func isCardNumber(_ digits: String) -> Bool {
+        guard (13...19).contains(digits.count), let first = digits.first, ("2"..."6").contains(first) else { return false }
+        return luhnValid(digits)
     }
 
     /// Luhn checksum on an ASCII digit string.
@@ -371,6 +429,90 @@ enum SecretRedactor {
             count += 1
         }
         return count > 0 && sum % 10 == 0
+    }
+
+    // MARK: - Escape decoding (fail-safe scan)
+
+    private static let namedEntities: [String: Unicode.Scalar] = [
+        "quot": "\"", "apos": "'", "amp": "&", "lt": "<", "gt": ">", "colon": ":", "equals": "=", "sol": "/", "bsol": "\\",
+        "nbsp": " ", "lbrace": "{", "rbrace": "}", "lcub": "{", "rcub": "}", "comma": ",", "semi": ";", "num": "#",
+    ]
+
+    /// One decoding pass over HTML character references (`&quot;` `&#34;` `&#x22;` …) and backslash escapes
+    /// (`\"` `\'` `\/` `\\` `\uXXXX` `\xXX`). Returns nil when nothing was decoded. Never throws; invalid references stay as they are.
+    static func decodeEscapes(_ text: String) -> String? {
+        let scalars = Array(text.unicodeScalars)
+        var out = String.UnicodeScalarView()
+        var changed = false
+        var i = 0
+        while i < scalars.count {
+            let c = scalars[i]
+            if c == "&", let (value, length) = entity(in: scalars, at: i) {
+                out.append(value)
+                i += length
+                changed = true
+                continue
+            }
+            if c == "\\", i + 1 < scalars.count {
+                let next = scalars[i + 1]
+                switch next {
+                case "\"", "'", "/", "\\":
+                    out.append(next)
+                    i += 2
+                    changed = true
+                    continue
+                case "u", "U":
+                    if let value = hexScalar(scalars, from: i + 2, count: 4) {
+                        out.append(value)
+                        i += 6
+                        changed = true
+                        continue
+                    }
+                case "x", "X":
+                    if let value = hexScalar(scalars, from: i + 2, count: 2) {
+                        out.append(value)
+                        i += 4
+                        changed = true
+                        continue
+                    }
+                default:
+                    break
+                }
+            }
+            out.append(c)
+            i += 1
+        }
+        return changed ? String(out) : nil
+    }
+
+    /// `&name;` / `&#123;` / `&#x7B;` starting at `start` → (scalar, length including `&` and `;`).
+    private static func entity(in scalars: [Unicode.Scalar], at start: Int) -> (Unicode.Scalar, Int)? {
+        var end = start + 1
+        let limit = min(scalars.count, start + 12)
+        while end < limit, scalars[end] != ";" { end += 1 }
+        guard end < limit, end > start + 1 else { return nil }
+        let body = String(String.UnicodeScalarView(scalars[(start + 1)..<end]))
+        let length = end - start + 1
+        if body.hasPrefix("#") {
+            let number = body.dropFirst()
+            let value: UInt32?
+            if number.first == "x" || number.first == "X" {
+                value = UInt32(number.dropFirst(), radix: 16)
+            } else {
+                value = UInt32(number, radix: 10)
+            }
+            guard let value, let scalar = Unicode.Scalar(value) else { return nil }
+            return (scalar, length)
+        }
+        guard let scalar = namedEntities[body.lowercased()] else { return nil }
+        return (scalar, length)
+    }
+
+    private static func hexScalar(_ scalars: [Unicode.Scalar], from start: Int, count: Int) -> Unicode.Scalar? {
+        guard start + count <= scalars.count else { return nil }
+        let hex = String(String.UnicodeScalarView(scalars[start..<(start + count)]))
+        guard hex.allSatisfy(\.isHexDigit), let value = UInt32(hex, radix: 16) else { return nil }
+        return Unicode.Scalar(value)
     }
 
     // MARK: - Regex helpers
