@@ -1931,6 +1931,8 @@ save lastKnownItemID = newest non-pinned id seen; lastSuccessfulSync = now
 
 `WebBridgeDestination` in `FANBOXClient/Core/Web/WebBridge.swift` currently builds the URLs in the "Current code" column. The **Research status** column says whether this research found evidence for each URL. Every URL marked *unverified* should be checked by opening it in the account WebView (Research Mode) before release.
 
+Until then the app does not rely on them blindly: when the first main-frame response of a requested page is 404 or 410, the account WebView switches to the next page of `WebDestination.fallbackSteps` (`FANBOXClient/Core/Web/WebDestination+Fallback.swift`) and says so in a banner. Every chain ends at a page marked **verified** below (plan → creator plans → creator page; payment settings → `payment.pixiv.net/cards` → user settings; payment history → invoices → user settings; supporting plans → home). Payment sessions also offer the same pages manually ("ページが表示されない場合"), because a single-page app may render "not found" with status 200.
+
 | Purpose | URL | Current code | Research status |
 |---|---|---|---|
 | Home / metadata | `https://www.fanbox.cc/` | `.home` | **Verified** (many clients) |

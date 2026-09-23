@@ -228,7 +228,7 @@ struct PaymentProfileEditorView: View {
                 } header: {
                     Text("メモ")
                 } footer: {
-                    Text("暗証番号・セキュリティコード・有効期限は書かないでください。")
+                    Text("暗証番号・セキュリティコード・有効期限・パスワード・3Dセキュアやワンタイムパスワードは書かないでください。")
                 }
 
                 if !shownIssues.isEmpty {

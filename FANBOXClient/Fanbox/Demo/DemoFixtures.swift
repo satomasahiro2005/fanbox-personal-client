@@ -105,7 +105,7 @@ enum DemoFixtures {
             supports: [
                 DemoSupportFixture(creatorID: "demo-aoi", fee: 500, paymentMethod: "card"),
                 DemoSupportFixture(creatorID: "demo-mint", fee: 1000, paymentMethod: "card"),
-                DemoSupportFixture(creatorID: "demo-shion", fee: 100, paymentMethod: "paypal"),
+                DemoSupportFixture(creatorID: "demo-shion", fee: 100, paymentMethod: "paypal", stopping: true),
                 DemoSupportFixture(creatorID: "demo-ruri", fee: 3000, paymentMethod: "card"),
             ],
             followOnly: ["demo-sora", "demo-kohaku"],

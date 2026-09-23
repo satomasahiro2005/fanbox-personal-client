@@ -27,7 +27,8 @@ struct PostDetailView: View {
     @State private var refreshAgain: Bool?
     @State private var refreshError: RemoteError?
     @State private var viewerStart: PostDetailImageViewerStart?
-    @State private var showPayment = false
+    /// Restricted post → payment flow sheet (SPEC §14).
+    @State private var paymentRequest: PaymentFlowRequest?
     @State private var showTagMemo = false
     @State private var pendingLike: Bool?
     @State private var alertMessage: String?
@@ -88,13 +89,7 @@ struct PostDetailView: View {
                 CreatorDetailView(creatorID: creatorID)
             }
         }
-        .sheet(isPresented: $showPayment) {
-            if let post {
-                NavigationStack {
-                    PaymentFlowView(creatorID: post.creatorID, planID: matchingPlanID(post), preselectedAccountID: nil)
-                }
-            }
-        }
+        .paymentFlowSheet($paymentRequest)
         .sheet(isPresented: $showTagMemo) {
             TagMemoEditorView(postID: postID)
         }
@@ -152,7 +147,7 @@ struct PostDetailView: View {
             PostDetailRestrictedView(excerpt: post.excerpt, feeRequired: post.feeRequired,
                                planTitle: HomePlanLabel.planTitle(feeRequired: post.feeRequired,
                                                                   plans: creatorPlans.map { ($0.fee, $0.title) })) {
-                showPayment = true
+                paymentRequest = PaymentFlowRequest(creatorID: post.creatorID, planID: matchingPlanID(post))
             }
         } else if !post.bodyText.isEmpty && post.hasCachedBody {
             Text(post.bodyText).textSelection(.enabled)

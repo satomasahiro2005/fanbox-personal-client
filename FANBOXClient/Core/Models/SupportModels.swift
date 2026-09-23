@@ -26,6 +26,13 @@ final class Support {
     /// Observed fact only, e.g. "支援が一覧から消えました". Never an asserted cause.
     var attentionReason: String?
     var acknowledgedAt: Date?
+    /// OBSERVED: last time FANBOX (`creator.listFollowing`) reported `isSupported && isStopped` for this account — the
+    /// support was stopped and stays valid until the end of the billing month (docs/API.md §7.2 / §18.10).
+    /// See `SupportStopRule` for how it affects 来月予定. nil = never observed.
+    var stoppingObservedAt: Date?
+    /// USER-ENTERED (not observed): the user recorded in this app that this support will not renew ("停止予定").
+    /// Never verified against FANBOX; always labeled "自分で記録" in the UI. nil = not recorded.
+    var userStopMarkedAt: Date?
 
     init(accountID: String, creatorID: String, creatorName: String, planID: String?, planTitle: String, amount: Int,
          status: SupportStatus = .active, observedAt: Date = .now) {
@@ -111,6 +118,9 @@ final class PaymentRecord {
     var paidAt: Date
     var reportedPaymentMethod: String?
     var fetchedAt: Date
+    /// true when FANBOX did not report the paid amount (`amount` is then 0 and MUST NOT be summed as ¥0).
+    /// nil / false = the amount was reported.
+    var amountUnknown: Bool?
 
     init(paymentID: String, accountID: String, creatorID: String?, creatorName: String?, amount: Int, paidAt: Date,
          reportedPaymentMethod: String? = nil, fetchedAt: Date = .now) {

@@ -32,6 +32,8 @@ final class AppEnvironment {
     @ObservationIgnored let offline: OfflineLibraryService
     @ObservationIgnored let prefetcher: MediaPrefetcher
     @ObservationIgnored let web: WebBridge
+    /// SPEC §14 状態再同期 after payment web sessions (immediate + follow-up checks).
+    @ObservationIgnored let paymentResync: PaymentResyncScheduler
     @ObservationIgnored let webSessions: WebSessionStore
     @ObservationIgnored let accounts: AccountService
     @ObservationIgnored let uploads: UploadQueue
@@ -71,6 +73,7 @@ final class AppEnvironment {
         offline = OfflineLibraryService(store: store, engine: sync, media: media, settings: settings)
         prefetcher = MediaPrefetcher(store: store, media: media)
         web = WebBridge()
+        paymentResync = PaymentResyncScheduler(engine: sync)
         accounts = AccountService(store: store, credentials: credentials, webSessions: webSessions, remote: remote)
         uploads = UploadQueue(store: store, remote: remote, network: networkMode)
         drafts = DraftService(store: store, uploads: uploads, remote: remote, web: web)
@@ -112,16 +115,8 @@ final class AppEnvironment {
         }
         web.onDismiss = { [weak self] request in
             guard let self else { return }
-            if case .payment = request.purpose {
-                let sync = self.sync
-                Task { await sync.sync(.supports, accountID: request.accountID, reason: .afterWrite) }
-                // Activation can lag behind the payment (docs/API.md §18.10): look again a few minutes later.
-                Task { @MainActor [weak self] in
-                    try? await Task.sleep(nanoseconds: UInt64(Self.paymentResyncDelay * 1_000_000_000))
-                    guard let self else { return }
-                    await self.sync.sync(.supports, accountID: request.accountID, reason: .afterWrite)
-                }
-            }
+            // Payment flows: immediate resync + follow-ups (activation can lag, docs/API.md §18.10).
+            self.paymentResync.handleDismissedPaymentSession(request)
             if CreatorWebReconcile.needsManagedPostsResync(request) {
                 Task { await self.sync.sync(.creatorPosts, accountID: request.accountID, reason: .afterWrite) }
             }

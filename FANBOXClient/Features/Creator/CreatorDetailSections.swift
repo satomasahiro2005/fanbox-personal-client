@@ -237,14 +237,14 @@ struct CreatorSupportSection: View {
                 if let detail = profile?.displayDetail, detail != profile?.nickname {
                     Text(detail).font(.caption2).foregroundStyle(.secondary)
                 }
-                CreatorVerificationPill(state: assignment.verificationState)
+                CreatorVerificationPill(state: assignment.verificationState, lastVerifiedAt: assignment.lastVerifiedAt)
             }
         } else {
             HStack(spacing: 6) {
                 Image(systemName: "creditcard")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Text("決済手段: 未設定")
+                Text("支払い方法: 未設定")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -252,17 +252,14 @@ struct CreatorSupportSection: View {
     }
 }
 
-/// SPEC §13: an inferred payment method MUST be labeled as a guess.
+/// SPEC §13: an inferred payment method MUST be labeled as a guess. Same labels, symbols and tints as the Support
+/// screens (`VerificationLabel` / `SupportText.verificationLabel`), so one assignment reads the same everywhere.
 struct CreatorVerificationPill: View {
     let state: VerificationState
+    var lastVerifiedAt: Date? = nil
 
     var body: some View {
-        switch state {
-        case .verified: PillLabel(text: "確認済み", systemImage: "checkmark.seal", tint: .green)
-        case .inferred: PillLabel(text: "推定", systemImage: "questionmark.circle", tint: .orange)
-        case .manual: PillLabel(text: "手動設定", tint: .blue)
-        case .unknown: PillLabel(text: "未確認", tint: .secondary)
-        }
+        VerificationLabel(state: state, lastVerifiedAt: lastVerifiedAt)
     }
 }
 

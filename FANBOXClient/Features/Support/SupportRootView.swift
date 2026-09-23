@@ -16,7 +16,6 @@ struct SupportRootView: View {
     @State private var grouping: Grouping = .creator
     @State private var refreshError: RemoteError?
     @State private var flowRequest: PaymentFlowRequest?
-    @State private var pendingWeb: PendingWebOpen?
 
     init() {
         let raw = SyncResource.supports.rawValue
@@ -28,7 +27,10 @@ struct SupportRootView: View {
         let snapshots = supports.filter { known.contains($0.accountID) }.map(SupportSnapshot.init)
         let paymentSnapshots = payments.filter { known.contains($0.accountID) }.map(PaymentSnapshot.init)
         let now = Date.now
-        let summary = SupportAnalyzer.summarize(supports: snapshots, payments: paymentSnapshots, now: now)
+        let unpaidAccountIDs = SupportAnalyzer.paymentStateAttentionAccountIDs(accounts.map(AccountPaymentState.init))
+        let unpaidAccounts = accounts.filter { unpaidAccountIDs.contains($0.id) }
+        let summary = SupportAnalyzer.summarize(supports: snapshots, payments: paymentSnapshots, now: now,
+                                                paymentStateAttentionAccountIDs: unpaidAccountIDs)
         let attention = SupportAnalyzer.attentionItems(snapshots)
         let order = accounts.map(\.id)
         let assignmentSnapshots = assignments.map(AssignmentSnapshot.init)
@@ -44,10 +46,16 @@ struct SupportRootView: View {
 
             Section {
                 SupportDashboardCard(summary: summary, monthLabel: SupportAnalyzer.monthLabel(now), lastSync: status.lastSync)
+            } footer: {
+                Text(SupportText.dashboardFootnote)
+                    .accessibilityIdentifier("supportDashboardFootnote")
             }
 
-            if !attention.isEmpty {
+            if !attention.isEmpty || !unpaidAccounts.isEmpty {
                 Section {
+                    ForEach(unpaidAccounts) { account in
+                        PaymentStateAttentionCard(account: account)
+                    }
                     ForEach(attention) { item in
                         if let support = supports.first(where: { $0.key == item.id }) {
                             SupportAttentionCard(support: support) {
@@ -56,7 +64,7 @@ struct SupportRootView: View {
                         }
                     }
                 } header: {
-                    Label("要確認 \(attention.count)", systemImage: "exclamationmark.triangle.fill")
+                    Label("要確認 \(attention.count + unpaidAccounts.count)", systemImage: "exclamationmark.triangle.fill")
                         .foregroundStyle(.orange)
                         .accessibilityIdentifier("supportAttentionHeader")
                 } footer: {
@@ -119,15 +127,7 @@ struct SupportRootView: View {
             guard !ids.isEmpty, SupportSync.isStale(states: syncStates, accountIDs: ids) else { return }
             await refreshAll(priority: .backgroundSync, reason: .onDemand)
         }
-        .sheet(item: $flowRequest, onDismiss: {
-            SupportSync.open(pendingWeb, env: env)
-            pendingWeb = nil
-        }) { request in
-            PaymentFlowView(creatorID: request.creatorID, planID: request.planID, preselectedAccountID: request.accountID) { pending in
-                pendingWeb = pending
-                flowRequest = nil
-            }
-        }
+        .paymentFlowSheet($flowRequest)
     }
 
     private var emptyRow: some View {
@@ -164,10 +164,9 @@ struct SupportDashboardCard: View {
             }
             SupportMoneyRow(title: "定常月額", value: summary.recurringMonthly, caption: "支援中プランの月額合計",
                             identifier: "supportRecurringMonthly")
-            SupportMoneyRow(title: "今月実請求", value: summary.actualThisMonth,
-                            caption: summary.actualThisMonth == nil ? "お支払い履歴が未取得です" : "観測したお支払いの合計",
+            SupportMoneyRow(title: "今月実請求", value: summary.actualThisMonth, caption: SupportText.actualCaption(summary),
                             identifier: "supportActualThisMonth")
-            SupportMoneyRow(title: "来月予定", value: summary.nextMonthPlanned, caption: "継続中の支援の合計",
+            SupportMoneyRow(title: "来月予定", value: summary.nextMonthPlanned, caption: SupportText.nextMonthCaption(summary),
                             identifier: "supportNextMonthPlanned")
             Divider()
             HStack(spacing: 24) {
@@ -288,6 +287,83 @@ struct SupportAttentionCard: View {
         isChecking = true
         defer { isChecking = false }
         let error = await SupportSync.refresh(env: env, accountIDs: [support.accountID], includePayments: false,
+                                              priority: .interactiveRead, reason: .userRefresh)
+        checkFailed = error != nil
+    }
+}
+
+// MARK: - 決済状態を確認できません (SPEC §15)
+
+/// Account-level observation: FANBOX reported unpaid payments for the account (`Account.hasUnpaidPayments`, set by sync).
+/// States the observation only — never that a payment failed. Stays while FANBOX keeps reporting it.
+struct PaymentStateAttentionCard: View {
+    let account: Account
+
+    @Environment(AppEnvironment.self) private var env
+    @State private var isChecking = false
+    @State private var checkFailed = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                AccountBadge(accountID: account.id)
+                Spacer()
+            }
+            Label(SupportText.paymentStateUnknown, systemImage: "eye")
+                .font(.subheadline.weight(.semibold))
+                .accessibilityIdentifier("paymentStateUnknownFact")
+            Text(SupportText.paymentStateUnknownDetail)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if let checked = account.unpaidPaymentsCheckedAt {
+                Text("観測日時: \(Formatters.shortDate(checked)) \(Formatters.time(checked))")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            if checkFailed {
+                Text("状態を確認できませんでした。キャッシュ済みデータを表示しています")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+            }
+            HStack {
+                Button {
+                    Task { await checkState() }
+                } label: {
+                    if isChecking {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Label("状態を確認", systemImage: "arrow.clockwise")
+                    }
+                }
+                .disabled(isChecking)
+                .accessibilityIdentifier("paymentStateCheck")
+                Menu {
+                    Button {
+                        env.web.openWeb(account: account.id, destination: .paymentHistory, purpose: .payment)
+                    } label: {
+                        Label("お支払い履歴", systemImage: "list.bullet.rectangle")
+                    }
+                    Button {
+                        env.web.openWeb(account: account.id, destination: .paymentSettings, purpose: .payment)
+                    } label: {
+                        Label("お支払い方法", systemImage: "creditcard")
+                    }
+                } label: {
+                    Label("Web で開く", systemImage: "safari")
+                }
+                .accessibilityIdentifier("paymentStateOpenWeb")
+            }
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .padding(.vertical, 4)
+        .accessibilityIdentifier("paymentStateCard-\(account.id)")
+    }
+
+    private func checkState() async {
+        isChecking = true
+        defer { isChecking = false }
+        let error = await SupportSync.refresh(env: env, accountIDs: [account.id], includePayments: true,
                                               priority: .interactiveRead, reason: .userRefresh)
         checkFailed = error != nil
     }

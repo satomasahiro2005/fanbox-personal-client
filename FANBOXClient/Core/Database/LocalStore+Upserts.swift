@@ -106,6 +106,8 @@ extension LocalStore {
             }
             if !row.isFollowed { row.isFollowed = true; changedFollow.insert(row.creatorID) }
         }
+        // `isSupported && isStopped` → 停止予定 on this account's Support rows (SPEC §10.3 来月予定).
+        applyStopObservations(creators, account: account)
         // Creators this account no longer follows (array property → filter in memory).
         for row in fetch(FetchDescriptor<Creator>()) where !followedIDs.contains(row.creatorID) && row.followedByAccountIDs.contains(accountID) {
             row.followedByAccountIDs.removeAll { $0 == accountID }
@@ -211,6 +213,11 @@ extension LocalStore {
                     s.attentionReason = nil
                     s.acknowledgedAt = nil
                 }
+                if s.status != .active {
+                    // A new support period: stop signals of the previous one no longer apply.
+                    s.stoppingObservedAt = nil
+                    s.userStopMarkedAt = nil
+                }
                 s.status = .active
                 s.creatorName = r.creatorName.isEmpty ? s.creatorName : r.creatorName
                 s.creatorIconURL = r.creatorIconURL ?? s.creatorIconURL
@@ -254,9 +261,25 @@ extension LocalStore {
 
         // Previously active supports that are no longer returned: observed fact only, never an asserted cause.
         let disappearing = previouslyActive.filter { remoteByCreator[$0] == nil }.sorted()
-        if listingIsComplete, !disappearing.isEmpty, confirmDisappearance(disappearing, previouslyActive: previouslyActive,
-                                                                            accountID: accountID, now: now) {
+        // Only a complete listing can show that something is gone. Stops that FANBOX reported (isStopped) or that the
+        // user recorded end the support (支援終了) instead of raising an anomaly (SPEC §10.3 / §15).
+        var unexplained: [String] = []
+        if listingIsComplete {
             for creatorID in disappearing {
+                guard let s = existing[creatorID] else { continue }
+                if Self.explainedStop(s, now: now) != nil {
+                    markEndedByStop(s, now: now, source: source, recordHistory: false)
+                    record(.ended, creatorID: creatorID, creatorName: s.creatorName, oldPlanID: s.planID, newPlanID: nil,
+                           oldPlan: s.planTitle, newPlan: nil, oldAmount: s.amount, newAmount: nil)
+                    diff.ended.append(creatorID)
+                } else {
+                    unexplained.append(creatorID)
+                }
+            }
+        }
+        if listingIsComplete, !unexplained.isEmpty, confirmDisappearance(unexplained, previouslyActive: previouslyActive,
+                                                                           accountID: accountID, now: now) {
+            for creatorID in unexplained {
                 guard let s = existing[creatorID] else { continue }
                 s.status = .missing
                 s.missingSince = now
@@ -270,7 +293,7 @@ extension LocalStore {
                 let assignmentKey = Support.key(accountID: accountID, creatorID: creatorID)
                 if let a = first(#Predicate<SupportPaymentAssignment> { $0.key == assignmentKey }) { downgradeVerification(a, now: now) }
             }
-        } else if listingIsComplete, disappearing.isEmpty {
+        } else if listingIsComplete, unexplained.isEmpty {
             clearMassDisappearanceStrike(accountID: accountID)
         }
 
@@ -287,7 +310,7 @@ extension LocalStore {
             let supported = !set.isEmpty
             if creator.isSupported != supported { creator.isSupported = supported; supportFlagChanged.insert(creatorID) }
         }
-        let feeChanged = Set(diff.started + diff.changed + diff.restored + diff.disappeared)
+        let feeChanged = Set(diff.observedCreatorIDs)
         if !feeChanged.isEmpty {
             refreshAccountPlanFees(accountID: accountID, creatorIDs: feeChanged,
                                    fee: { cid in existing[cid].flatMap { $0.isActive ? $0.amount : nil } })
@@ -750,13 +773,18 @@ extension LocalStore {
             if let p = known[key] {
                 p.creatorID = item.creatorID ?? p.creatorID
                 p.creatorName = item.creatorName ?? p.creatorName
-                p.amount = item.amount
+                if item.isAmountReported {
+                    p.amount = item.amount
+                    p.amountUnknown = nil
+                }   // else: keep an amount reported earlier; a record never seen with one stays flagged
                 p.paidAt = item.paidAt
                 p.reportedPaymentMethod = item.paymentMethod ?? p.reportedPaymentMethod
                 p.fetchedAt = now
             } else {
                 let p = PaymentRecord(paymentID: item.id, accountID: accountID, creatorID: item.creatorID, creatorName: item.creatorName,
-                                      amount: item.amount, paidAt: item.paidAt, reportedPaymentMethod: item.paymentMethod, fetchedAt: now)
+                                      amount: item.isAmountReported ? item.amount : 0, paidAt: item.paidAt,
+                                      reportedPaymentMethod: item.paymentMethod, fetchedAt: now)
+                if !item.isAmountReported { p.amountUnknown = true }
                 context.insert(p)
                 known[key] = p
             }

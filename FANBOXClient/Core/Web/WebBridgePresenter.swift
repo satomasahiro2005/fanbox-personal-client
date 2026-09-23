@@ -225,11 +225,19 @@ struct AccountWebSessionView: View {
 
     @ViewBuilder
     private var purposeBanner: some View {
+        if let fallback = controller.activeFallback {
+            WebNoticeBanner(systemImage: "arrow.triangle.branch", tint: .orange,
+                            text: "「\(request.destination.title)」のページを開けなかったため「\(fallback.title)」を表示しています")
+                .accessibilityIdentifier("webFallbackBanner")
+        }
         switch request.purpose {
         case .payment:
-            WebNoticeBanner(systemImage: "lock.shield", tint: .blue,
-                            text: "決済は FANBOX / pixiv の画面で行われます。カード番号等はこのアプリに保存されません")
-                .accessibilityIdentifier("webPaymentBanner")
+            VStack(alignment: .leading, spacing: 0) {
+                WebNoticeBanner(systemImage: "lock.shield", tint: .blue,
+                                text: "決済は FANBOX / pixiv の画面で行われます。カード番号等はこのアプリに保存されません")
+                    .accessibilityIdentifier("webPaymentBanner")
+                WebFallbackMenu(steps: request.destination.fallbackSteps) { controller.openFallback($0) }
+            }
         case .login:
             VStack(alignment: .leading, spacing: 6) {
                 WebNoticeBanner(systemImage: "person.badge.key", tint: .purple,
@@ -352,6 +360,7 @@ struct AccountWebSessionView: View {
 
     private func prepare() async {
         guard !isPrepared else { return }
+        controller.fallbackSteps = request.destination.fallbackSteps
         controller.onMainFrameFinished = { url in
             Task { await handleMainFrameFinished(url) }
         }
@@ -621,6 +630,30 @@ struct AccountSessionPill: View {
         case .loggedOut: return .gray
         case .error: return .red
         case .unknown: return .secondary
+        }
+    }
+}
+
+/// "ページが表示されない場合" — manual switch to the verified fallback pages of the destination (docs/API.md §20).
+struct WebFallbackMenu: View {
+    let steps: [WebFallbackStep]
+    var onSelect: (WebFallbackStep) -> Void
+
+    var body: some View {
+        if !steps.isEmpty {
+            Menu {
+                ForEach(steps) { step in
+                    Button(step.title) { onSelect(step) }
+                }
+            } label: {
+                Label("ページが表示されない場合", systemImage: "arrow.triangle.branch")
+                    .font(.caption.weight(.semibold))
+            }
+            .padding(.horizontal)
+            .padding(.bottom, 6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.blue.opacity(0.08))
+            .accessibilityIdentifier("webFallbackMenu")
         }
     }
 }

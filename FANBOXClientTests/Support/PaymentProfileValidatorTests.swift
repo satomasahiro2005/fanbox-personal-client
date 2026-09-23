@@ -80,6 +80,44 @@ final class PaymentProfileValidatorTests: XCTestCase {
         XCTAssertEqual(PaymentProfileValidator.normalize("４１１１／セキュリティ　ＰＩＮ"), "4111/セキュリティ PIN")
     }
 
+    func testPasswordsAndThreeDSecureCredentialsAreRejected() {
+        XCTAssertEqual(issues(memo: "パスワード: abcd1234"), [.looksLikeCredential(field: F.memo)])
+        XCTAssertEqual(issues(memo: "パスワード：hunter"), [.looksLikeCredential(field: F.memo)], "full-width colon, no digits")
+        XCTAssertEqual(issues(memo: "3Dセキュア 1234abcd"), [.looksLikeCredential(field: F.memo)])
+        XCTAssertEqual(issues(memo: "３Ｄセキュア＝ｓｅｃｒｅｔ"), [.looksLikeCredential(field: F.memo)], "full-width")
+        XCTAssertEqual(issues(memo: "password=hunter"), [.looksLikeCredential(field: F.memo)])
+        XCTAssertEqual(issues(memo: "Password is hunter"), [.looksLikeCredential(field: F.memo)])
+        XCTAssertEqual(issues(memo: "パスワードはabcdef"), [.looksLikeCredential(field: F.memo)])
+        XCTAssertEqual(issues(memo: "3DS pass 998877"), [.looksLikeCredential(field: F.memo)])
+        XCTAssertEqual(issues(memo: "OTP 482913"), [.looksLikeCredential(field: F.memo)])
+        XCTAssertEqual(issues(memo: "ワンタイムパスワード 123456"), [.looksLikeCredential(field: F.memo)])
+        XCTAssertEqual(issues(memo: "本人認証：kitty"), [.looksLikeCredential(field: F.memo)])
+        XCTAssertEqual(issues(memo: "ﾊﾟｽﾜｰﾄﾞ ab12"), [.looksLikeCredential(field: F.memo)], "half-width katakana")
+        XCTAssertEqual(issues(nickname: "楽天 pw: x", memo: ""), [], "\"pw\" alone is not a keyword")
+        XCTAssertEqual(issues(nickname: "楽天 passcode:x"), [.looksLikeCredential(field: F.nickname)])
+        XCTAssertEqual(issues(brand: "Visa 3D Secure: 0000"), [.looksLikeCredential(field: F.brand)])
+    }
+
+    func testCredentialMentionsWithoutValuesAreAllowed() {
+        XCTAssertEqual(issues(memo: "3Dセキュア対応"), [], "the 3 in 3D is not a value")
+        XCTAssertEqual(issues(memo: "3D Secure 対応カード"), [])
+        XCTAssertEqual(issues(memo: "パスワードは手帳で管理"), [])
+        XCTAssertEqual(issues(memo: "ワンタイムパスワードはSMSで届く"), [], "3 ASCII letters after は are not a value")
+        XCTAssertEqual(issues(memo: "passport 用"), [])
+        XCTAssertEqual(PaymentProfileValidator.containsCredential("本人認証あり"), false)
+    }
+
+    func testSecurityCodeTakesPrecedenceOverCredentialForTheSameField() {
+        XCTAssertEqual(issues(memo: "暗証番号 0000"), [.looksLikeSecurityCode(field: F.memo)], "one issue per field")
+    }
+
+    func testStoragePolicyTextsMentionPasswordsAnd3DS() {
+        XCTAssertTrue(SupportText.storagePolicyNote.contains("パスワード"))
+        XCTAssertTrue(SupportText.storagePolicyNote.contains("3Dセキュア"))
+        XCTAssertTrue(PaymentProfileIssue.looksLikeCredential(field: F.memo).message.contains("メモ"))
+        XCTAssertTrue(PaymentProfileIssue.looksLikeCredential(field: F.memo).message.contains("パスワード"))
+    }
+
     func testIssueMessagesNameTheField() {
         XCTAssertTrue(PaymentProfileIssue.looksLikeCardNumber(field: F.memo).message.contains("メモ"))
         XCTAssertTrue(PaymentProfileIssue.looksLikeSecurityCode(field: F.brand).message.contains("ブランド"))

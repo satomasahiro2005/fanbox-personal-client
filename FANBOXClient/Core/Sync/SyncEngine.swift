@@ -469,11 +469,17 @@ final class SyncEngine {
 
             case .supports:
                 let listing = try await ds.supportingPlanListing(account: context)
-                let observed: ObservedSource = context.kind == .demo ? .demo
-                    : (reason == .backgroundRefresh ? .backgroundSync : (reason == .notification ? .notification : .sync))
+                // A stopped support may leave plan.listSupporting while creator.listFollowing still reports
+                // isSupported && isStopped (docs/API.md §8.1 / §18.10). Only when a support would vanish, read the
+                // following list (best effort) so the change is recorded as 支援終了 rather than an unexplained anomaly.
+                if listing.isComplete, store.hasActiveSupports(absentFrom: listing.supports, accountID: accountID),
+                   let following = try? await ds.followingCreators(account: context) {
+                    store.applyFollowing(following, account: context)
+                }
+                let observed = Self.supportObservedSource(reason: reason, kind: context.kind)
                 let (diff, history) = store.applySupportsDetailed(listing.supports, account: context, source: observed,
                                                                   isBaseline: isFirstSync, listingIsComplete: listing.isComplete)
-                newIDs = diff.started + diff.changed + diff.restored + diff.disappeared
+                newIDs = diff.observedCreatorIDs
                 let name = store.account(id: accountID)?.displayName ?? ""
                 if !isFirstSync {
                     // A plan that disappears on the 1st–5th is a payment-attention signal (docs/API.md §18.8 B): announce it
