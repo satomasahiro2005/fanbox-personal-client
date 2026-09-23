@@ -19,12 +19,14 @@ struct FanboxManagedPostDTO: Decodable, Hashable, Sendable, SchemaDescribed, Fan
     var hasAdultContent: Bool?
     var body: FanboxPostBodyDTO?
     var coverImageUrl: String?
+    /// `everyone` / `supporters` / `none` (docs/API.md §14.4 / §18.11); absent from older sources.
+    var commentingPermissionScope: String?
 
     var dtoID: String? { id }
 
     static let knownFields: Set<String> = [
         "id", "title", "status", "permalink", "feeRequired", "updatedAt", "publishedAt", "tags", "type", "hasAdultContent",
-        "body", "coverImageUrl",
+        "body", "coverImageUrl", "commentingPermissionScope",
     ]
     static var schemaChildren: [String: any SchemaDescribed.Type] { ["body": FanboxPostBodyDTO.self] }
 
@@ -42,6 +44,7 @@ struct FanboxManagedPostDTO: Decodable, Hashable, Sendable, SchemaDescribed, Fan
         hasAdultContent = o.bool("hasAdultContent")
         body = o.decode("body")
         coverImageUrl = o.nonEmptyString("coverImageUrl")
+        commentingPermissionScope = o.nonEmptyString("commentingPermissionScope")
     }
 }
 

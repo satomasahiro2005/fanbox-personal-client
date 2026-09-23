@@ -32,6 +32,8 @@ protocol RemoteDataSource: Sendable {
     func paidRecords(account: AccountContext) async throws -> [RemotePayment]
 
     // MARK: Creator Mode (account must own a creator page)
+    /// Which post writes are native (default `.full`, see `CreatorCapabilities.swift`).
+    var draftCapabilities: DraftCapabilities { get }
     func managedPosts(account: AccountContext, cursor: String?) async throws -> RemotePage<RemotePostSummary>
     func editablePost(id: String, account: AccountContext) async throws -> RemoteEditablePost
     func createPost(_ draft: RemotePostDraft, account: AccountContext) async throws -> String

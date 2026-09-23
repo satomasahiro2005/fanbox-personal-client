@@ -240,6 +240,13 @@ final class UploadQueue {
             markFailed(job, reason: "アカウントが見つかりません")
             return true
         }
+        let context = account.context
+        let source = remote.dataSource(for: context)
+        guard source.draftCapabilities.uploadsMedia else {
+            // This account uploads in the web editor (SPEC §40): never a failure, never retried here.
+            pauseForWeb(draftID: job.draftID)
+            return true
+        }
         let fileURL = mediaStore.fileURL(draftID: job.draftID, fileName: job.localFileName)
         guard FileManager.default.fileExists(atPath: fileURL.path) else {
             markFailed(job, reason: "ローカルファイルが見つかりません")
@@ -254,8 +261,6 @@ final class UploadQueue {
         activeJobID = jobID
         store.save()
 
-        let context = account.context
-        let source = remote.dataSource(for: context)
         let kind = job.kind
         let onProgress: @Sendable (Double) -> Void = { [weak self] value in
             Task { @MainActor in self?.applyProgress(jobID: jobID, value: value) }
@@ -298,6 +303,10 @@ final class UploadQueue {
                 return true
             }
             switch remoteError {
+            case .unsupported:
+                // The data source cannot upload: hand over to the web editor instead of failing / retrying.
+                pauseForWeb(draftID: job.draftID)
+                return true
             case .offline, .blockedByPolicy, .cancelled:
                 // Connectivity / policy / cancellation: stay queued and stop; the next run picks it up again.
                 job.state = .queued
@@ -317,6 +326,25 @@ final class UploadQueue {
                 return true
             }
         }
+    }
+
+    /// Shown on jobs of accounts that upload in the web editor.
+    static let webOnlyMessage = "Web エディタで追加してください"
+
+    /// Pauses every unfinished job of the draft with `webOnlyMessage` (the account cannot upload natively).
+    /// Such jobs are never counted as failed and never retried automatically.
+    func pauseForWeb(draftID: String) {
+        var changed = false
+        for job in jobs(draftID: draftID) where job.state != .completed && job.id != activeJobID {
+            if job.state != .paused || job.lastError != Self.webOnlyMessage {
+                job.state = .paused
+                job.progress = 0
+                job.lastError = Self.webOnlyMessage
+                job.updatedAt = .now
+                changed = true
+            }
+        }
+        if changed { store.save() }
     }
 
     private func markFailed(_ job: UploadJob, reason: String) {
@@ -539,6 +567,16 @@ final class DraftService {
 
     // MARK: Autosave
 
+    /// Text of a block changed (editor binding). Text equal to what FANBOX holds (e.g. rewritten after a send split a
+    /// multi-line block into paragraphs) is saved without marking the draft as locally changed.
+    func blockTextChanged(_ block: DraftBlock, in draft: Draft) {
+        if let imported = block.importedText, imported == block.text, draft.status == .published || draft.status == .readyToPublish {
+            scheduleSave()
+        } else {
+            touch(draft)
+        }
+    }
+
     /// Marks the draft as edited (updatedAt = now) and schedules a debounced save. Works offline.
     func touch(_ draft: Draft) {
         draft.updatedAt = .now
@@ -569,10 +607,27 @@ final class DraftService {
 
     var hasPendingSave: Bool { pendingSave != nil }
 
+    // MARK: Capabilities
+
+    /// What the account's data source can write natively (decided before any send).
+    func capabilities(accountID: String) -> DraftCapabilities {
+        guard let account = store.account(id: accountID) else { return .webOnly }
+        return remote.dataSource(for: account.context).draftCapabilities
+    }
+
+    /// Plan of a send with the locally known FANBOX state (for the editor's badges, banners and confirmation).
+    func plan(draftID: String, publish: Bool) -> DraftSendPlan? {
+        guard let draft = store.draft(id: draftID) else { return nil }
+        return DraftSendPlanner.plan(draft: draft, capabilities: capabilities(accountID: draft.accountID), publish: publish)
+    }
+
     // MARK: Post Edit
 
-    /// Imports an existing FANBOX post into a local draft ("Post Edit"). Image / file blocks keep their
-    /// `remoteMediaID`, so nothing is uploaded again. An unsent local edit of the same post is reused.
+    /// Imports an existing FANBOX post into a local draft ("Post Edit"). Image / file / link card / embed blocks keep their
+    /// FANBOX ids (nothing is uploaded again), paragraphs keep their text styles and empty spacing paragraphs, and the
+    /// FANBOX status / fee / comment permission / revision are recorded so a later send never changes them by accident.
+    /// Content that cannot be written back natively is kept visibly and blocks the native update (web editor instead).
+    /// An unsent local edit of the same post is reused.
     func importRemotePost(postID: String, accountID: String) async throws -> Draft {
         let existing = store.fetch(FetchDescriptor<Draft>(predicate: #Predicate { $0.accountID == accountID },
                                                           sortBy: [SortDescriptor(\.updatedAt, order: .reverse)]))
@@ -584,6 +639,7 @@ final class DraftService {
         guard uploads.isNetworkAvailable else { throw RemoteError.offline }
         let context = account.context
         let source = remote.dataSource(for: context)
+        let capabilities = source.draftCapabilities
         let editable: RemoteEditablePost
         do {
             editable = try await RequestContext.$priority.withValue(.interactiveRead) {
@@ -594,13 +650,27 @@ final class DraftService {
         }
 
         let draft = Draft(accountID: accountID, creatorID: account.creatorID, remotePostID: editable.id, title: editable.title,
-                          targetPlanID: editable.planID, feeRequired: editable.feeRequired)
+                          targetPlanID: editable.planID ?? matchingPlanID(creatorID: account.creatorID, fee: editable.feeRequired),
+                          feeRequired: editable.feeRequired)
         draft.tags = editable.tags
         draft.hasAdultContent = editable.hasAdultContent
+        draft.remoteStatusRaw = editable.status.rawValue
+        draft.remoteFeeRequired = editable.feeRequired
+        draft.remoteUpdatedAt = editable.updatedAt
+        draft.commentPermission = editable.commentPermission
+        if !editable.tagsKnown {
+            draft.tagsUnverified = true
+            // Best effort: the reader-side listing of the same post may know its tags.
+            if draft.tags.isEmpty, let cached = store.post(id: postID)?.fanboxTags, !cached.isEmpty { draft.tags = cached }
+        }
+        if editable.status == .published || editable.status == .scheduled { draft.publishedAt = editable.publishedAt }
         store.context.insert(draft)
+
+        var unsupported: [String] = []
         var order = 0
         for remoteBlock in editable.blocks {
-            guard let imported = DraftPostMapping.importedBlock(from: remoteBlock) else { continue }
+            let imported = DraftPostMapping.importedBlock(from: remoteBlock)
+            if let reason = imported.unsupportedReason, !unsupported.contains(reason) { unsupported.append(reason) }
             let block = DraftBlock(draftID: draft.id, order: order, kind: imported.kind, text: imported.text)
             block.remoteMediaID = imported.remoteMediaID
             block.remoteURL = imported.remoteURL
@@ -611,6 +681,9 @@ final class DraftService {
             block.url = imported.url
             block.embedProvider = imported.embedProvider
             block.embedContentID = imported.embedContentID
+            block.importedText = imported.importedText
+            block.importedStyles = imported.styles
+            block.isLockedRemote = imported.isLocked
             store.context.insert(block)
             draft.blocks.append(block)
             order += 1
@@ -620,8 +693,28 @@ final class DraftService {
             store.context.insert(block)
             draft.blocks.append(block)
         }
+        draft.nativeUpdateBlocker = Self.nativeUpdateBlocker(editable: editable, unsupportedBlocks: unsupported, capabilities: capabilities)
         store.save()
         return draft
+    }
+
+    /// Why a native update of this post would not be faithful (nil = it can be updated natively).
+    static func nativeUpdateBlocker(editable: RemoteEditablePost, unsupportedBlocks: [String], capabilities: DraftCapabilities) -> String? {
+        if editable.status == .scheduled { return DraftSendPlanner.scheduledBlocker }
+        if editable.postType != .article && !capabilities.updatesNonArticlePosts {
+            return "「\(editable.postType.creatorLabel)」形式の投稿はアプリから更新できません（本文が記事形式に変わってしまうため）。Web エディタで編集してください。"
+        }
+        if !unsupportedBlocks.isEmpty {
+            return "アプリで扱えない内容があります（\(unsupportedBlocks.joined(separator: "、"))）。内容を失わないよう、Web エディタで編集してください。"
+        }
+        return nil
+    }
+
+    /// FANBOX gates posts by minimum fee; the plan with exactly that fee (if the plans are known locally).
+    private func matchingPlanID(creatorID: String?, fee: Int) -> String? {
+        guard let creatorID, fee > 0 else { return nil }
+        let matches = store.plans(creatorID: creatorID).filter { $0.fee == fee }
+        return matches.count == 1 ? matches.first?.planID : nil
     }
 
     // MARK: Publish
@@ -631,9 +724,26 @@ final class DraftService {
         try DraftPostMapping.remotePostDraft(from: draft, publish: publish)
     }
 
-    /// Uploads pending media (waits for completion), then creates or updates the FANBOX post.
-    /// `publish` false = "FANBOX に下書き保存". On any failure the draft is kept intact with `lastError`.
+    /// Compatibility wrapper of `send` (no warnings accepted, never unpublishes). Returns the post id.
     func publish(draftID: String, publish: Bool) async -> Result<String, RemoteError> {
+        await send(draftID: draftID, publish: publish).map(\.postID)
+    }
+
+    static let conflictMessage = "FANBOX 側で投稿が更新されています（Web エディタなど）。上書きしないよう送信を中止しました。ローカル下書きを削除して「編集」から読み込み直すか、Web エディタで編集してください。"
+
+    /// Sends the draft: uploads pending media (when the account can), then creates or updates the FANBOX post.
+    ///
+    /// - `publish`: the creator's choice — true = publish (or keep a live post published), false = FANBOX draft.
+    /// - Taking a live post down (`publish == false` on a published post) requires `allowUnpublish`; otherwise nothing is sent.
+    /// - Warnings of the plan (formatting loss, unknown tags / comment permission) require `acceptWarnings`.
+    /// - An existing post is re-read first: a newer FANBOX revision (edited elsewhere) or a changed publish status stops the
+    ///   send, so local content never overwrites work done in the web editor.
+    /// - Accounts that cannot upload / create link cards / embeds get a text-first send: everything else is saved and the
+    ///   receipt lists what to add in the web editor. A new post is then saved as a FANBOX draft, never published unfinished.
+    /// - A create whose content save failed stores the new post id first, so the retry updates that post (no duplicates).
+    /// On any failure the local draft stays intact with `lastError`.
+    func send(draftID: String, publish: Bool, acceptWarnings: Bool = false,
+              allowUnpublish: Bool = false) async -> Result<DraftSendReceipt, RemoteError> {
         guard let draft = store.draft(id: draftID) else { return .failure(.notFound) }
         guard !publishingDraftIDs.contains(draftID) else { return .failure(.invalidRequest("送信中です")) }
         publishingDraftIDs.insert(draftID)
@@ -647,11 +757,132 @@ final class DraftService {
         guard account.creatorID != nil else {
             return fail(draft, .invalidRequest("このアカウントには Creator ページがありません"))
         }
-        if publish && draft.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return fail(draft, .invalidRequest("タイトルを入力してください"))
-        }
+        let context = account.context
+        let source = remote.dataSource(for: context)
+        let capabilities = source.draftCapabilities
 
-        // 1. Media uploads (only blocks without remoteMediaID; failed jobs are retried, completed ones never re-sent).
+        // 0. Plan with what is known locally (no request yet).
+        var plan = DraftSendPlanner.plan(draft: draft, capabilities: capabilities, publish: publish)
+        if let refusal = refusal(of: plan, draft: draft, acceptWarnings: acceptWarnings, allowUnpublish: allowUnpublish) {
+            return refusal
+        }
+        guard uploads.isNetworkAvailable else { return fail(draft, .offline) }
+
+        // 1. Existing post: re-read its current state before uploading / writing anything.
+        if let postID = draft.remotePostID {
+            let previousStatus = draft.status
+            draft.status = .publishing
+            store.save()
+            let current: RemoteEditablePost
+            do {
+                current = try await RequestContext.$priority.withValue(.interactiveRead) {
+                    try await source.editablePost(id: postID, account: context)
+                }
+            } catch {
+                guard let draft = store.draft(id: draftID) else { return .failure(RemoteError.creatorWrapping(error)) }
+                return fail(draft, RemoteError.creatorWrapping(error))
+            }
+            guard let draft = store.draft(id: draftID) else { return .failure(.notFound) }
+            let known = draft.remoteStatus
+            draft.remoteStatusRaw = current.status.rawValue
+            if let base = draft.remoteUpdatedAt, let now = current.updatedAt, now.timeIntervalSince(base) > 1 {
+                return fail(draft, .invalidRequest(Self.conflictMessage))
+            }
+            if let known, known != .unknown, known != current.status {
+                return fail(draft, .invalidRequest("FANBOX 側で公開状態が「\(current.status.creatorLabel)」に変わっています。内容を確認してから送信し直してください。"))
+            }
+            plan = DraftSendPlanner.plan(draft: draft, capabilities: capabilities, publish: publish, remoteStatus: current.status)
+            if let refusal = refusal(of: plan, draft: draft, acceptWarnings: acceptWarnings, allowUnpublish: allowUnpublish) {
+                if draft.status == .publishing { draft.status = previousStatus }
+                store.save()
+                return refusal
+            }
+        }
+        guard let draft = store.draft(id: draftID) else { return .failure(.notFound) }
+
+        // 2. Media uploads (only blocks without remoteMediaID; failed jobs are retried, completed ones never re-sent).
+        if capabilities.uploadsMedia {
+            if let failure = await runUploads(for: draft) { return failure }
+        } else {
+            uploads.pauseForWeb(draftID: draftID)
+        }
+        guard let draft = store.draft(id: draftID) else { return .failure(.notFound) }
+
+        // 3. Payload (text-first: blocks for the web editor are left out).
+        let payload: DraftPostMapping.Payload
+        do {
+            payload = try DraftPostMapping.payload(from: draft, publish: plan.sendsPublished, capabilities: capabilities)
+        } catch {
+            return fail(draft, RemoteError.creatorWrapping(error))
+        }
+        guard uploads.isNetworkAvailable else { return fail(draft, .offline) }
+
+        // 4. Create / update with interactiveWrite priority.
+        draft.status = .publishing
+        store.save()
+        let existingID = draft.remotePostID
+        let body = payload.draft
+        let webIDs = payload.webItemBlockIDs
+        do {
+            let postID: String = try await RequestContext.$priority.withValue(.interactiveWrite) {
+                if let existingID {
+                    try await source.updatePost(id: existingID, body, account: context)
+                    return existingID
+                }
+                return try await source.createPost(body, account: context)
+            }
+            guard let draft = store.draft(id: draftID) else {
+                return .success(DraftSendReceipt(postID: postID, sentPublished: body.publish, webItems: []))
+            }
+            commitSent(draft, postID: postID, published: body.publish, leavesWebItems: !webIDs.isEmpty)
+            let webItems = DraftSendPlanner.webItems(for: draft, blockIDs: webIDs)
+            // 5. Revision baseline for the next conflict check (best effort read).
+            if let fresh = try? await RequestContext.$priority.withValue(.interactiveRead, operation: {
+                try await source.editablePost(id: postID, account: context)
+            }), let draft = store.draft(id: draftID) {
+                draft.remoteUpdatedAt = fresh.updatedAt ?? draft.remoteUpdatedAt
+                draft.remoteStatusRaw = fresh.status.rawValue
+                if let permission = fresh.commentPermission { draft.commentPermission = permission }
+                store.save()
+            }
+            return .success(DraftSendReceipt(postID: postID, sentPublished: body.publish, webItems: webItems))
+        } catch let partial as RemotePostCreatedPartially {
+            AppLog.creator.error("post created but content not saved: \(partial.underlying.userMessage, privacy: .public)")
+            guard let draft = store.draft(id: draftID) else { return .failure(partial.underlying) }
+            // Persist the new id FIRST: the retry updates this post instead of creating another one.
+            draft.remotePostID = partial.postID
+            draft.remoteStatusRaw = RemotePostStatus.draft.rawValue
+            draft.remoteFeeRequired = nil
+            draft.remoteUpdatedAt = nil
+            // A post this app just created has no comment setting of the creator's to preserve.
+            if draft.commentPermission == nil { draft.commentPermission = .default(feeRequired: draft.feeRequired) }
+            return fail(draft, partial.underlying,
+                        message: "FANBOX に下書きを作成しましたが、内容の保存に失敗しました（\(partial.underlying.userMessage)）。再送すると同じ下書きを更新します。")
+        } catch {
+            let remoteError = RemoteError.creatorWrapping(error)
+            AppLog.creator.error("publish failed: \(remoteError.userMessage, privacy: .public)")
+            guard let draft = store.draft(id: draftID) else { return .failure(remoteError) }
+            return fail(draft, remoteError)
+        }
+    }
+
+    /// A plan that must not be sent as requested → the failure to return (local status untouched for confirmations).
+    private func refusal(of plan: DraftSendPlan, draft: Draft, acceptWarnings: Bool,
+                         allowUnpublish: Bool) -> Result<DraftSendReceipt, RemoteError>? {
+        if let validation = plan.validationError { return fail(draft, validation) }
+        if let blocker = plan.blockers.first { return fail(draft, .unsupported(operation: blocker), message: blocker) }
+        if plan.unpublishes && !allowUnpublish {
+            return .failure(.invalidRequest("公開中の投稿を非公開（下書き）に戻す操作です。確認してから送信してください。"))
+        }
+        if !plan.warnings.isEmpty && !acceptWarnings {
+            return .failure(.invalidRequest("確認が必要です: " + plan.warnings.joined(separator: " ")))
+        }
+        return nil
+    }
+
+    /// Uploads the draft's pending media and waits. Returns a failure when something is left.
+    private func runUploads(for draft: Draft) async -> Result<DraftSendReceipt, RemoteError>? {
+        let draftID = draft.id
         uploads.enqueue(draftID: draftID)
         uploads.retryFailed(draftID: draftID, autoStart: false)
         uploads.resumeAll(draftID: draftID, autoStart: false)
@@ -665,6 +896,7 @@ final class DraftService {
                 await uploads.run()
             }
         }
+        guard let draft = store.draft(id: draftID) else { return .failure(.notFound) }
         let unfinished = uploads.unfinishedJobs(draftID: draftID)
         let failedCount = unfinished.filter { $0.state == .failed }.count
         if failedCount > 0 {
@@ -673,50 +905,106 @@ final class DraftService {
         if !unfinished.isEmpty {
             return fail(draft, uploads.isNetworkAvailable ? .invalidRequest("アップロードが完了していません") : .offline)
         }
-
-        // 2. Payload.
-        let payload: RemotePostDraft
-        do {
-            payload = try DraftPostMapping.remotePostDraft(from: draft, publish: publish)
-        } catch {
-            return fail(draft, RemoteError.creatorWrapping(error))
-        }
-        guard uploads.isNetworkAvailable else { return fail(draft, .offline) }
-
-        // 3. Create / update with interactiveWrite priority.
-        draft.status = .publishing
-        store.save()
-        let context = account.context
-        let source = remote.dataSource(for: context)
-        let existingID = draft.remotePostID
-        do {
-            let postID: String = try await RequestContext.$priority.withValue(.interactiveWrite) {
-                if let existingID {
-                    try await source.updatePost(id: existingID, payload, account: context)
-                    return existingID
-                }
-                return try await source.createPost(payload, account: context)
-            }
-            guard let draft = store.draft(id: draftID) else { return .success(postID) }
-            draft.remotePostID = postID
-            draft.status = publish ? .published : .readyToPublish
-            if publish { draft.publishedAt = .now }
-            draft.lastError = nil
-            store.save()
-            return .success(postID)
-        } catch {
-            let remoteError = RemoteError.creatorWrapping(error)
-            AppLog.creator.error("publish failed: \(remoteError.userMessage, privacy: .public)")
-            guard let draft = store.draft(id: draftID) else { return .failure(remoteError) }
-            return fail(draft, remoteError)
-        }
+        return nil
     }
 
-    private func fail(_ draft: Draft, _ error: RemoteError) -> Result<String, RemoteError> {
+    /// Records a successful send: FANBOX status / fee, and the sent text as the new baseline of every paragraph
+    /// (a multi-line text block becomes one block per paragraph, exactly like the post on FANBOX).
+    private func commitSent(_ draft: Draft, postID: String, published: Bool, leavesWebItems: Bool) {
+        // A new post got the default comment permission (or the one sent): later updates keep it without asking.
+        if draft.remotePostID == nil && draft.commentPermission == nil {
+            draft.commentPermission = .default(feeRequired: draft.feeRequired)
+        }
+        draft.remotePostID = postID
+        draft.remoteStatusRaw = (published ? RemotePostStatus.published : RemotePostStatus.draft).rawValue
+        draft.remoteFeeRequired = draft.feeRequired
+        draft.status = published ? .published : .readyToPublish
+        if published && draft.publishedAt == nil { draft.publishedAt = .now }
+        if !published { draft.publishedAt = nil }
+        draft.lastError = nil
+        draft.webHandoffAt = leavesWebItems ? .now : nil
+
+        var ordered = draft.orderedBlocks
+        var index = 0
+        while index < ordered.count {
+            let block = ordered[index]
+            index += 1
+            guard block.kind == .text || block.kind == .header, !block.isLockedRemote else { continue }
+            if let imported = block.importedText, imported == block.text { continue }
+            guard !block.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+            let styles = DraftPostMapping.sentStyles(of: block).styles
+            guard block.kind == .text else {
+                block.importedText = block.text
+                block.importedStyles = styles
+                continue
+            }
+            let paragraphs = DraftPostMapping.paragraphs(of: block.text, styles: styles)
+            guard let first = paragraphs.first else { continue }
+            block.text = first.text
+            block.importedText = first.text
+            block.importedStyles = first.styles
+            var insertAt = index
+            for paragraph in paragraphs.dropFirst() {
+                let extra = DraftBlock(draftID: draft.id, order: 0, kind: .text, text: paragraph.text)
+                extra.importedText = paragraph.text
+                extra.importedStyles = paragraph.styles
+                store.context.insert(extra)
+                draft.blocks.append(extra)
+                ordered.insert(extra, at: insertAt)
+                insertAt += 1
+            }
+            index = insertAt
+        }
+        for (i, block) in ordered.enumerated() where block.order != i { block.order = i }
+        uploads.syncOrder(draftID: draft.id)
+        store.save()
+    }
+
+    private func fail<T>(_ draft: Draft, _ error: RemoteError, message: String? = nil) -> Result<T, RemoteError> {
         draft.status = .failed
-        draft.lastError = error.userMessage
+        draft.lastError = message ?? error.userMessage
         store.save()
         return .failure(error)
+    }
+
+    // MARK: Web editor hand-off (SPEC §40)
+
+    /// Processed local media of the items left for the web editor, copied under their display names (numbered in body
+    /// order) so the web editor's file picker can reach them via Files / Photos. Keyed by item (block) id.
+    func exportWebItemFiles(draftID: String, items: [DraftWebItem]) -> [String: URL] {
+        let media = items.filter { $0.localFileName != nil }
+        let urls = mediaStore.exportCopies(draftID: draftID, files: media.map { item in
+            (fileName: item.localFileName ?? "", displayName: item.title, position: item.position)
+        })
+        var result: [String: URL] = [:]
+        for (item, url) in zip(media, urls) {
+            if let url { result[item.id] = url }
+        }
+        return result
+    }
+
+    /// How the creator finished the post in the web editor.
+    enum WebCompletion {
+        case published
+        case savedAsDraft
+    }
+
+    /// Marks the draft as finished in the web editor. The FANBOX post is now the reference: the local copy keeps its
+    /// content but a later native send is refused as a conflict (the revision on FANBOX changed).
+    func markCompletedOnWeb(draftID: String, as completion: WebCompletion) {
+        guard let draft = store.draft(id: draftID) else { return }
+        draft.webHandoffAt = nil
+        draft.lastError = nil
+        switch completion {
+        case .published:
+            draft.status = .published
+            draft.remoteStatusRaw = RemotePostStatus.published.rawValue
+            if draft.publishedAt == nil { draft.publishedAt = .now }
+        case .savedAsDraft:
+            draft.status = .readyToPublish
+            if draft.remoteStatusRaw == nil { draft.remoteStatusRaw = RemotePostStatus.draft.rawValue }
+        }
+        store.save()
     }
 
     // MARK: Delete

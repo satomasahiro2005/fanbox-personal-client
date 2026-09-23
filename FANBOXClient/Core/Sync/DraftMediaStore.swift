@@ -242,6 +242,48 @@ final class DraftMediaStore: Sendable {
                               width: nil, height: nil, kind: .file, wasResized: false, wasConverted: false)
     }
 
+    // MARK: Export (web editor hand-off)
+
+    /// Temporary directory holding shareable copies of a draft's media.
+    func exportDirectory(draftID: String) -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("DraftExport", isDirectory: true)
+            .appendingPathComponent(Self.safeComponent(draftID), isDirectory: true)
+    }
+
+    /// Shareable copies of stored files named "<NN>-<display name>" (NN = body position), so the web editor's file
+    /// picker (Files) shows them in body order under recognizable names. The result is aligned with `files` (nil = the
+    /// stored file is missing). Previous exports of the draft are replaced.
+    func exportCopies(draftID: String, files: [(fileName: String, displayName: String, position: Int)]) -> [URL?] {
+        let fm = FileManager.default
+        let dir = exportDirectory(draftID: draftID)
+        try? fm.removeItem(at: dir)
+        guard !files.isEmpty, (try? fm.createDirectory(at: dir, withIntermediateDirectories: true)) != nil else {
+            return files.map { _ in nil }
+        }
+        var result: [URL?] = []
+        for file in files {
+            let source = fileURL(draftID: draftID, fileName: file.fileName)
+            guard fm.fileExists(atPath: source.path) else {
+                result.append(nil)
+                continue
+            }
+            var name = Self.safeComponent(file.displayName)
+            if URL(fileURLWithPath: name).pathExtension.isEmpty, !source.pathExtension.isEmpty { name += "." + source.pathExtension }
+            let target = dir.appendingPathComponent(String(format: "%02d-", file.position) + name, isDirectory: false)
+            do {
+                try fm.linkItem(at: source, to: target)
+            } catch {
+                guard (try? fm.copyItem(at: source, to: target)) != nil else {
+                    result.append(nil)
+                    continue
+                }
+            }
+            result.append(target)
+        }
+        return result
+    }
+
     // MARK: Delete
 
     func removeFile(draftID: String, fileName: String) {
@@ -251,6 +293,7 @@ final class DraftMediaStore: Sendable {
     /// Deletes every file of a draft (called when the draft is deleted).
     func removeAll(draftID: String) {
         try? FileManager.default.removeItem(at: directory(draftID: draftID))
+        try? FileManager.default.removeItem(at: exportDirectory(draftID: draftID))
     }
 
     /// Bytes used by a draft's media.

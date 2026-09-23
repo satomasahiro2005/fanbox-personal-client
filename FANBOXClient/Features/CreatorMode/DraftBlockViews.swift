@@ -41,6 +41,11 @@ struct DraftBlockImage: View {
             } else if block.localFileName == nil, let remote = block.remoteURL {
                 RemoteImageView(thumbnailURL: remote, displayURL: remote, maxVariant: maxPixel > 400 ? .display : .thumbnail,
                                 accountID: block.draft?.accountID, contentMode: contentMode)
+            } else if block.localFileName == nil {
+                // FANBOX image the app cannot preview (kept by id).
+                Rectangle()
+                    .fill(.quaternary)
+                    .overlay { Image(systemName: "photo").foregroundStyle(.secondary) }
             } else {
                 Rectangle()
                     .fill(.quaternary)
@@ -69,33 +74,94 @@ struct DraftBlockEditorRow: View {
     @Bindable var block: DraftBlock
     let draft: Draft
     var job: UploadJob?
+    /// The block cannot be sent natively by this account: it is added in the web editor after a text-first send.
+    var needsWeb: Bool = false
+    var canUpload: Bool = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            switch block.kind {
-            case .text:
-                TextField("本文", text: $block.text, axis: .vertical)
-                    .lineLimit(2...)
-                    .accessibilityIdentifier("draftTextBlock")
-            case .header:
-                TextField("見出し", text: $block.text, axis: .vertical)
-                    .font(.title3.bold())
-                    .accessibilityIdentifier("draftHeaderBlock")
-            case .image:
-                imageRow
-            case .file:
-                fileRow
-            case .url:
-                urlRow
-            case .embed:
-                embedRow
+            if block.isLockedRemote {
+                lockedRow
+            } else {
+                switch block.kind {
+                case .text:
+                    TextField(block.importedText == "" ? "空行（段落の間隔）" : "本文", text: $block.text, axis: .vertical)
+                        .lineLimit(2...)
+                        .accessibilityIdentifier("draftTextBlock")
+                    formattingNote
+                case .header:
+                    TextField("見出し", text: $block.text, axis: .vertical)
+                        .font(.title3.bold())
+                        .accessibilityIdentifier("draftHeaderBlock")
+                    formattingNote
+                case .image:
+                    imageRow
+                case .file:
+                    fileRow
+                case .url:
+                    urlRow
+                case .embed:
+                    embedRow
+                }
+            }
+            if needsWeb {
+                Label("Web で追加（アプリから送信できません）", systemImage: "safari")
+                    .font(.caption2.bold())
+                    .foregroundStyle(.orange)
+                    .accessibilityIdentifier("draftNeedsWebBadge")
             }
         }
         .padding(.vertical, 2)
-        .onChange(of: block.text) { env.drafts.touch(draft) }
-        .onChange(of: block.url) { env.drafts.touch(draft) }
-        .onChange(of: block.embedProvider) { env.drafts.touch(draft) }
-        .onChange(of: block.embedContentID) { env.drafts.touch(draft) }
+        .onChange(of: block.text) { env.drafts.blockTextChanged(block, in: draft) }
+        .onChange(of: block.url) { referenceEdited() }
+        .onChange(of: block.embedProvider) { referenceEdited() }
+        .onChange(of: block.embedContentID) { referenceEdited() }
+    }
+
+    /// An edited link card / embed is a NEW one: never re-send the old FANBOX id for a different target.
+    private func referenceEdited() {
+        if (block.kind == .url || block.kind == .embed), block.remoteMediaID != nil, !block.isLockedRemote {
+            block.remoteMediaID = nil
+        }
+        env.drafts.touch(draft)
+    }
+
+    /// Imported paragraph with bold / links / size: tells whether they survive the edit.
+    @ViewBuilder
+    private var formattingNote: some View {
+        if !block.importedStyles.isEmpty {
+            let lost = DraftPostMapping.sentStyles(of: block).lost
+            Label(lost > 0 ? "書式（太字・リンクなど）の一部が失われます" : "書式（太字・リンクなど）を保持",
+                  systemImage: lost > 0 ? "exclamationmark.triangle" : "bold")
+                .font(.caption2)
+                .foregroundStyle(lost > 0 ? .orange : .secondary)
+        }
+    }
+
+    /// FANBOX content the app keeps by reference only (sent back unchanged, not editable here).
+    private var lockedRow: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "lock.fill").foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 2) {
+                switch block.kind {
+                case .text, .header:
+                    Text(block.text).font(.subheadline)
+                    Text("アプリで扱えないブロックです（Web エディタで編集してください）").font(.caption2).foregroundStyle(.secondary)
+                case .image:
+                    Text("FANBOX 上の画像（プレビューできません）").font(.subheadline)
+                case .file:
+                    Text(block.originalFileName ?? "FANBOX 上のファイル").font(.subheadline)
+                case .url:
+                    Text(block.text.isEmpty ? (block.url ?? "FANBOX 上のリンクカード") : block.text).font(.subheadline).lineLimit(2)
+                    Text("リンクカード（そのまま残します）").font(.caption2).foregroundStyle(.secondary)
+                case .embed:
+                    Text(block.url ?? block.embedContentID ?? "FANBOX 上の埋め込み").font(.subheadline).lineLimit(2)
+                    Text("埋め込み（そのまま残します）").font(.caption2).foregroundStyle(.secondary)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .accessibilityIdentifier("draftLockedBlock")
     }
 
     private var imageRow: some View {
@@ -113,7 +179,7 @@ struct DraftBlockEditorRow: View {
                         Text(Formatters.bytes(Int64(size))).font(.caption).foregroundStyle(.secondary)
                     }
                 }
-                DraftMediaUploadBadge(block: block, job: job)
+                DraftMediaUploadBadge(block: block, job: job, canUpload: canUpload)
             }
             Spacer(minLength: 0)
         }
@@ -131,7 +197,7 @@ struct DraftBlockEditorRow: View {
                 if let size = block.fileSize {
                     Text(Formatters.bytes(Int64(size))).font(.caption).foregroundStyle(.secondary)
                 }
-                DraftMediaUploadBadge(block: block, job: job)
+                DraftMediaUploadBadge(block: block, job: job, canUpload: canUpload)
             }
             Spacer(minLength: 0)
         }
@@ -140,7 +206,12 @@ struct DraftBlockEditorRow: View {
 
     private var urlRow: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Label("URL", systemImage: "link").font(.caption).foregroundStyle(.secondary)
+            HStack {
+                Label("URL", systemImage: "link").font(.caption).foregroundStyle(.secondary)
+                if block.remoteMediaID != nil {
+                    Text("FANBOX 上のリンクカード").font(.caption2).foregroundStyle(.secondary)
+                }
+            }
             TextField("https://", text: Binding(get: { block.url ?? "" }, set: { block.url = $0 }))
                 .keyboardType(.URL)
                 .textInputAutocapitalization(.never)
@@ -186,12 +257,15 @@ struct DraftBlockEditorRow: View {
 struct DraftMediaUploadBadge: View {
     let block: DraftBlock
     var job: UploadJob?
+    var canUpload: Bool = true
 
     var body: some View {
         if block.remoteMediaID != nil {
             Label(block.localFileName == nil ? "FANBOX 上のメディア" : "アップロード済み", systemImage: "checkmark.circle.fill")
                 .font(.caption2)
                 .foregroundStyle(.green)
+        } else if !canUpload {
+            Text("縮小・変換済み（Web エディタで追加）").font(.caption2).foregroundStyle(.secondary)
         } else if let job {
             HStack(spacing: 4) {
                 Text(CreatorFormatting.uploadStatus(state: job.state, progress: job.progress))
@@ -211,6 +285,10 @@ struct DraftUploadPanel: View {
     @Environment(AppEnvironment.self) private var env
     let draft: Draft
     let jobs: [UploadJob]
+    /// False when the account uploads in the web editor (text-first send + checklist instead of the queue).
+    var canUpload: Bool = true
+    var webItemCount: Int = 0
+    var showChecklist: () -> Void = {}
 
     private var mediaBlocks: [DraftBlock] { draft.orderedBlocks.filter { $0.kind == .image || $0.kind == .file } }
     private var activeJobs: [UploadJob] {
@@ -223,6 +301,35 @@ struct DraftUploadPanel: View {
     }
 
     var body: some View {
+        if canUpload {
+            queueSection
+        } else {
+            webSection
+        }
+    }
+
+    /// Accounts without a native upload: media are prepared locally and added in the web editor.
+    private var webSection: some View {
+        Section {
+            Label(webItemCount > 0 ? "Web エディタで追加する画像・ファイル \(webItemCount) 件" : "Web エディタで追加する画像・ファイルはありません",
+                  systemImage: "safari")
+                .font(.subheadline)
+            if webItemCount > 0 {
+                Button {
+                    showChecklist()
+                } label: {
+                    Label("チェックリストと書き出し", systemImage: "checklist")
+                }
+                .accessibilityIdentifier("draftOpenChecklistButton")
+            }
+        } header: {
+            Text("アップロード")
+        } footer: {
+            Text("このアカウントではアプリから画像・ファイルをアップロードできません。送信すると本文を先に FANBOX に保存し、ここで縮小・変換した画像を書き出して Web エディタで追加できます。")
+        }
+    }
+
+    private var queueSection: some View {
         Section {
             ForEach(activeJobs) { job in
                 DraftUploadJobRow(job: job)
@@ -362,6 +469,17 @@ private struct DraftPreviewBlock: View {
     let block: DraftBlock
 
     var body: some View {
+        if block.isLockedRemote && (block.kind == .text || block.kind == .header) {
+            Label(block.text, systemImage: "lock")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+        } else {
+            content
+        }
+    }
+
+    @ViewBuilder
+    private var content: some View {
         switch block.kind {
         case .text:
             if !block.text.isEmpty {
@@ -390,7 +508,7 @@ private struct DraftPreviewBlock: View {
             let target = block.url ?? ""
             HStack {
                 Image(systemName: "link")
-                Text(target.isEmpty ? "（URL 未入力）" : target).lineLimit(1)
+                Text(target.isEmpty ? (block.remoteMediaID != nil ? "FANBOX 上のリンクカード" : "（URL 未入力）") : target).lineLimit(1)
             }
             .font(.subheadline)
             .foregroundStyle(target.isEmpty ? .secondary : Color.accentColor)

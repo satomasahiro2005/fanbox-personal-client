@@ -11,6 +11,8 @@ struct CreatorPlansView: View {
     @Query private var fans: [Fan]
     @State private var syncError: RemoteError?
     @State private var expandedPlanIDs: Set<String> = []
+    /// Refresh only on the first appearance (pull-to-refresh always fetches).
+    @State private var didInitialLoad = false
 
     init(creatorID: String) {
         self.creatorID = creatorID
@@ -59,7 +61,11 @@ struct CreatorPlansView: View {
         }
         .navigationTitle("プラン")
         .accessibilityIdentifier("creatorPlansList")
-        .task { await refresh(reason: .onDemand) }
+        .task {
+            guard !didInitialLoad else { return }
+            didInitialLoad = true
+            await refresh(reason: .onDemand)
+        }
         .refreshable { await refresh(reason: .userRefresh) }
     }
 

@@ -59,6 +59,8 @@ private struct CreatorCommentsList: View {
     @Query private var syncStates: [SyncState]
 
     @State private var segment: CreatorCommentSegment = .unread
+    /// Refresh only on the first appearance (returning from a pushed screen does not refetch; pull-to-refresh does).
+    @State private var didInitialLoad = false
     @State private var replyTarget: Comment?
     @State private var deleteTarget: Comment?
     @State private var errorMessage: String?
@@ -153,7 +155,11 @@ private struct CreatorCommentsList: View {
                     .accessibilityIdentifier("creatorCommentsMarkAllRead")
             }
         }
-        .task(id: accountID) { await refresh(reason: .onDemand) }
+        .task(id: accountID) {
+            guard !didInitialLoad else { return }
+            didInitialLoad = true
+            await refresh(reason: .onDemand)
+        }
         .refreshable { await refresh(reason: .userRefresh) }
         .sheet(item: $replyTarget) { comment in
             NavigationStack {

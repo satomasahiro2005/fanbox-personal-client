@@ -21,27 +21,37 @@ enum FanboxPostUpdateForm {
             self.urlEmbedIDs = urlEmbedIDs
         }
 
+        /// Ids in the maps AND ids referenced by the body's blocks (a block whose map entry is missing is still part of the
+        /// post and is written back unchanged).
         init(editable: FanboxManagedPostDTO?) {
             let body = editable?.body
-            imageIDs = Set((body?.imageMap ?? [:]).keys).union((body?.images ?? []).compactMap(\.id))
-            fileIDs = Set((body?.fileMap ?? [:]).keys).union((body?.files ?? []).compactMap(\.id))
-            embedIDs = Set((body?.embedMap ?? [:]).keys)
-            urlEmbedIDs = Set((body?.urlEmbedMap ?? [:]).keys)
+            let blocks = body?.blocks ?? []
+            imageIDs = Set((body?.imageMap ?? [:]).keys).union((body?.images ?? []).compactMap(\.id)).union(blocks.compactMap(\.imageId))
+            fileIDs = Set((body?.fileMap ?? [:]).keys).union((body?.files ?? []).compactMap(\.id)).union(blocks.compactMap(\.fileId))
+            embedIDs = Set((body?.embedMap ?? [:]).keys).union(blocks.compactMap(\.embedId))
+            urlEmbedIDs = Set((body?.urlEmbedMap ?? [:]).keys).union(blocks.compactMap(\.urlEmbedId))
         }
     }
 
-    /// Blocks array JSON (the `body` field is the ARRAY only). Paragraph text is split on newlines into `p` blocks;
-    /// no `styles` key is sent (an empty styles array must not be sent).
+    /// Blocks array JSON (the `body` field is the ARRAY only). Paragraph text is split on newlines into `p` blocks unless
+    /// the block is an unchanged imported paragraph (`keepsLineBreaks`). Styles / links are sent only when present (an empty
+    /// styles array must not be sent); link styles (`link:<url>`) go to `links`.
     static func blocksJSON(_ blocks: [RemoteDraftBlock], existing: ExistingMedia) throws -> JSONValue {
         var result: [JSONValue] = []
         for block in blocks {
             switch block.kind {
             case .text:
-                let lines = block.text.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n")
-                for line in lines { result.append(["type": "p", "text": .string(line)]) }
+                if block.keepsLineBreaks || !block.text.contains("\n") {
+                    result.append(textBlock(type: "p", text: block.text, styles: block.styles))
+                } else {
+                    for paragraph in DraftPostMapping.paragraphs(of: block.text, styles: block.styles) {
+                        result.append(textBlock(type: "p", text: paragraph.text, styles: paragraph.styles))
+                    }
+                }
             case .header:
-                let text = block.text.replacingOccurrences(of: "\r\n", with: " ").replacingOccurrences(of: "\n", with: " ")
-                result.append(["type": "header", "text": .string(text)])
+                // Same length as the original ("\n" → " "), so style offsets stay valid.
+                let text = block.text.replacingOccurrences(of: "\n", with: " ")
+                result.append(textBlock(type: "header", text: text, styles: block.styles))
             case .image:
                 guard let id = block.mediaID, existing.imageIDs.contains(id) else {
                     throw RemoteError.unsupported(operation: "post.update: 新しい画像のアップロード")
@@ -67,16 +77,51 @@ enum FanboxPostUpdateForm {
         return .array(result)
     }
 
-    /// `commentingPermissionScope` is effectively required; mirror the behaviour of the only client that sends it
-    /// (supporters-only for paid posts, everyone for free posts).
+    /// `{ type, text, styles?, links? }`. Style offsets are passed through (docs/API.md §18.4).
+    static func textBlock(type: String, text: String, styles: [RemoteTextStyle]) -> JSONValue {
+        var object: [String: JSONValue] = ["type": .string(type), "text": .string(text)]
+        var styleValues: [JSONValue] = []
+        var linkValues: [JSONValue] = []
+        for style in styles where style.length > 0 && style.offset >= 0 {
+            if style.type.hasPrefix(FanboxAdapter.linkStylePrefix) {
+                let url = String(style.type.dropFirst(FanboxAdapter.linkStylePrefix.count))
+                linkValues.append(["offset": .number(Double(style.offset)), "length": .number(Double(style.length)), "url": .string(url)])
+            } else {
+                var value: [String: JSONValue] = ["type": .string(style.type), "offset": .number(Double(style.offset)),
+                                                  "length": .number(Double(style.length))]
+                if let size = style.size { value["size"] = .number(Double(size)) }
+                styleValues.append(.object(value))
+            }
+        }
+        if !styleValues.isEmpty { object["styles"] = .array(styleValues) }
+        if !linkValues.isEmpty { object["links"] = .array(linkValues) }
+        return .object(object)
+    }
+
+    /// `commentingPermissionScope` is effectively required. The post's own value is kept when known; otherwise mirror the
+    /// only client that sends it (supporters-only for paid posts, everyone for free posts).
     static func commentingScope(feeRequired: Int) -> String {
-        feeRequired > 0 ? "supporters" : "everyone"
+        CommentPermission.default(feeRequired: feeRequired).rawValue
+    }
+
+    static func commentingScope(for draft: RemotePostDraft) -> String {
+        draft.commentPermission?.rawValue ?? commentingScope(feeRequired: draft.feeRequired)
+    }
+
+    /// Checks that need no request (title, tag count).
+    static func validateBasics(_ draft: RemotePostDraft) throws {
+        guard !draft.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw RemoteError.invalidRequest("タイトルを入力してください")
+        }
+        guard draft.tags.count <= DraftPostMapping.maxTags else {
+            throw RemoteError.invalidRequest("タグは \(DraftPostMapping.maxTags) 個までです")
+        }
     }
 
     static func make(postID: String, draft: RemotePostDraft, csrfToken: String, existing: ExistingMedia,
                      boundary: String = "FANBOXClientBoundary-\(UUID().uuidString)") throws -> MultipartFormData {
         guard !csrfToken.isEmpty else { throw RemoteError.unauthorized }
-        guard draft.tags.count <= 6 else { throw RemoteError.invalidRequest("タグは 6 個までです") }
+        try validateBasics(draft)
         let body = try blocksJSON(draft.blocks, existing: existing)
         guard let bodyText = String(data: try body.encoded(), encoding: .utf8) else {
             throw RemoteError.invalidRequest("本文を変換できませんでした")
@@ -86,15 +131,17 @@ enum FanboxPostUpdateForm {
         form.addField(name: "status", value: draft.publish ? "published" : "draft")
         form.addField(name: "feeRequired", value: String(max(0, draft.feeRequired)))
         form.addField(name: "title", value: draft.title)
-        form.addField(name: "commentingPermissionScope", value: commentingScope(feeRequired: draft.feeRequired))
+        form.addField(name: "commentingPermissionScope", value: commentingScope(for: draft))
         form.addField(name: "body", value: bodyText)
         for tag in draft.tags where !tag.isEmpty { form.addField(name: "tags", value: tag) }
         form.addField(name: "tt", value: csrfToken)
         return form
     }
 
-    /// Fails early (before anything is created on FANBOX) when a NEW post would need uploads / new embeds.
+    /// Fails early (before anything is created on FANBOX) when a NEW post would need uploads / new embeds, or when the
+    /// title / tags would make the following post.update fail.
     static func validateForCreate(_ draft: RemotePostDraft) throws {
+        try validateBasics(draft)
         _ = try blocksJSON(draft.blocks, existing: ExistingMedia())
     }
 }

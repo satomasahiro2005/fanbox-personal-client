@@ -394,7 +394,11 @@ struct PostDetailEmbedCardView: View {
     let block: PostBlock
     let context: PostDetailRenderContext
 
-    private var url: URL? { PostDetailEmbedLink.url(provider: block.embedProvider, contentID: block.embedContentID, explicitURL: block.url) }
+    private var url: URL? { PostDetailEmbedLink.url(explicitURL: block.url) }
+    /// Provider name supplied by the adapter (`title`), else a Core display name for the stored key.
+    private var providerName: String {
+        block.title ?? DraftEmbedProvider.displayName(forKey: block.embedProvider) ?? block.embedProvider ?? "外部コンテンツ"
+    }
 
     var body: some View {
         Button {
@@ -406,8 +410,8 @@ struct PostDetailEmbedCardView: View {
                     .frame(width: 32)
                     .foregroundStyle(.secondary)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(PostDetailEmbedLink.providerName(block.embedProvider)).font(.caption).foregroundStyle(.secondary)
-                    Text(block.title ?? (block.text.isEmpty ? (url?.absoluteString ?? block.embedContentID ?? "埋め込みコンテンツ") : block.text))
+                    Text(providerName).font(.caption).foregroundStyle(.secondary)
+                    Text(block.text.isEmpty ? (url?.absoluteString ?? block.embedContentID ?? "埋め込みコンテンツ") : block.text)
                         .font(.subheadline)
                         .lineLimit(2)
                         .multilineTextAlignment(.leading)

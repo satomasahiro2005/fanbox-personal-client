@@ -19,6 +19,22 @@ final class Draft {
     var createdAt: Date
     var updatedAt: Date
     var publishedAt: Date?
+    /// FANBOX-side status of `remotePostID` ("published" / "draft" / "scheduled" / "unknown"), as last seen (import, pre-send
+    /// check or a successful send). nil = new post, or a draft imported before this field existed (treated as "maybe published").
+    var remoteStatusRaw: String?
+    /// Fee (minimum support) the FANBOX post had when imported / last sent. Used to warn about gating changes.
+    var remoteFeeRequired: Int?
+    /// FANBOX `updatedAt` the local copy is based on. A newer remote value means the post changed elsewhere (e.g. the web
+    /// editor) and a native update would overwrite that change, so the update is refused.
+    var remoteUpdatedAt: Date?
+    /// Comment permission read from FANBOX (`CommentPermission` raw value). nil = unknown.
+    var commentPermissionRaw: String?
+    /// Why this post cannot be updated natively (non-article post, scheduled post, unsupported blocks). nil = no blocker.
+    var nativeUpdateBlocker: String?
+    /// True when FANBOX did not report the post's tags on import (an update might clear them).
+    var tagsUnverified: Bool = false
+    /// Set after a text-first send that left media / link cards / embeds to be added in the web editor.
+    var webHandoffAt: Date?
 
     @Relationship(deleteRule: .cascade, inverse: \DraftBlock.draft)
     var blocks: [DraftBlock] = []
@@ -44,6 +60,17 @@ final class Draft {
         set { statusRaw = newValue.rawValue }
     }
 
+    /// FANBOX-side status. nil for a new post. A linked post whose status was never recorded reads as `.unknown`.
+    var remoteStatus: RemotePostStatus? {
+        guard remotePostID != nil else { return nil }
+        return remoteStatusRaw.flatMap(RemotePostStatus.init(rawValue:)) ?? .unknown
+    }
+
+    var commentPermission: CommentPermission? {
+        get { commentPermissionRaw.flatMap(CommentPermission.init(rawValue:)) }
+        set { commentPermissionRaw = newValue?.rawValue }
+    }
+
     var orderedBlocks: [DraftBlock] { blocks.sorted { $0.order < $1.order } }
 }
 
@@ -67,6 +94,14 @@ final class DraftBlock {
     var url: String?
     var embedProvider: String?
     var embedContentID: String?
+    /// Post Edit: text of the FANBOX block when imported / last sent (nil = block created locally). Lets an unchanged
+    /// paragraph (including an empty spacing paragraph) be sent back exactly as it was.
+    var importedText: String?
+    /// Post Edit: JSON `[RemoteTextStyle]` (bold / font size / links) of the FANBOX block, offsets relative to `importedText`.
+    var stylesJSON: String?
+    /// Post Edit: block that references FANBOX content the app cannot show or edit (e.g. a link card whose target is
+    /// unknown). It is sent back unchanged by its `remoteMediaID`.
+    var isLockedRemote: Bool = false
     var draft: Draft?
 
     init(id: String = UUID().uuidString, draftID: String, order: Int, kind: DraftBlockKind, text: String = "") {
@@ -80,6 +115,21 @@ final class DraftBlock {
     var kind: DraftBlockKind {
         get { DraftBlockKind(rawValue: kindRaw) ?? .text }
         set { kindRaw = newValue.rawValue }
+    }
+
+    /// Imported text styles (empty when none / not imported).
+    var importedStyles: [RemoteTextStyle] {
+        get {
+            guard let stylesJSON, let data = stylesJSON.data(using: .utf8) else { return [] }
+            return (try? JSONDecoder().decode([RemoteTextStyle].self, from: data)) ?? []
+        }
+        set {
+            if newValue.isEmpty {
+                stylesJSON = nil
+            } else if let data = try? JSONEncoder().encode(newValue) {
+                stylesJSON = String(data: data, encoding: .utf8)
+            }
+        }
     }
 }
 

@@ -77,6 +77,11 @@ final class SyncEngine {
         if Self.requiresCreatorAccount(resource, scope: scope), account.creatorID == nil {
             return .skipped(resource, accountID: accountID, scope: scope)
         }
+        // Creator reads on screen appear / launch are bounded by a minimum interval (CreatorReadPolicy, docs/API.md §1.8).
+        if CreatorReadPolicy.isFresh(resource, scope: scope, reason: reason,
+                                     lastSuccess: store.existingSyncState(accountID: accountID, resource: resource, scope: scope)?.lastSuccessfulSync) {
+            return .skipped(resource, accountID: accountID, scope: scope)
+        }
 
         let context = account.context
         let priority = max(RequestContext.priority, Self.priority(for: resource, reason: reason))
@@ -477,14 +482,24 @@ final class SyncEngine {
         let pageLimit = (isFirstSync || Self.isLightweight(reason)) ? 1 : Self.maxFeedPages
         var cursor: String?
         var inserted: [String] = []
+        var listed: Set<String> = []
+        var oldestListed: Date?
+        var complete = false
         for pageIndex in 0..<pageLimit {
             let page = try await ds.managedPosts(account: context, cursor: cursor)
             let known = store.knownPostIDs(page.items.map(\.id))
             inserted += store.upsertManagedPosts(page.items, account: context).insertedIDs
+            listed.formUnion(page.items.map(\.id))
+            if let oldest = page.items.map(\.publishedAt).min() { oldestListed = min(oldestListed ?? oldest, oldest) }
             if pageIndex == 0, let newest = page.items.first?.id { state.lastKnownItemID = newest }
+            if page.nextCursor == nil { complete = true }
             if !known.isEmpty { break }
             guard let next = page.nextCursor, !page.items.isEmpty else { break }
             cursor = next
+        }
+        // Every page from the first to the last was read: own posts missing from it were deleted on FANBOX.
+        if complete, let creatorID = context.creatorID {
+            store.markMissingManagedPostsRemoved(presentIDs: listed, oldestListed: oldestListed, creatorID: creatorID)
         }
         return inserted
     }

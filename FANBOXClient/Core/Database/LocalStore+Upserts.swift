@@ -17,10 +17,13 @@ extension LocalStore {
         upsertSummariesCore(items, account: account, source: source)
     }
 
-    /// Posts listed in Creator Mode for my own creator page (always `isOwnPost`).
+    /// Posts listed in Creator Mode for my own creator page (always `isOwnPost`), with their FANBOX status
+    /// (see LocalStore+Managed.swift).
     @discardableResult
     func upsertManagedPosts(_ items: [RemotePostSummary], account: AccountContext) -> UpsertResult {
-        upsertSummariesCore(items, account: account, source: .managed)
+        let result = upsertSummariesCore(items, account: account, source: .managed)
+        applyManagedStatuses(items)
+        return result
     }
 
     func upsertPostDetail(_ detail: RemotePostDetail, account: AccountContext) {

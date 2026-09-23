@@ -39,6 +39,8 @@ private struct CreatorModeAccountView: View {
     @State private var importingPostID: String?
     @State private var editFailure: CreatorPostEditFailure?
     @State private var draftPendingDeletion: Draft?
+    /// `.task` runs again every time the screen reappears; only the first appearance refreshes (plus pull-to-refresh).
+    @State private var didInitialLoad = false
 
     init(account: Account, creatorAccounts: [Account]) {
         self.account = account
@@ -56,6 +58,9 @@ private struct CreatorModeAccountView: View {
         _plans = Query(filter: #Predicate<Plan> { $0.creatorID == creatorID }, sort: [SortDescriptor(\.fee)])
         _syncStates = Query(filter: #Predicate<SyncState> { $0.accountID == accountID })
     }
+
+    /// My posts on FANBOX (posts deleted there are hidden, their local metadata is kept).
+    private var visiblePosts: [Post] { posts.filter { !$0.isRemovedFromFanbox } }
 
     private var currentMonth: String { CreatorFormatting.monthKey() }
     private var currentSnapshot: CreatorDashboardSnapshot? { snapshots.first { $0.month == currentMonth } }
@@ -100,7 +105,11 @@ private struct CreatorModeAccountView: View {
             webSection
         }
         .accessibilityIdentifier("creatorModeList")
-        .task(id: accountID) { await refresh(reason: .onDemand) }
+        .task(id: accountID) {
+            guard !didInitialLoad else { return }
+            didInitialLoad = true
+            await refresh(reason: .onDemand)
+        }
         .refreshable { await refresh(reason: .userRefresh) }
         .overlay {
             if importingPostID != nil {
@@ -191,17 +200,18 @@ private struct CreatorModeAccountView: View {
 
     private var postsSection: some View {
         Section {
-            if posts.isEmpty {
+            let visible = visiblePosts
+            if visible.isEmpty {
                 Text("取得済みの投稿はありません").foregroundStyle(.secondary)
             }
-            ForEach(posts.prefix(10)) { post in
+            ForEach(visible.prefix(10)) { post in
                 postRow(post)
             }
-            if posts.count > 10 {
+            if visible.count > 10 {
                 NavigationLink {
                     CreatorManagedPostsView(accountID: accountID, creatorID: creatorID)
                 } label: {
-                    Text("すべての投稿（\(posts.count)）")
+                    Text("すべての投稿（\(visible.count)）")
                 }
                 .accessibilityIdentifier("creatorAllPostsLink")
             }
@@ -287,12 +297,15 @@ private struct CreatorModeAccountView: View {
 
     // MARK: Actions
 
+    /// Screen-appear refreshes use `.onDemand` and are bounded by `CreatorReadPolicy` (fans ≈ daily, dashboard / comments
+    /// 10 min, posts 5 min); pull-to-refresh always fetches. Plans feed the editor's 公開範囲 picker.
     private func refresh(reason: SyncReason) async {
         async let dashboard = env.sync.sync(.creatorDashboard, accountID: accountID, reason: reason)
         async let managed = env.sync.sync(.creatorPosts, accountID: accountID, reason: reason)
         async let comments = env.sync.sync(.creatorComments, accountID: accountID, reason: reason)
         async let fanList = env.sync.sync(.fans, accountID: accountID, reason: reason)
-        let outcomes = await [dashboard, managed, comments, fanList]
+        async let planList = env.sync.sync(.plans, accountID: accountID, scope: creatorID, reason: reason)
+        let outcomes = await [dashboard, managed, comments, fanList, planList]
         syncError = outcomes.compactMap(\.error).first
     }
 
@@ -328,6 +341,12 @@ struct CreatorDraftRow: View {
             }
             HStack(spacing: 6) {
                 PillLabel(text: draft.status.creatorLabel, tint: draft.status.creatorTint)
+                if let remote = draft.remoteStatus, remote != .unknown {
+                    PillLabel(text: "FANBOX: \(remote.creatorLabel)", tint: remote.creatorTint)
+                }
+                if draft.webHandoffAt != nil {
+                    PillLabel(text: "Web で仕上げ", systemImage: "safari", tint: .orange)
+                }
                 let images = draft.blocks.filter { $0.kind == .image }.count
                 if images > 0 {
                     Label("\(images)", systemImage: "photo").font(.caption).foregroundStyle(.secondary)
@@ -350,6 +369,10 @@ struct CreatorManagedPostRow: View {
                 .font(.body.weight(.medium))
                 .lineLimit(2)
             HStack(spacing: 6) {
+                if let status = post.managedStatus {
+                    PillLabel(text: status.creatorLabel, tint: status.creatorTint)
+                        .accessibilityIdentifier("creatorPostStatus")
+                }
                 Text(Formatters.shortDate(post.publishedAt)).font(.caption).foregroundStyle(.secondary)
                 PillLabel(text: post.feeRequired == 0 ? "全体公開" : Formatters.yen(post.feeRequired), tint: .purple)
                 if post.commentCount > 0 {
@@ -378,9 +401,10 @@ struct CreatorManagedPostsView: View {
     }
 
     private var filtered: [Post] {
+        let visible = posts.filter { !$0.isRemovedFromFanbox }
         let q = query.trimmingCharacters(in: .whitespaces)
-        guard !q.isEmpty else { return posts }
-        return posts.filter { $0.title.localizedCaseInsensitiveContains(q) }
+        guard !q.isEmpty else { return visible }
+        return visible.filter { $0.title.localizedCaseInsensitiveContains(q) }
     }
 
     var body: some View {

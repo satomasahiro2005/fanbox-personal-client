@@ -92,7 +92,8 @@ enum FanboxAdapter {
 
     /// Article blocks in order, resolved through imageMap / fileMap / embedMap / urlEmbedMap.
     /// A block whose id is missing from its map becomes an `.unknown` placeholder (never fails the post).
-    /// `includeReferenceIDs`: also put embed / url_embed ids in `mediaID` (creator editing round-trip).
+    /// `includeReferenceIDs` (creator editing round-trip): also put embed / url_embed ids in `mediaID`, and keep a block
+    /// whose id is missing from its map as a TYPED block carrying only that id (so it can be written back unchanged).
     static func articleBlocks(_ body: FanboxPostBodyDTO, includeReferenceIDs: Bool = false) -> [RemoteBlock] {
         var result: [RemoteBlock] = []
         for block in body.blocks ?? [] {
@@ -104,12 +105,16 @@ enum FanboxAdapter {
             case "image":
                 if let id = block.imageId, let image = body.imageMap?[id] {
                     result.append(imageBlock(image))
+                } else if includeReferenceIDs, let id = block.imageId {
+                    result.append(RemoteBlock(kind: .image, mediaID: id))
                 } else {
                     result.append(placeholder("画像を表示できません", referenceID: block.imageId))
                 }
             case "file":
                 if let id = block.fileId, let file = body.fileMap?[id] {
                     result.append(fileBlock(file))
+                } else if includeReferenceIDs, let id = block.fileId {
+                    result.append(RemoteBlock(kind: .file, mediaID: id))
                 } else {
                     result.append(placeholder("ファイルを表示できません", referenceID: block.fileId))
                 }
@@ -119,6 +124,8 @@ enum FanboxAdapter {
                     var b = embedBlock(provider: provider, contentID: contentID)
                     if includeReferenceIDs { b.mediaID = id }
                     result.append(b)
+                } else if includeReferenceIDs, let id = block.embedId {
+                    result.append(RemoteBlock(kind: .embed, mediaID: id))
                 } else {
                     result.append(placeholder("埋め込みを表示できません", referenceID: block.embedId))
                 }
@@ -127,6 +134,8 @@ enum FanboxAdapter {
                     var b = urlEmbedBlock(embed)
                     if includeReferenceIDs { b.mediaID = id }
                     result.append(b)
+                } else if includeReferenceIDs, let id = block.urlEmbedId {
+                    result.append(RemoteBlock(kind: .url, mediaID: id))
                 } else {
                     result.append(placeholder("リンクを表示できません", referenceID: block.urlEmbedId))
                 }
@@ -495,11 +504,15 @@ enum FanboxAdapter {
         guard let id = dto.id else { return nil }
         let published = dto.publishedAt ?? dto.updatedAt ?? .distantPast
         let blocks = contentBlocks(body: dto.body, type: postType(dto.type ?? (dto.body?.blocks != nil ? "article" : nil)))
-        return RemotePostSummary(
+        var summary = RemotePostSummary(
             id: id, creatorID: creatorID, creatorName: nonEmpty(creatorName) ?? creatorID, creatorIconURL: creatorIconURL, title: dto.title ?? "",
             excerpt: String(plainText(blocks).prefix(120)), type: postType(dto.type ?? (dto.body?.blocks != nil ? "article" : nil)),
             feeRequired: max(0, dto.feeRequired ?? 0), coverImageURL: dto.coverImageUrl, publishedAt: published, updatedAt: dto.updatedAt ?? published,
             tags: dto.tags ?? [], isRestricted: false, hasAdultContent: dto.hasAdultContent ?? false)
+        // Drafts / scheduled posts must not look published (Creator Mode pill, hidden from reader views). Unknown = nil.
+        let status = postStatus(dto.status)
+        summary.remoteStatus = status == .unknown ? nil : status
+        return summary
     }
 
     /// Managed posts newest first (by the later of updatedAt / publishedAt).
@@ -512,11 +525,15 @@ enum FanboxAdapter {
         guard let id = dto.id else { return nil }
         // Editable bodies are article-shaped; embed / url_embed ids are kept in mediaID so updatePost can round-trip them.
         let type = postType(dto.type ?? (dto.body?.blocks != nil ? "article" : nil))
-        let blocks = contentBlocks(body: dto.body, type: type == .unknown ? .article : type, includeReferenceIDs: true)
+        let resolvedType: PostType = type == .unknown ? .article : type
+        let blocks = contentBlocks(body: dto.body, type: resolvedType, includeReferenceIDs: true)
         let status = postStatus(dto.status)
         return RemoteEditablePost(id: id, title: dto.title ?? "", feeRequired: max(0, dto.feeRequired ?? 0), planID: nil, status: status,
                                   blocks: blocks, tags: dto.tags ?? [], hasAdultContent: dto.hasAdultContent ?? false,
-                                  publishedAt: status == .draft ? nil : dto.publishedAt, updatedAt: dto.updatedAt)
+                                  publishedAt: status == .draft ? nil : dto.publishedAt, updatedAt: dto.updatedAt,
+                                  postType: resolvedType,
+                                  commentPermission: dto.commentingPermissionScope.flatMap { CommentPermission(rawValue: $0.lowercased()) },
+                                  tagsKnown: dto.tags != nil)
     }
 
     static func fanState(_ raw: String?) -> FanState {

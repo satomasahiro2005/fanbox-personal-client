@@ -43,10 +43,9 @@ enum CreatorFormatting {
         }
     }
 
-    /// "yyyy-MM" of the current month (matches `CreatorDashboardSnapshot.month`).
+    /// "yyyy-MM" of the current month in JST, the month the dashboard snapshot is stored under (`CreatorMonth`).
     static func monthKey(_ date: Date = .now) -> String {
-        let c = Calendar.current.dateComponents([.year, .month], from: date)
-        return String(format: "%04d-%02d", c.year ?? 0, c.month ?? 0)
+        CreatorMonth.key(date)
     }
 
     /// "2026年9月" from "2026-09".
@@ -89,6 +88,24 @@ extension DraftStatus {
         case .failed: return .red
         }
     }
+}
+
+extension RemotePostStatus {
+    var creatorTint: Color {
+        switch self {
+        case .published: return .green
+        case .draft: return .teal
+        case .scheduled: return .orange
+        case .unknown: return .secondary
+        }
+    }
+}
+
+extension Post {
+    /// FANBOX status of my own managed post (nil = not reported / reader post).
+    var managedStatus: RemotePostStatus? { remoteStatusRaw.flatMap(RemotePostStatus.init(rawValue:)) }
+    /// Deleted on FANBOX (missing from a complete managed listing).
+    var isRemovedFromFanbox: Bool { remoteStatusRaw == LocalStore.removedManagedStatus }
 }
 
 extension FanState {

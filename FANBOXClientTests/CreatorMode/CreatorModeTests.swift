@@ -22,6 +22,17 @@ final class CreatorMockRemote: RemoteDataSource, @unchecked Sendable {
         var created: [RemotePostDraft] = []
         var updated: [(String, RemotePostDraft)] = []
         var writePriorities: [RequestPriority] = []
+        /// Uploads throw `.unsupported` (an account that uploads in the web editor).
+        var unsupportedUploads = false
+        var capabilities: DraftCapabilities = .full
+        /// Thrown by createPost (after recording) instead of `createResult`.
+        var createError: Error?
+        /// Applied to `editable` by every successful updatePost (simulates the new revision / status on the service).
+        var bumpEditableOnUpdate = true
+        var managed: [RemotePostSummary] = []
+        var managedCalls = 0
+        var fansCalls = 0
+        var dashboardCalls = 0
     }
 
     private let lock = NSLock()
@@ -43,6 +54,7 @@ final class CreatorMockRemote: RemoteDataSource, @unchecked Sendable {
             s.uploadCalls.append(name)
             s.uploadPriorities.append(priority)
             if s.offlineUploads { return .offline }
+            if s.unsupportedUploads { return .unsupported(operation: "upload") }
             if s.failAlways.contains(name) { return .server(status: 500) }
             if s.failOnce.contains(name) {
                 s.failOnce.remove(name)
@@ -73,13 +85,16 @@ final class CreatorMockRemote: RemoteDataSource, @unchecked Sendable {
         return post
     }
 
+    var draftCapabilities: DraftCapabilities { with { $0.capabilities } }
+
     func createPost(_ draft: RemotePostDraft, account: AccountContext) async throws -> String {
         let priority = RequestContext.priority
-        let result = with { s -> Result<String, RemoteError> in
+        let (result, error) = with { s -> (Result<String, RemoteError>, Error?) in
             s.created.append(draft)
             s.writePriorities.append(priority)
-            return s.createResult
+            return (s.createResult, s.createError)
         }
+        if let error { throw error }
         return try result.get()
     }
 
@@ -88,6 +103,11 @@ final class CreatorMockRemote: RemoteDataSource, @unchecked Sendable {
         let error = with { s -> RemoteError? in
             s.updated.append((id, draft))
             s.writePriorities.append(priority)
+            if s.updateError == nil, s.bumpEditableOnUpdate, var editable = s.editable, editable.id == id {
+                editable.updatedAt = (editable.updatedAt ?? .now).addingTimeInterval(60)
+                editable.status = draft.publish ? .published : .draft
+                s.editable = editable
+            }
             return s.updateError
         }
         if let error { throw error }
@@ -116,9 +136,20 @@ final class CreatorMockRemote: RemoteDataSource, @unchecked Sendable {
     func newsletters(account: AccountContext) async throws -> [RemoteNewsletter] { [] }
     func newsletter(id: String, account: AccountContext) async throws -> RemoteNewsletter { throw RemoteError.notFound }
     func paidRecords(account: AccountContext) async throws -> [RemotePayment] { [] }
-    func managedPosts(account: AccountContext, cursor: String?) async throws -> RemotePage<RemotePostSummary> { RemotePage(items: []) }
-    func fans(account: AccountContext, cursor: String?) async throws -> RemotePage<RemoteFan> { RemotePage(items: []) }
-    func creatorDashboard(account: AccountContext) async throws -> RemoteCreatorDashboard { RemoteCreatorDashboard(month: "2026-09") }
+    func managedPosts(account: AccountContext, cursor: String?) async throws -> RemotePage<RemotePostSummary> {
+        with { s in
+            s.managedCalls += 1
+            return RemotePage(items: cursor == nil ? s.managed : [])
+        }
+    }
+    func fans(account: AccountContext, cursor: String?) async throws -> RemotePage<RemoteFan> {
+        with { $0.fansCalls += 1 }
+        return RemotePage(items: [])
+    }
+    func creatorDashboard(account: AccountContext) async throws -> RemoteCreatorDashboard {
+        with { $0.dashboardCalls += 1 }
+        return RemoteCreatorDashboard(month: "2026-09")
+    }
     func creatorComments(account: AccountContext, cursor: String?) async throws -> RemotePage<RemoteComment> { RemotePage(items: []) }
 }
 
@@ -235,9 +266,10 @@ final class CreatorModeTests: XCTestCase {
         XCTAssertEqual(payload.blocks[5].embedProvider, "youtube")
         XCTAssertEqual(payload.blocks[5].embedContentID, "abc123")
 
-        // Save-as-FANBOX-draft allows an empty title; publishing does not.
+        // A title is required for every send (also a FANBOX draft save): an update rejected after post.create would
+        // otherwise leave an empty post behind.
         draft.title = " "
-        XCTAssertNoThrow(try DraftPostMapping.remotePostDraft(from: draft, publish: false))
+        XCTAssertThrowsError(try DraftPostMapping.remotePostDraft(from: draft, publish: false))
         XCTAssertThrowsError(try DraftPostMapping.remotePostDraft(from: draft, publish: true))
 
         // Media without remote id cannot be mapped.
@@ -435,8 +467,8 @@ final class CreatorModeTests: XCTestCase {
                     RemoteBlock(kind: .image, mediaID: "img-9", thumbnailURL: "https://example.invalid/t.jpg",
                                 displayURL: "https://example.invalid/d.jpg", width: 800, height: 600),
                     RemoteBlock(kind: .file, mediaID: "file-1", fileName: "demo", fileExtension: "zip", fileSize: 1234),
-                    RemoteBlock(kind: .url, url: "https://example.com"),
-                    RemoteBlock(kind: .embed, embedProvider: "youtube", embedContentID: "abc"),
+                    RemoteBlock(kind: .url, mediaID: "ue-1", url: "https://example.com", title: "Example"),
+                    RemoteBlock(kind: .embed, mediaID: "em-1", embedProvider: "youtube", embedContentID: "abc"),
                 ],
                 tags: ["tag1"], hasAdultContent: false, publishedAt: .now, updatedAt: .now)
         }
@@ -453,6 +485,11 @@ final class CreatorModeTests: XCTestCase {
         XCTAssertEqual(blocks[2].remoteMediaID, "file-1")
         XCTAssertEqual(blocks[2].originalFileName, "demo.zip")
         XCTAssertNil(blocks[1].localFileName)
+        XCTAssertEqual(blocks[3].remoteMediaID, "ue-1", "link cards keep their FANBOX id")
+        XCTAssertEqual(blocks[3].text, "Example")
+        XCTAssertEqual(blocks[4].remoteMediaID, "em-1", "embeds keep their FANBOX id")
+        XCTAssertEqual(draft.remoteStatus, .published)
+        XCTAssertEqual(draft.remoteFeeRequired, 300)
 
         // Importing again reuses the unsent local draft (no second fetch, no clobbering).
         draft.title = "Edited locally"
@@ -471,7 +508,9 @@ final class CreatorModeTests: XCTestCase {
         XCTAssertTrue(snap.created.isEmpty)
         XCTAssertEqual(snap.updated.count, 1)
         XCTAssertEqual(snap.updated.first?.0, "post-1")
-        XCTAssertEqual(snap.updated.first?.1.blocks.compactMap(\.mediaID), ["img-9", "file-1"])
+        XCTAssertEqual(snap.updated.first?.1.blocks.compactMap(\.mediaID), ["img-9", "file-1", "ue-1", "em-1"],
+                       "existing media, link cards and embeds round-trip by id")
+        XCTAssertEqual(snap.updated.first?.1.publish, true, "a live post stays published")
         XCTAssertEqual(snap.writePriorities, [.interactiveWrite])
         XCTAssertEqual(draft.status, .published)
         XCTAssertNotNil(draft.publishedAt)

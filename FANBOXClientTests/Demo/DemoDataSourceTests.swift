@@ -417,7 +417,7 @@ final class DemoDataSourceTests: XCTestCase {
         XCTAssertEqual(dashboard.earnings, DemoFixtures.fans.filter { $0.state == .supporting }.compactMap(\.fee).reduce(0, +))
         XCTAssertNotNil(dashboard.postCount)
         XCTAssertNil(dashboard.commentCount)
-        XCTAssertEqual(dashboard.month, SupportAnalyzer.monthKey(anchor))
+        XCTAssertEqual(dashboard.month, CreatorMonth.key(anchor), "JST month, like FANBOX")
 
         // Fans: states and plans.
         let fans = try await allPages { try await source.fans(account: c, cursor: $0) }.items

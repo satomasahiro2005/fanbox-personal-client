@@ -86,35 +86,13 @@ enum PostAccountLogic {
     }
 }
 
-/// External link resolution for embed / external video blocks (SPEC §6).
+/// External link handling for embed / external video blocks (SPEC §6). The link itself and the provider's name come from
+/// the adapter (`PostBlock.url` / `.title`); the UI never interprets the service's provider vocabulary (SPEC §43).
 enum PostDetailEmbedLink {
-    /// Best-effort public URL for an embed. Returns `explicitURL` when present.
-    static func url(provider: String?, contentID: String?, explicitURL: String?) -> URL? {
-        if let explicitURL, let url = URL(string: explicitURL), url.scheme != nil { return url }
-        guard let provider = provider?.lowercased(), let raw = contentID?.trimmingCharacters(in: .whitespaces), !raw.isEmpty,
-              let id = raw.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) else { return nil }
-        switch provider {
-        case "youtube": return URL(string: "https://www.youtube.com/watch?v=\(id)")
-        case "vimeo": return URL(string: "https://vimeo.com/\(id)")
-        case "soundcloud": return URL(string: "https://soundcloud.com/\(id)")
-        case "twitter", "x": return URL(string: "https://x.com/i/web/status/\(id)")
-        case "gist": return URL(string: "https://gist.github.com/\(id)")
-        default: return nil
-        }
-    }
-
-    static func providerName(_ provider: String?) -> String {
-        switch provider?.lowercased() {
-        case "youtube"?: return "YouTube"
-        case "vimeo"?: return "Vimeo"
-        case "soundcloud"?: return "SoundCloud"
-        case "twitter"?, "x"?: return "X (Twitter)"
-        case "google_forms"?: return "Google フォーム"
-        case "gist"?: return "Gist"
-        case "fanbox"?: return "FANBOX"
-        case let other?: return other
-        case nil: return "外部コンテンツ"
-        }
+    /// The block's absolute link, if any.
+    static func url(explicitURL: String?) -> URL? {
+        guard let explicitURL, let url = URL(string: explicitURL), url.scheme != nil else { return nil }
+        return url
     }
 
     /// FANBOX / pixiv pages open in the account-aware WebView, never plain Safari (SPEC §40).
