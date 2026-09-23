@@ -268,7 +268,8 @@ final class Comment {
     var isOnOwnPost: Bool
     /// Local read state (Creator Mode 未読).
     var isRead: Bool
-    var isDeleted: Bool
+    /// Soft-delete marker (renamed from `isDeleted`, which collides with SwiftData's PersistentModel.isDeleted).
+    var isRemoved: Bool
     var fetchedAt: Date
 
     init(commentID: String, postID: String, fetchedByAccountID: String, authorUserID: String, authorName: String, body: String,
@@ -287,7 +288,7 @@ final class Comment {
         self.isOwn = false
         self.isOnOwnPost = false
         self.isRead = false
-        self.isDeleted = false
+        self.isRemoved = false
         self.fetchedAt = fetchedAt
     }
 

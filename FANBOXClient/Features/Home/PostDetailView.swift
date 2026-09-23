@@ -38,7 +38,7 @@ struct PostDetailView: View {
         _posts = Query(filter: #Predicate<Post> { $0.postID == postID })
         _blocks = Query(filter: #Predicate<PostBlock> { $0.postID == postID }, sort: \PostBlock.index)
         _accesses = Query(filter: #Predicate<PostAccess> { $0.postID == postID })
-        _comments = Query(filter: #Predicate<Comment> { $0.postID == postID && !$0.isDeleted },
+        _comments = Query(filter: #Predicate<Comment> { $0.postID == postID && !$0.isRemoved },
                           sort: \Comment.createdAt, order: .reverse)
         _localTags = Query(filter: #Predicate<PostTag> { $0.postID == postID }, sort: \PostTag.tagName)
         _plans = Query(sort: \Plan.fee)

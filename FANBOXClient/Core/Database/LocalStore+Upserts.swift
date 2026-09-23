@@ -287,7 +287,7 @@ extension LocalStore {
     }
 
     /// Removes a comment that was deleted on FANBOX from the local DB.
-    /// NOTE: `Comment.isDeleted` collides with SwiftData's `PersistentModel.isDeleted` (context deletion flag) and does not
+    /// NOTE: `Comment.isDeleted` (now renamed to `isRemoved`) collided with SwiftData's `PersistentModel.isDeleted` (context deletion flag) and does not
     /// persist a soft-delete reliably, so the row is removed instead. Replies keep their parent / root ids (thread keys).
     func deleteLocalComment(commentID: String) {
         guard let c = first(#Predicate<Comment> { $0.commentID == commentID }) else { return }

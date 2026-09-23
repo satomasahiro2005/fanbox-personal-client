@@ -43,7 +43,7 @@ struct CommentThreadView: View {
     /// Deleted comments are kept only as placeholders for their replies.
     private var visibleComments: [Comment] {
         let parentIDs = Set(comments.flatMap { [$0.parentCommentID, $0.rootCommentID].compactMap { $0 } })
-        return comments.filter { !$0.isDeleted || parentIDs.contains($0.commentID) }
+        return comments.filter { !$0.isRemoved || parentIDs.contains($0.commentID) }
     }
 
     private var visibleOutgoing: [OutgoingComment] {
@@ -160,7 +160,7 @@ struct CommentThreadView: View {
                           })
             .listRowBackground(isFocused ? Color.accentColor.opacity(0.14) : Color.clear)
             .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                if deleteAccount != nil && !comment.isDeleted {
+                if deleteAccount != nil && !comment.isRemoved {
                     Button(role: .destructive) {
                         pendingDelete = comment
                     } label: {
@@ -332,7 +332,7 @@ struct CommentThreadView: View {
         guard !didPreselectReply, replyTargetID == nil, draftText.isEmpty, let focus = focusCommentID,
               let comment = comments.first(where: { $0.commentID == focus }) else { return }
         didPreselectReply = true
-        guard !comment.isDeleted, !isMine(comment) else { return }
+        guard !comment.isRemoved, !isMine(comment) else { return }
         replyTargetID = focus
     }
 
@@ -437,13 +437,13 @@ struct HomeCommentRow: View {
                 if let replyToName {
                     Text("↪︎ \(replyToName)").font(.caption).foregroundStyle(.secondary)
                 }
-                if comment.isDeleted {
+                if comment.isRemoved {
                     Text("このコメントは削除されました").font(.body).italic().foregroundStyle(.secondary)
                 } else {
                     Text(comment.body).font(.body).textSelection(.enabled)
                 }
                 HStack(spacing: 14) {
-                    if !comment.isDeleted {
+                    if !comment.isRemoved {
                         Button(action: reply) {
                             HStack(spacing: 3) {
                                 Image(systemName: "arrowshape.turn.up.left").imageScale(.small)
