@@ -25,6 +25,10 @@ final class Account {
     var createdAt: Date
     /// Small color label to tell accounts apart in lists (hex, e.g. "#8B5CF6").
     var colorHex: String?
+    /// Observed flag from FANBOX (page metadata `hasUnpaidPayments` / unpaid payment list). nil = never observed.
+    /// Used only to show "決済状態を確認できません" — never to assert that a payment failed (SPEC §15).
+    var hasUnpaidPayments: Bool?
+    var unpaidPaymentsCheckedAt: Date?
 
     init(
         id: String = UUID().uuidString,

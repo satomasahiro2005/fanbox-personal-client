@@ -111,6 +111,9 @@ final class Post {
     var isFromFollowedCreator: Bool
     /// True if my own creator account published it.
     var isOwnPost: Bool
+    /// FANBOX-side status for my own managed posts: "published" / "draft" / "scheduled". nil = a normal reader post
+    /// (treated as published). Reader views hide posts whose status is not published.
+    var remoteStatusRaw: String?
     var bodyFetchedAt: Date?
     /// Account used for the currently cached body.
     var detailAccountID: String?
@@ -172,6 +175,9 @@ final class Post {
     }
 
     var hasCachedBody: Bool { bodyFetchedAt != nil }
+
+    /// False for my own FANBOX drafts / scheduled posts (Creator Mode only; never shown in reader timelines or search).
+    var isVisibleToReaders: Bool { remoteStatusRaw == nil || remoteStatusRaw == RemotePostStatus.published.rawValue }
 
     var orderedBlocks: [PostBlock] { blocks.sorted { $0.index < $1.index } }
 }
