@@ -26,7 +26,8 @@ enum AccountLoginError: Error, Equatable, LocalizedError {
         case .duplicate(_, let name):
             return "この pixiv アカウントは「\(name)」として既に追加されています。"
         case .accountMismatch(let name):
-            return "「\(name)」とは別の pixiv アカウントでログインしています。一度ログアウトしてから、正しいアカウントでログインしてください。"
+            return "「\(name)」とは別の pixiv アカウントでログインしています。このアカウントのセッションは変更せず、Web セッションを元に戻しました。"
+                + "「\(name)」の pixiv アカウントでログインし直してください。"
         case .credentialStorage:
             return "セッション情報を安全に保存できませんでした。"
         }
@@ -41,6 +42,16 @@ enum SessionCheckResult: Equatable, Sendable {
     case updated(SessionState)
     /// Offline / transient failure: the stored state was left as it was.
     case unchanged(reason: String)
+}
+
+/// Outcome of copying a web session into the account's Keychain credential.
+enum WebCredentialRefreshResult: Equatable, Sendable {
+    case unchanged
+    case updated
+    /// The web store is logged in as another pixiv user: nothing was copied, the web store was reset.
+    case identityMismatch(pageUserID: String)
+    /// A new session could not be verified: the stored credential was kept.
+    case rejected
 }
 
 /// Account label colors (SPEC §7: tell accounts apart at a glance). Aura-like purple / mint first.
@@ -78,17 +89,32 @@ enum AccountColorPalette {
 ///
 /// Secrets: session cookies / CSRF go to `CredentialStoring` (Keychain) and the account's own `WKWebsiteDataStore`
 /// only — never to SwiftData, UserDefaults or logs (SPEC §7 / §38 / §39).
+///
+/// Account identity (SPEC §3.2 / §7.1 / §40 "誤 Account 操作を防ぐ"): a session captured from a web store is written to an
+/// account's credential only after the logged-in pixiv user was verified to be the account's own `pixivUserID` — by
+/// the page metadata and/or a probe request made with the captured session under a temporary key. A web store found
+/// logged in as another user is reset (cleared, then the account's own verified session is re-installed); a stored
+/// credential found to belong to another user is deleted and the account is set to `.error` (identity mismatch), which
+/// sync skips until a successful re-login.
 @MainActor
 @Observable
 final class AccountService {
     private(set) var loginInProgressAccountID: String?
     /// Accounts whose session is being checked right now (UI spinners).
     private(set) var validatingAccountIDs: Set<String> = []
+    /// accountID → pixiv user id seen in its web store / session instead of its own (UI warnings). Cleared by a
+    /// verified re-login or session check.
+    private(set) var identityWarnings: [String: String] = [:]
 
     @ObservationIgnored let store: LocalStore
     @ObservationIgnored let credentials: CredentialStoring
     @ObservationIgnored let webSessions: WebSessionStore
     @ObservationIgnored let remote: RemoteDataSourceProvider
+    /// Cancels an account's in-flight network work (native URLSession + WebView transport). Wired by AppEnvironment.
+    @ObservationIgnored var sessionRevoker: SessionRevoking?
+
+    /// Temporary credential keys used to verify a captured session before it is stored for an account.
+    static let probeKeyPrefix = "login-probe-"
 
     init(store: LocalStore, credentials: CredentialStoring, webSessions: WebSessionStore, remote: RemoteDataSourceProvider) {
         self.store = store
@@ -134,51 +160,54 @@ final class AccountService {
         try await completeLogin(accountID: accountID, userAgent: userAgent, csrfToken: csrfToken, metadata: nil)
     }
 
-    /// Same as `completeLogin(accountID:userAgent:csrfToken:)`; `metadata` (the user read from the FANBOX page) is used
-    /// when the API profile request fails.
+    /// Same as `completeLogin(accountID:userAgent:csrfToken:)`. `metadata` is the user read from the FANBOX page: it is
+    /// checked against the account BEFORE anything is stored, and used as the profile when the API request fails.
+    ///
+    /// Order: page identity check → capture → probe the captured session under a temporary key (`currentUser`) →
+    /// duplicate / mismatch checks → only then save the credential for the account. A rejected re-login never touches
+    /// the account's credential; its web store is reset to the account's own session.
     func completeLogin(accountID: String, userAgent: String?, csrfToken: String?, metadata: WebLoginMetadata?) async throws {
         guard let initial = store.account(id: accountID) else { throw AccountLoginError.accountNotFound }
         let webProfileID = initial.webProfileID
         let wasPlaceholder = Self.isPlaceholder(initial)
+        let boundUserID = initial.pixivUserID
+        let expectedName = initial.displayName
 
-        guard let captured = await webSessions.captureCredential(webProfileID: webProfileID, userAgent: userAgent, csrfToken: csrfToken),
+        // 1. The page already says who is logged in: a different user never gets near the credential.
+        if let pageUser = metadata?.pixivUserID, !pageUser.isEmpty, let boundUserID, pageUser != boundUserID {
+            AppLog.auth.notice("re-login page shows another pixiv user for \(accountID, privacy: .public); rejected")
+            await resetWebSession(accountID: accountID, webProfileID: webProfileID)
+            throw AccountLoginError.accountMismatch(expectedName: expectedName)
+        }
+
+        guard var captured = await webSessions.captureCredential(webProfileID: webProfileID, userAgent: userAgent, csrfToken: csrfToken),
               captured.hasSessionCookie else {
             throw AccountLoginError.noSessionCookie
         }
-
         let previous = await credentials.credential(for: accountID)
-        do {
-            try await credentials.save(captured, for: accountID)
-        } catch {
-            AppLog.auth.error("credential save failed for \(accountID, privacy: .public)")
-            throw AccountLoginError.credentialStorage
-        }
+        if captured.userAgent == nil { captured.userAgent = previous?.userAgent }
 
-        // Who is logged in? API first (authoritative), page metadata as fallback.
+        // 2. Who does the captured session belong to? API probe first (authoritative), page metadata as fallback.
         var context = initial.context
         context.kind = .fanbox
         let user: RemoteUser
-        do {
-            let source = remote.dataSource(for: context)
-            let ctx = context
-            user = try await RequestContext.$priority.withValue(.interactiveRead) {
-                try await source.currentUser(account: ctx)
-            }
-        } catch {
-            if let metadata, !metadata.pixivUserID.isEmpty {
+        switch await probeUser(with: captured, context: context) {
+        case .success(let probe):
+            user = probe.user
+            if captured.csrfToken == nil { captured.csrfToken = probe.csrfToken }
+        case .failure(let error):
+            let isAuthFailure = (error as? RemoteError) == .unauthorized
+            if !isAuthFailure, let metadata, !metadata.pixivUserID.isEmpty {
                 AppLog.auth.notice("profile API failed during login; using page metadata")
                 user = metadata.remoteUser
             } else {
-                await restoreCredential(previous, accountID: accountID)
                 throw AccountLoginError.profileUnavailable(Self.describe(error))
             }
         }
 
-        guard let account = store.account(id: accountID) else {
-            try? await credentials.delete(for: accountID)
-            throw AccountLoginError.accountNotFound
-        }
+        guard let target = store.account(id: accountID) else { throw AccountLoginError.accountNotFound }
 
+        // 3. Already managed by another local account.
         if let existing = store.accounts(includeDisabled: true).first(where: { $0.id != accountID && $0.pixivUserID == user.pixivUserID }) {
             let existingID = existing.id
             let existingName = existing.displayName
@@ -186,14 +215,30 @@ final class AccountService {
             if wasPlaceholder {
                 await discardPlaceholder(accountID: accountID)
             } else {
-                await restoreCredential(previous, accountID: accountID)
+                await resetWebSession(accountID: accountID, webProfileID: webProfileID)
             }
             throw AccountLoginError.duplicate(existingAccountID: existingID, existingName: existingName)
         }
 
-        if let current = account.pixivUserID, current != user.pixivUserID {
-            await restoreCredential(previous, accountID: accountID)
-            throw AccountLoginError.accountMismatch(expectedName: account.displayName)
+        // 4. Re-login as a different user than the one this account belongs to.
+        if let current = target.pixivUserID, current != user.pixivUserID {
+            AppLog.auth.notice("re-login produced another pixiv user for \(accountID, privacy: .public); rejected")
+            await resetWebSession(accountID: accountID, webProfileID: webProfileID)
+            throw AccountLoginError.accountMismatch(expectedName: target.displayName)
+        }
+
+        // 5. Verified: requests still running with the previous session must not write into the new one.
+        await sessionRevoker?.revokeSession(accountID: accountID)
+        do {
+            captured.capturedAt = .now
+            try await credentials.save(captured, for: accountID)
+        } catch {
+            AppLog.auth.error("credential save failed for \(accountID, privacy: .public)")
+            throw AccountLoginError.credentialStorage
+        }
+        guard let account = store.account(id: accountID) else {
+            try? await credentials.delete(for: accountID)
+            throw AccountLoginError.accountNotFound
         }
 
         account.kind = .fanbox
@@ -210,6 +255,7 @@ final class AccountService {
         account.sessionState = .valid
         account.sessionCheckedAt = .now
         account.enabled = true
+        identityWarnings[accountID] = nil
         if account.colorHex == nil { account.colorHex = nextColorHex(excluding: accountID) }
 
         let others = store.accounts(includeDisabled: true).filter { $0.id != accountID }
@@ -235,6 +281,75 @@ final class AccountService {
         AppLog.auth.info("login completed for account \(accountID, privacy: .public)")
     }
 
+    /// Result of a probe request made with a captured session.
+    struct ProbeResult: Sendable {
+        var user: RemoteUser
+        /// CSRF token the probe read from the page metadata (bound to the probed session).
+        var csrfToken: String?
+    }
+
+    /// Asks FANBOX who `credential` belongs to without storing it for any account: the credential is saved under a
+    /// temporary key, `currentUser` runs with that key, and the key (and its URLSession) is removed again.
+    func probeUser(with credential: SessionCredential, context: AccountContext) async -> Result<ProbeResult, Error> {
+        let probeID = Self.probeKeyPrefix + UUID().uuidString
+        do {
+            try await credentials.save(credential, for: probeID)
+        } catch {
+            return .failure(AccountLoginError.credentialStorage)
+        }
+        var probeContext = context
+        probeContext.accountID = probeID
+        probeContext.kind = .fanbox
+        let source = remote.dataSource(for: probeContext)
+        let result: Result<ProbeResult, Error>
+        do {
+            let ctx = probeContext
+            let user = try await RequestContext.$priority.withValue(.interactiveRead) {
+                try await source.currentUser(account: ctx)
+            }
+            let token = await credentials.credential(for: probeID)?.csrfToken
+            result = .success(ProbeResult(user: user, csrfToken: token))
+        } catch {
+            result = .failure(error)
+        }
+        try? await credentials.delete(for: probeID)
+        await sessionRevoker?.revokeSession(accountID: probeID)
+        return result
+    }
+
+    /// Clears the account's web store and re-installs its own (verified) Keychain session, so the web view can never
+    /// keep operating as another pixiv user (SPEC §7.1 "決済画面の誤 Account 防止").
+    func resetWebSession(accountID: String, webProfileID: String) async {
+        await sessionRevoker?.revokeSession(accountID: accountID)
+        await webSessions.clearData(webProfileID: webProfileID)
+        if let credential = await credentials.credential(for: accountID), credential.hasSessionCookie {
+            await webSessions.install(credential, webProfileID: webProfileID)
+        }
+    }
+
+    /// The account's web store is logged in as `pageUserID` (another pixiv user): reset it and remember the warning.
+    func handleWebIdentityMismatch(accountID: String, pageUserID: String) async {
+        guard let account = store.account(id: accountID), account.kind == .fanbox else { return }
+        AppLog.auth.error("web store of \(accountID, privacy: .public) is logged in as another pixiv user; resetting it")
+        identityWarnings[accountID] = pageUserID
+        await resetWebSession(accountID: accountID, webProfileID: account.webProfileID)
+    }
+
+    /// The stored credential itself belongs to another user: delete it (it can never be this account's), clear the web
+    /// store and set `.error` so nothing runs as that user; the account needs a re-login.
+    func quarantineMismatchedSession(accountID: String, observedUserID: String) async {
+        guard let account = store.account(id: accountID) else { return }
+        AppLog.auth.error("stored session of \(accountID, privacy: .public) belongs to another pixiv user; removed")
+        let webProfileID = account.webProfileID
+        account.sessionState = .error
+        account.sessionCheckedAt = .now
+        identityWarnings[accountID] = observedUserID
+        store.save()
+        await sessionRevoker?.revokeSession(accountID: accountID)
+        try? await credentials.delete(for: accountID)
+        await webSessions.clearData(webProfileID: webProfileID)
+    }
+
     /// Abandons a login: removes the placeholder, its credential and its web data. Real accounts are left untouched.
     func cancelLogin(accountID: String) async {
         if loginInProgressAccountID == accountID { loginInProgressAccountID = nil }
@@ -256,15 +371,19 @@ final class AccountService {
         store.context.delete(account)
         store.save()
         if loginInProgressAccountID == accountID { loginInProgressAccountID = nil }
+        await sessionRevoker?.revokeSession(accountID: accountID)
         try? await credentials.delete(for: accountID)
         await webSessions.removeData(webProfileID: webProfileID)
     }
 
-    private func restoreCredential(_ previous: SessionCredential?, accountID: String) async {
-        if let previous {
-            try? await credentials.save(previous, for: accountID)
-        } else {
-            try? await credentials.delete(for: accountID)
+    /// Deletes temporary probe credentials left behind by an interrupted login (app killed mid-probe). Credentials of
+    /// unknown account ids are deliberately kept: after a store recovery the accounts may come back, and late responses
+    /// can no longer create credentials (`CredentialStoring` merges only into existing ones).
+    func purgeOrphanCredentials() async {
+        guard let stored = await credentials.storedAccountIDs() else { return }
+        let known = Set(store.accounts(includeDisabled: true).map(\.id))
+        for id in stored where id.hasPrefix(Self.probeKeyPrefix) && !known.contains(id) {
+            try? await credentials.delete(for: id)
         }
     }
 
@@ -296,6 +415,9 @@ final class AccountService {
         let webProfileID = account.webProfileID
         let wasMain = account.isMain
         let context = store.context
+        // Stop in-flight requests first: a late answer must not write cookies / rows for the removed account.
+        await sessionRevoker?.revokeSession(accountID: accountID)
+        guard store.account(id: accountID) != nil else { return }
 
         // Account-scoped rows.
         deleteAll(FetchDescriptor<PostAccess>(predicate: #Predicate { $0.accountID == accountID }))
@@ -356,6 +478,7 @@ final class AccountService {
 
         context.delete(account)
         if loginInProgressAccountID == accountID { loginInProgressAccountID = nil }
+        identityWarnings[accountID] = nil
         if wasMain { assignMainIfNeeded() }
         store.save()
         AppLog.auth.info("account removed \(accountID, privacy: .public)")
@@ -371,7 +494,10 @@ final class AccountService {
         let webProfileID = account.webProfileID
         account.sessionState = .loggedOut
         account.sessionCheckedAt = .now
+        identityWarnings[accountID] = nil
         store.save()
+        // Cancel in-flight work (and the hidden WebView holding the store) BEFORE the secrets are deleted.
+        await sessionRevoker?.revokeSession(accountID: accountID)
         try? await credentials.delete(for: accountID)
         await webSessions.clearData(webProfileID: webProfileID)
     }
@@ -480,16 +606,16 @@ final class AccountService {
         case .success(let user):
             if let known = account.pixivUserID, known != user.pixivUserID {
                 // The stored session belongs to someone else: never treat it as this account.
-                AppLog.auth.error("session user mismatch for \(accountID, privacy: .public)")
-                account.sessionState = .error
-            } else {
-                account.sessionState = .valid
-                if account.kind == .fanbox {
-                    if !user.name.isEmpty { account.displayName = user.name }
-                    if let icon = user.iconURL { account.avatarURL = icon }
-                    if let creatorID = user.creatorID, !creatorID.isEmpty { account.creatorID = creatorID }
-                    if let fanboxUserID = user.fanboxUserID { account.fanboxUserID = fanboxUserID }
-                }
+                await quarantineMismatchedSession(accountID: accountID, observedUserID: user.pixivUserID)
+                return .updated(.error)
+            }
+            account.sessionState = .valid
+            identityWarnings[accountID] = nil
+            if account.kind == .fanbox {
+                if !user.name.isEmpty { account.displayName = user.name }
+                if let icon = user.iconURL { account.avatarURL = icon }
+                if let creatorID = user.creatorID, !creatorID.isEmpty { account.creatorID = creatorID }
+                if let fanboxUserID = user.fanboxUserID { account.fanboxUserID = fanboxUserID }
             }
             account.sessionCheckedAt = .now
             result = .updated(account.sessionState)
@@ -498,12 +624,42 @@ final class AccountService {
                 account.sessionState = state
                 account.sessionCheckedAt = .now
                 result = .updated(state)
+            } else if let probed = await probeWithBellCount(source: source, context: context, after: error) {
+                // docs/API.md §4.2: the page was not readable (challenge / edge block), the cheap API probe decides.
+                guard let account = store.account(id: accountID) else { return .unchanged(reason: "アカウントが見つかりません") }
+                if probed == .expired {
+                    account.sessionState = .expired
+                    account.sessionCheckedAt = .now
+                    result = .updated(.expired)
+                } else {
+                    result = .unchanged(reason: "ページを確認できませんでしたが、API ではログイン中です")
+                }
             } else {
                 result = .unchanged(reason: Self.describe(error))
             }
         }
         store.save()
         return result
+    }
+
+    /// bell.countUnread as a session probe after the page metadata could not be read (not for offline / cancelled).
+    /// Returns `.expired` for a 401, `.valid` for a 200, nil when it could not decide.
+    private func probeWithBellCount(source: RemoteDataSource, context: AccountContext, after error: Error) async -> SessionState? {
+        guard let fanbox = source as? FanboxRemoteDataSource else { return nil }
+        switch error as? RemoteError {
+        case .offline?, .cancelled?, .blockedByPolicy?, .rateLimited?: return nil
+        default: break
+        }
+        do {
+            _ = try await RequestContext.$priority.withValue(.interactiveRead) {
+                try await fanbox.unreadNotificationCount(account: context)
+            }
+            return .valid
+        } catch let probeError as RemoteError where probeError == .unauthorized {
+            return .expired
+        } catch {
+            return nil
+        }
     }
 
     /// Validates every enabled account (sequentially; each is a single lightweight request).
@@ -513,48 +669,104 @@ final class AccountService {
         }
     }
 
-    /// Maps a failed session check to a new state; nil = leave unchanged (offline / transient / not checkable).
+    /// Maps a failed session check to a new state; nil = leave unchanged.
+    ///
+    /// Only a 401 proves anything (`.expired`). A Cloudflare challenge (HTML 403 / page without metadata), an edge
+    /// block, a FANBOX 403 or any other failure is "unknown" (docs/API.md §4.2) and never demotes the account.
+    /// `.error` is reserved for an identity mismatch (set by `quarantineMismatchedSession`).
     static func sessionState(for error: Error) -> SessionState? {
         guard let remoteError = error as? RemoteError else { return nil }
         switch remoteError {
         case .unauthorized:
             return .expired
-        case .forbidden, .notFound, .decoding, .invalidRequest:
-            return .error
-        case .server(let status):
-            return status >= 500 ? nil : .error
-        case .offline, .rateLimited, .network, .blockedByPolicy, .cancelled, .unsupported:
+        case .forbidden, .notFound, .decoding, .invalidRequest, .server, .edgeBlocked, .csrfUnavailable,
+             .offline, .rateLimited, .network, .blockedByPolicy, .cancelled, .unsupported:
             return nil
         }
     }
 
-    /// Re-captures cookies from the web store after WebView navigation (e.g. re-login / Cloudflare challenge).
-    func refreshCredentialFromWeb(accountID: String, userAgent: String?, csrfToken: String?) async {
-        guard let account = store.account(id: accountID), account.kind == .fanbox, !Self.isPlaceholder(account) else { return }
+    /// Re-captures cookies from the web store after a FANBOX page finished loading in a browse / payment session
+    /// (e.g. a Cloudflare challenge that minted cf_clearance, or a re-login in browse mode).
+    ///
+    /// - `pageUserID`: the logged-in user read from that page. A different user than the account's own → nothing is
+    ///   copied, the web store is reset and `.identityMismatch` is returned (the session UI then warns and stops).
+    /// - When the web store holds a DIFFERENT FANBOXSESSID than the Keychain and the page did not name the user, the new
+    ///   session is verified with a probe request before it replaces the stored one (`.rejected` if that fails).
+    @discardableResult
+    func refreshCredentialFromWeb(accountID: String, userAgent: String?, csrfToken: String?,
+                                  pageUserID: String? = nil) async -> WebCredentialRefreshResult {
+        guard let account = store.account(id: accountID), account.kind == .fanbox, !Self.isPlaceholder(account) else { return .unchanged }
+        let boundUserID = account.pixivUserID
+        let context = account.context
+        if let pageUserID, !pageUserID.isEmpty, let boundUserID, pageUserID != boundUserID {
+            await handleWebIdentityMismatch(accountID: accountID, pageUserID: pageUserID)
+            return .identityMismatch(pageUserID: pageUserID)
+        }
         guard let captured = await webSessions.captureCredential(webProfileID: account.webProfileID, userAgent: userAgent,
-                                                                  csrfToken: csrfToken) else { return }
+                                                                  csrfToken: csrfToken) else { return .unchanged }
         let existing = await credentials.credential(for: accountID)
         var updated = existing ?? SessionCredential(cookies: [])
         updated.merge(captured.cookies)
         if let ua = captured.userAgent { updated.userAgent = ua }
-        if let token = captured.csrfToken { updated.csrfToken = token }
+        let oldSession = existing?.sessionCookieValue
+        let newSession = updated.sessionCookieValue
+        let sessionChanged = newSession != nil && newSession != oldSession
+        if let token = captured.csrfToken {
+            updated.csrfToken = token
+        } else if sessionChanged {
+            updated.csrfToken = nil       // bound to the previous session
+        }
+        guard existing == nil || !Self.sameContent(existing!, updated) else { return .unchanged }
+        guard updated.hasSessionCookie else { return .unchanged }
 
-        let oldSession = existing?.cookies.first { $0.name == SessionCredential.sessionCookieName }?.value
-        let newSession = captured.cookies.first { $0.name == SessionCredential.sessionCookieName }?.value
-        guard existing == nil || !Self.sameContent(existing!, updated) else { return }
-        guard updated.hasSessionCookie else { return }
+        if sessionChanged && (pageUserID ?? "").isEmpty {
+            // A new session appeared in the web store without a page naming its user: verify before storing it.
+            switch await probeUser(with: updated, context: context) {
+            case .success(let probe):
+                if let boundUserID, probe.user.pixivUserID != boundUserID {
+                    await handleWebIdentityMismatch(accountID: accountID, pageUserID: probe.user.pixivUserID)
+                    return .identityMismatch(pageUserID: probe.user.pixivUserID)
+                }
+                if updated.csrfToken == nil { updated.csrfToken = probe.csrfToken }
+            case .failure:
+                AppLog.auth.notice("new web session of \(accountID, privacy: .public) could not be verified; kept the stored one")
+                return .rejected
+            }
+        }
+        if sessionChanged {
+            // Requests still running with the old session must not write into the new credential.
+            await sessionRevoker?.revokeSession(accountID: accountID)
+        }
         updated.capturedAt = .now
         do {
             try await credentials.save(updated, for: accountID)
         } catch {
             AppLog.auth.error("credential refresh failed for \(accountID, privacy: .public)")
-            return
+            return .unchanged
         }
-        // A new session cookie after an expired state (e.g. re-login in "browse" mode) → re-check it.
-        if newSession != nil, newSession != oldSession,
-           let current = store.account(id: accountID), current.sessionState != .valid {
-            await validateSession(accountID: accountID)
+        // A verified new session (re-login in browse mode) makes the account usable again.
+        if sessionChanged, let current = store.account(id: accountID), current.sessionState != .valid {
+            current.sessionState = .valid
+            current.sessionCheckedAt = .now
+            identityWarnings[accountID] = nil
+            store.save()
         }
+        return .updated
+    }
+
+    /// Copies a FANBOXSESSID rotated by an API response into the account's web store (the web view and the API keep
+    /// presenting the same session, docs/API.md §1.3). CDN cookies minted by URLSession are never copied.
+    func installAPISessionIntoWeb(accountID: String) async {
+        guard let account = store.account(id: accountID), account.kind == .fanbox, !Self.isPlaceholder(account),
+              account.sessionState != .error,
+              let credential = await credentials.credential(for: accountID), credential.hasSessionCookie else { return }
+        var session = credential
+        // Only the session cookie: other pixiv / FANBOX cookies in the web store may be newer than the Keychain copy, and
+        // CDN cookies (cf_clearance, __cf_bm) are bound to the client that earned them.
+        session.cookies = credential.cookies.filter {
+            $0.name == SessionCredential.sessionCookieName && FanboxHostPolicy.isFanboxHost($0.normalizedDomain)
+        }
+        await webSessions.install(session, webProfileID: account.webProfileID)
     }
 
     /// Before showing a web session: if the account's web store lost its FANBOX session but the Keychain still has one,

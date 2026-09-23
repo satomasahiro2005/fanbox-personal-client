@@ -155,6 +155,8 @@ struct NotificationInboxView: View {
                 }
                 .padding(.horizontal)
             }
+            AccountReloginBanner()
+                .padding(.horizontal)
         }
         .padding(.vertical, 8)
         .background(.bar)

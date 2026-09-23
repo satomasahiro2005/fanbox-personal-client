@@ -176,9 +176,22 @@ struct AccountDetailView: View {
         } header: {
             Text("セッション")
         } footer: {
-            if account.sessionState == .expired || account.sessionState == .loggedOut {
-                Text("ログインの有効期限が切れています。「Web で再ログイン」から同じ pixiv アカウントでログインしてください。")
-            }
+            sessionFooter(account)
+        }
+    }
+
+    @ViewBuilder
+    private func sessionFooter(_ account: Account) -> some View {
+        let observed = env.accounts.identityWarnings[account.id]
+        if account.sessionState == .error {
+            Text("別の pixiv アカウント\(observed.map { "（pixiv ID: \($0)）" } ?? "")のセッションを検出したため、このアカウントのセッションを削除し、"
+                 + "同期を止めています。「Web で再ログイン」から pixiv ID \(account.pixivUserID ?? "—") のアカウントでログインしてください。")
+                .foregroundStyle(.red)
+        } else if account.sessionState == .expired || account.sessionState == .loggedOut {
+            Text("ログインの有効期限が切れています。「Web で再ログイン」から同じ pixiv アカウントでログインしてください。")
+        } else if let observed {
+            Text("Web 画面で別の pixiv アカウント（pixiv ID: \(observed)）のログインを検出したため、Web セッションをこのアカウントのものに戻しました。")
+                .foregroundStyle(.orange)
         }
     }
 
@@ -200,7 +213,7 @@ struct AccountDetailView: View {
         case .updated(.valid): return "セッションは有効です。"
         case .updated(.expired): return "ログインの有効期限が切れています。"
         case .updated(.loggedOut): return "ログアウトしています。"
-        case .updated(.error): return "セッションを確認できませんでした（エラー）。"
+        case .updated(.error): return "別の pixiv アカウントのセッションでした。安全のため削除しました。正しいアカウントで再ログインしてください。"
         case .updated(.unknown): return "状態は不明です。"
         case .unchanged(let reason): return "確認できませんでした（\(reason)）。状態は変更していません。"
         }

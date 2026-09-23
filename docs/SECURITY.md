@@ -19,9 +19,9 @@ implements them.
 | Data (SPEC §39) | Policy | Where it is stored | Implementation |
 |---|---|---|---|
 | FANBOX session secret (`FANBOXSESSID` and other session cookies) | Keychain | Generic-password item, service `ai.nemut.FANBOXClient.session`, account `credential.<accountID>`, value = JSON `SessionCredential` | `CredentialStore` (actor) over `KeychainStore`. Accessibility `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`: readable by background refresh after the first unlock, never synced or restored to another device. |
-| CSRF token | Keychain or memory | Inside the same `SessionCredential` Keychain item (`csrfToken`); cached in the actor's memory | `CredentialStore.updateCSRFToken`; `AccountHTTPClient` adds `X-CSRF-Token` only when `HTTPRequest.requiresCSRF` is set |
-| Web cookies | Per-account WebKit store | `WKWebsiteDataStore(forIdentifier: Account.webProfileID)` | `WebSessionStore`. Only fanbox.cc / pixiv.net cookies are copied between the web store and the Keychain credential (`WebCookieScope`). Logout wipes the store; account removal deletes it. |
-| API session | Per-account `URLSession` | Memory only | `AccountHTTPClient`: one ephemeral session per account, no shared cookie storage, no URL cache. Cookies are attached by hand and only for fanbox.cc / pixiv.net / pximg.net (`FanboxHostPolicy`). `Set-Cookie` responses are merged back into the Keychain credential. |
+| CSRF token | Keychain or memory | Inside the same `SessionCredential` Keychain item (`csrfToken`); cached in the actor's memory. The WebView transport keeps the page's token in memory only. | `CredentialStore.updateCSRFToken` (updates an existing item only); `AccountHTTPClient` adds `X-CSRF-Token` only when `HTTPRequest.requiresCSRF` is set. The `post.update` multipart form (token in the `tt` field) is encoded in memory and never written to a file; a form with file parts uses a temporary file with complete protection, deleted after the upload, and stale `fanbox-multipart-*` files are purged at launch. A rotated `FANBOXSESSID` drops the token of the old session. |
+| Web cookies | Per-account WebKit store | `WKWebsiteDataStore(forIdentifier: Account.webProfileID)` | `WebSessionStore`. Only fanbox.cc / pixiv.net cookies are copied from the web store into the Keychain credential (`WebCookieScope`), and only after the page's logged-in pixiv user was verified to be the account's own (see "Account identity" below). In the other direction only a rotated `FANBOXSESSID` is copied back; CDN cookies (`cf_clearance`, `__cf_bm`) minted by URLSession never are. Logout wipes the store; account removal deletes it. |
+| API session | Per-account `URLSession` | Memory only | `AccountHTTPClient`: one ephemeral session per account, no shared cookie storage, no URL cache. Cookies are attached by hand and only for *.fanbox.cc (`FanboxHostPolicy`; pixiv.net cookies stay in the credential for the web store only, pximg.net gets none). `Set-Cookie` responses are merged back into an EXISTING Keychain credential only. Logout / removal first cancels the account's in-flight requests (`SessionRevoking`); a response that started before is dropped, so nothing can re-create a deleted credential. |
 | Post body, comments, newsletters, creators, supports | SwiftData | `Application Support/Store/FANBOXClient.store` (+ `-wal`, `-shm`) | `PersistenceController`: directory and files use `FileProtectionType.completeUntilFirstUserAuthentication` |
 | Thumbnails and media | File cache | `Caches/Media/<variant>/<sha256(url)>.<ext>`, one `MediaCacheEntry` row per file | `MediaCache` / `MediaService`: `completeUntilFirstUserAuthentication`. Evictable (§32); never contains text. |
 | Card last 4 digits, brand, nickname, payment memo | SwiftData | `PaymentProfile` | Checked by `PaymentProfileValidator` before saving |
@@ -33,6 +33,28 @@ implements them.
 
 `Account` rows hold only non-secret profile data (display name, pixiv / FANBOX user ids, avatar URL, `webProfileID`,
 creator id, flags, timestamps).
+
+## Account identity
+
+One pixiv user's session must never end up in another local account (SPEC §3.2 / §7.1 / §40). `AccountService`:
+
+- **Login / re-login**: the logged-in user named by the FANBOX page is compared with the account BEFORE anything is
+  stored. The captured session is then probed under a temporary Keychain key (`login-probe-<uuid>`, removed right
+  after) and saved for the account only when the user matches. A mismatch or a duplicate never touches the account's
+  credential; its web store is cleared and the account's own session is re-installed.
+- **Browse / payment sessions**: every FANBOX page that finishes loading is inspected. A page logged in as another user
+  stops the session (red warning, the page is removed), resets the web store and copies nothing. A new session cookie
+  without a page naming its user is probed before it replaces the stored one.
+- **Session checks / sync**: a stored session that turns out to belong to another user is deleted and the account is
+  set to `.error` ("要再ログイン"); sync skips such accounts and a successful sync never clears the state — only a
+  verified re-login or session check does.
+- **WebView transport**: the hidden page is used only after its logged-in user matched the account.
+
+## Login limitation
+
+Google refuses OAuth sign-in inside embedded web views (`WKWebView`). pixiv accounts that only use "Sign in with
+Google" cannot log in through the app; the add-account screen and the login banner say so. Set a pixiv password first,
+then log in with the pixiv ID / e-mail address and that password.
 
 ## Payment profile validation
 

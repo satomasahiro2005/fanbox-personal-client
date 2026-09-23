@@ -16,6 +16,12 @@ final class AppEnvironment {
     @ObservationIgnored let research: ResearchRecorder
     @ObservationIgnored let schemaInspector: SchemaInspector
     @ObservationIgnored let http: HTTPClient
+    /// FANBOX request router (native URLSession / account WebView transport, RateGate). Same object as `http`.
+    @ObservationIgnored let transport: RoutingHTTPClient
+    @ObservationIgnored let rateGate: RateGate
+    @ObservationIgnored let transportPreferences: TransportPreferences
+    /// Hidden per-account WebViews used as the fallback transport (docs/API.md §1.11).
+    @ObservationIgnored let webFetch: WebFetchHostPool
     @ObservationIgnored let remote: RemoteDataSourceProvider
     @ObservationIgnored let sync: SyncEngine
     @ObservationIgnored let replies: ReplyQueue
@@ -32,7 +38,9 @@ final class AppEnvironment {
     @ObservationIgnored let drafts: DraftService
     @ObservationIgnored let repository: DefaultFanboxRepository
 
-    init(container: ModelContainer, settings: AppSettings, credentials: CredentialStoring) {
+    /// - Parameter transportDefaults: where transport preferences (per-endpoint "prefer WebView" and the Research
+    ///   override) persist; nil keeps them in memory (previews / UI tests).
+    init(container: ModelContainer, settings: AppSettings, credentials: CredentialStoring, transportDefaults: UserDefaults? = nil) {
         self.container = container
         self.settings = settings
         self.credentials = credentials
@@ -42,8 +50,17 @@ final class AppEnvironment {
         scheduler = NetworkScheduler(policy: policyStore)
         research = ResearchRecorder()
         schemaInspector = SchemaInspector()
-        http = AccountHTTPClient(credentials: credentials, scheduler: scheduler, recorder: research)
-        let api = FanboxAPIClient(http: http, inspector: schemaInspector)
+        webSessions = WebSessionStore()
+        let native = AccountHTTPClient(credentials: credentials, scheduler: scheduler, recorder: research)
+        rateGate = RateGate()
+        transportPreferences = TransportPreferences(defaults: transportDefaults)
+        webFetch = WebFetchHostPool(webSessions: webSessions, credentials: credentials, scheduler: scheduler, recorder: research,
+                                    policy: policyStore)
+        transport = RoutingHTTPClient(native: native, web: webFetch, gate: rateGate, preferences: transportPreferences,
+                                      recorder: research)
+        http = transport
+        // Credentials passed explicitly: the API client refreshes / stores CSRF tokens in the transport's own store.
+        let api = FanboxAPIClient(http: transport, inspector: schemaInspector, credentials: credentials)
         remote = DefaultRemoteDataSourceProvider(fanbox: FanboxRemoteDataSource(api: api), demo: DemoRemoteDataSource(policy: policyStore))
         sync = SyncEngine(store: store, remote: remote, settings: settings, network: networkMode)
         replies = ReplyQueue(store: store, remote: remote, settings: settings, network: networkMode)
@@ -54,7 +71,6 @@ final class AppEnvironment {
         offline = OfflineLibraryService(store: store, engine: sync, media: media, settings: settings)
         prefetcher = MediaPrefetcher(store: store, media: media)
         web = WebBridge()
-        webSessions = WebSessionStore()
         accounts = AccountService(store: store, credentials: credentials, webSessions: webSessions, remote: remote)
         uploads = UploadQueue(store: store, remote: remote, network: networkMode)
         drafts = DraftService(store: store, uploads: uploads, remote: remote, web: web)
@@ -97,13 +113,48 @@ final class AppEnvironment {
         web.onDismiss = { [weak self] request in
             guard let self else { return }
             if case .payment = request.purpose {
-                Task { await self.sync.sync(.supports, accountID: request.accountID, reason: .afterWrite) }
+                let sync = self.sync
+                Task { await sync.sync(.supports, accountID: request.accountID, reason: .afterWrite) }
+                // Activation can lag behind the payment (docs/API.md §18.10): look again a few minutes later.
+                Task { @MainActor [weak self] in
+                    try? await Task.sleep(nanoseconds: UInt64(Self.paymentResyncDelay * 1_000_000_000))
+                    guard let self else { return }
+                    await self.sync.sync(.supports, accountID: request.accountID, reason: .afterWrite)
+                }
             }
             if CreatorWebReconcile.needsManagedPostsResync(request) {
                 Task { await self.sync.sync(.creatorPosts, accountID: request.accountID, reason: .afterWrite) }
             }
         }
+
+        // Transport ↔ accounts (SPEC §3.2 / §7.2 / §40).
+        accounts.sessionRevoker = transport
+        transport.native.onSessionCookieChanged = { [weak self] accountID in
+            Task { @MainActor in await self?.accounts.installAPISessionIntoWeb(accountID: accountID) }
+        }
+        webFetch.accountResolver = { [weak self] accountID in
+            guard let account = self?.store.account(id: accountID), account.kind == .fanbox, account.enabled,
+                  !AccountService.isPlaceholder(account), account.sessionState != .error else { return nil }
+            return WebFetchAccount(accountID: account.id, webProfileID: account.webProfileID, pixivUserID: account.pixivUserID)
+        }
+        webFetch.prepareSession = { [weak self] accountID in
+            await self?.accounts.prepareWebSession(accountID: accountID)
+        }
+        webFetch.onIdentityMismatch = { [weak self] accountID, pageUserID in
+            Task { @MainActor in await self?.accounts.handleWebIdentityMismatch(accountID: accountID, pageUserID: pageUserID) }
+        }
+        sync.onIdentityMismatch = { [weak self] accountID, observedUserID in
+            await self?.accounts.quarantineMismatchedSession(accountID: accountID, observedUserID: observedUserID)
+        }
+        sync.onSessionExpired = { [weak self] accountID in
+            guard let self, let account = self.store.account(id: accountID) else { return }
+            SessionExpiryNotifier.notify(accountID: accountID, accountName: account.displayName,
+                                         enabled: self.settings.localNotificationsEnabled)
+        }
     }
+
+    /// Second supports resync after a payment web session (activation can take minutes).
+    static let paymentResyncDelay: TimeInterval = 4 * 60
 
     /// Production environment with the on-disk store and Keychain credentials.
     static func live() -> AppEnvironment {
@@ -118,11 +169,17 @@ final class AppEnvironment {
         }
         let settings = inMemory ? AppSettings(defaults: UserDefaults(suiteName: "uiTesting-\(UUID().uuidString)")!) : AppSettings()
         let credentials: CredentialStoring = inMemory ? InMemoryCredentialStore() : CredentialStore()
-        let env = AppEnvironment(container: container, settings: settings, credentials: credentials)
+        let env = AppEnvironment(container: container, settings: settings, credentials: credentials,
+                                 transportDefaults: inMemory ? nil : .standard)
         if arguments.contains("-demoData") {
             env.seedDemoIfNeeded()
         }
         env.router.applyLaunchArguments()
+        // The real network path is known in every launch mode, also background launches without a scene (SPEC §30 / §35).
+        env.networkMode.start()
+        // A multipart body interrupted by a kill may still be on disk; the CSRF token must not stay there (SPEC §39).
+        MultipartFormData.removeStaleTemporaryFiles()
+        Task { @MainActor in await env.accounts.purgeOrphanCredentials() }
         return env
     }
 

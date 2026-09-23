@@ -281,6 +281,16 @@ No source tests iOS. The following follows from §1.7:
 2. **WebView transport**: an offscreen `WKWebView` per account that has loaded `https://www.fanbox.cc/` and runs `fetch(url, {credentials: "include"})` from that page, returning the JSON through a script message handler. This is the same idea as Pixiv-Shaft's bridge, implemented independently. Use it for `post.info`, `post.getEditable`, all creator-side endpoints (§14–17), and as the automatic fallback whenever the native transport receives a Cloudflare HTML 403.
 3. Record which transport succeeded for each endpoint in Research Mode, and prefer that transport next time.
 
+**Implemented (unverified against the live service):** `RoutingHTTPClient` (Core/Network) sends `post.info` and
+`post.getEditable` through the account's hidden WebView first while the app is in the foreground (`WebFetchHostPool`,
+Core/Web: same `WKWebsiteDataStore` as the account's web sessions, page `https://www.fanbox.cc/`, `fetch()` with
+`credentials: "include"` in an isolated content world, logged-in user checked against the account first). Every other
+call goes native first and is re-sent through the WebView only when the native answer is an edge block
+(`EdgeBlockDetector`: 403 / 503 with `cf-mitigated`, a Cloudflare HTML page, or a challenge / "ブロックされました"
+marker); that endpoint then prefers the WebView for 24 h. In the background only the native transport runs. A 429
+pauses every call device-wide for Retry-After (6 min without one); edge blocks trip breakers instead of being retried
+per account (`RateGate`). Research Mode has an Auto / Native only / WebView only switch to check the live behaviour.
+
 ---
 
 ## 2. Common objects
@@ -1953,6 +1963,11 @@ save lastKnownItemID = newest non-pinned id seen; lastSuccessfulSync = now
 | Creator: monthly pledges | `https://www.fanbox.cc/manage/pledges/monthly/{YYYY-MM}` | — | Verified (vrct_supporters, 2026-09) |
 | Creator: payouts | `/manage/payouts`, `/manage/payouts/history`, `/manage/payouts/settings` | — | Verified (Help) |
 | Creator: settings | `/manage/creator` (R-18, Discord, fees), `/manage/profile`, `/manage/newsletters`, `/manage/invoice_issuer`, `/manage/unregister` | — | Verified (Help) |
+
+Because several URLs above are unverified, `AccountWebView` follows a fallback chain when the initial page answers
+404 (`WebDestination.fallbacks`): plan → creator plans → creator page; payment settings → `https://payment.pixiv.net/cards`
+(verified); supporting plans / notifications / newsletters → home; `/login` → `https://accounts.pixiv.net/login?return_to=…`.
+After a payment session the supports are synced immediately and again about 4 minutes later (activation can lag, §18.10).
 
 These are **WebView-only**, because no API exists in any source: starting, stopping, upgrading or downgrading support; changing the payment method or card; plan management; profile editing; sending newsletters; payout requests; media upload (§15).
 

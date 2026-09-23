@@ -97,6 +97,12 @@ struct SyncStatusBanner: View {
                 if case .unauthorized = error {
                     Text("ログインの有効期限が切れている可能性があります").font(.caption2).foregroundStyle(.secondary)
                 }
+                if case .edgeBlocked = error {
+                    Text("FANBOX 側で一時的にブロックされています（ログイン状態には影響ありません）").font(.caption2).foregroundStyle(.secondary)
+                }
+                if case .rateLimited = error {
+                    Text("リクエストが多すぎるため、しばらく通信を控えています").font(.caption2).foregroundStyle(.secondary)
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(10)

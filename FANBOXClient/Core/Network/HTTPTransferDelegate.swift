@@ -14,11 +14,17 @@ struct HTTPTransferOutcome: @unchecked Sendable {
 
 /// Per-task state. Mutated on the session's serial delegate queue; completion is lock-protected.
 final class HTTPTransferHandler: @unchecked Sendable {
+    /// docs/API.md §1.6: GET redirects are capped at this many hops.
+    static let maxRedirects = 5
+
     let progress: (@Sendable (Double) -> Void)?
     let downloadDirectory: URL?
     let requiresCSRF: Bool
     let callerHeaders: [String: String]
+    let isMedia: Bool
     var credential: SessionCredential?
+    /// Redirect hops followed so far (delegate queue only).
+    fileprivate var redirectCount = 0
 
     fileprivate var data = Data()
     fileprivate var fileURL: URL?
@@ -31,10 +37,11 @@ final class HTTPTransferHandler: @unchecked Sendable {
     private var continuation: CheckedContinuation<HTTPTransferOutcome, Error>?
 
     init(credential: SessionCredential?, requiresCSRF: Bool, callerHeaders: [String: String],
-         progress: (@Sendable (Double) -> Void)?, downloadDirectory: URL?) {
+         progress: (@Sendable (Double) -> Void)?, downloadDirectory: URL?, isMedia: Bool = false) {
         self.credential = credential
         self.requiresCSRF = requiresCSRF
         self.callerHeaders = callerHeaders
+        self.isMedia = isMedia
         self.progress = progress
         self.downloadDirectory = downloadDirectory
     }
@@ -150,12 +157,27 @@ final class HTTPTransferDelegate: NSObject, URLSessionDataDelegate, URLSessionDo
 
     // MARK: Redirects
 
+    /// Whether a redirect may be followed: never for writes (a 307 / 308 would re-send the body elsewhere), and at most
+    /// `HTTPTransferHandler.maxRedirects` hops for reads (docs/API.md §1.6). A refused redirect returns the 3xx response
+    /// to the caller, which maps it to an error.
+    static func mayFollowRedirect(method: String?, hopsSoFar: Int) -> Bool {
+        let m = (method ?? "GET").uppercased()
+        guard m == "GET" || m == "HEAD" else { return false }
+        return hopsSoFar < HTTPTransferHandler.maxRedirects
+    }
+
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+        let method = task.originalRequest?.httpMethod ?? task.currentRequest?.httpMethod
         guard let h = handler(for: task) else {
-            completionHandler(request)
+            completionHandler(Self.mayFollowRedirect(method: method, hopsSoFar: 0) ? request : nil)
             return
         }
+        guard Self.mayFollowRedirect(method: method, hopsSoFar: h.redirectCount) else {
+            completionHandler(nil)
+            return
+        }
+        h.redirectCount += 1
         // Keep Set-Cookie from the redirect response (only for session hosts).
         if let responseURL = response.url, FanboxHostPolicy.isCookieEligible(url: responseURL) {
             let cookies = AccountHTTPClient.cookies(from: response, url: responseURL)
@@ -168,7 +190,7 @@ final class HTTPTransferDelegate: NSObject, URLSessionDataDelegate, URLSessionDo
         var redirected = request
         do {
             try FanboxRequestHeaders.apply(to: &redirected, credential: h.credential, requiresCSRF: h.requiresCSRF,
-                                           callerHeaders: h.callerHeaders)
+                                           callerHeaders: h.callerHeaders, isMedia: h.isMedia)
         } catch {
             // CSRF-protected request redirected off FANBOX: follow without session headers.
             redirected.setValue(nil, forHTTPHeaderField: "Cookie")

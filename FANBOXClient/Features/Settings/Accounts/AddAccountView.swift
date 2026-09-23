@@ -23,6 +23,10 @@ struct AddAccountView: View {
                 AddAccountInfoRow(systemImage: "checkmark.circle", tint: .green,
                                   title: "自動で追加",
                                   detail: "ログインが確認できると画面が閉じ、アカウントが追加されます。既に追加済みのアカウントは追加できません。")
+                AddAccountInfoRow(systemImage: "exclamationmark.bubble", tint: .red,
+                                  title: "Google でのログインは使えません",
+                                  detail: "Google はアプリ内の Web 画面でのログインを受け付けません。Google 連携のみの pixiv アカウントは、"
+                                      + "先に pixiv でパスワードを設定し、pixiv ID / メールアドレスとパスワードでログインしてください。")
             } header: {
                 Text("しくみ")
             }

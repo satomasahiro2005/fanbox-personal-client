@@ -42,6 +42,11 @@ final class SyncEngine {
     @ObservationIgnored var onSyncFinished: ((SyncOutcome, SyncReason) -> Void)?
     /// Called for every failed sync / refresh except cancellation (wired to Research Mode events by AppEnvironment).
     @ObservationIgnored var onFailure: ((_ operation: String, _ accountID: String, _ error: RemoteError) -> Void)?
+    /// The session of a FANBOX account turned out to belong to another pixiv user (accountID, observed user id).
+    /// Wired to `AccountService.quarantineMismatchedSession` (SPEC §3.2): nothing is stored under the wrong account.
+    @ObservationIgnored var onIdentityMismatch: ((String, String) async -> Void)?
+    /// A FANBOX account's session just moved to `.expired` (wired to a one-time local notification).
+    @ObservationIgnored var onSessionExpired: ((String) -> Void)?
 
     /// Hard cap for differential feed paging (SPEC §3.7: never crawl history).
     static let maxFeedPages = 3
@@ -108,8 +113,9 @@ final class SyncEngine {
             return .failed(resource, accountID: accountID, scope: scope, error: .invalidRequest("アカウントが見つかりません"))
         }
         guard account.enabled else { return .skipped(resource, accountID: accountID, scope: scope) }
-        // Automatic polling never hammers an account whose session is known to be expired (it needs a re-login first).
-        if account.sessionState == .expired, reason == .foregroundPolling || reason == .backgroundRefresh {
+        if Self.skipsForSessionState(account, reason: reason) {
+            // Identity mismatch: never sync as another user. Expired / logged out: no automatic requests that are
+            // known to fail (the re-login banner asks the user); explicit refreshes still run.
             return .skipped(resource, accountID: accountID, scope: scope)
         }
         guard canReachNetwork else {
@@ -385,6 +391,22 @@ final class SyncEngine {
         SyncState.key(accountID: accountID, resource: resource, scope: scope)
     }
 
+    /// Whether `account` is skipped for `reason` because of its session state (FANBOX accounts only).
+    static func skipsForSessionState(_ account: Account, reason: SyncReason) -> Bool {
+        guard account.kind == .fanbox else { return false }
+        switch account.sessionState {
+        case .error:
+            return true
+        case .expired, .loggedOut:
+            switch reason {
+            case .appLaunch, .foregroundPolling, .backgroundRefresh, .notification: return true
+            case .userRefresh, .onDemand, .afterWrite: return false
+            }
+        case .valid, .unknown:
+            return false
+        }
+    }
+
     /// SPEC §29: user-initiated → interactiveRead, notification detection → notificationPrefetch, everything else backgroundSync.
     static func priority(for resource: SyncResource, reason: SyncReason) -> RequestPriority {
         var p: RequestPriority
@@ -432,6 +454,10 @@ final class SyncEngine {
             switch resource {
             case .session:
                 let user = try await ds.currentUser(account: context)
+                if context.kind == .fanbox, let known = store.account(id: accountID)?.pixivUserID, known != user.pixivUserID {
+                    await onIdentityMismatch?(accountID, user.pixivUserID)
+                    throw RemoteError.invalidRequest("このアカウントとは別の pixiv ユーザーのセッションでした")
+                }
                 applyCurrentUser(user, accountID: accountID)
 
             case .timeline, .supportingTimeline:
@@ -813,6 +839,8 @@ final class SyncEngine {
 
     private func applyCurrentUser(_ user: RemoteUser, accountID: String) {
         guard let account = store.account(id: accountID) else { return }
+        // Never rebind an account to another pixiv user (SPEC §3.2).
+        if let known = account.pixivUserID, known != user.pixivUserID { return }
         account.pixivUserID = user.pixivUserID
         account.fanboxUserID = user.fanboxUserID ?? account.fanboxUserID
         account.avatarURL = user.iconURL ?? account.avatarURL
@@ -826,6 +854,7 @@ final class SyncEngine {
 
     private func fetchPostDetail(postID: String, explicitAccountID: String?) async -> RemoteError? {
         var ordered: [String]
+        var candidateByID: [String: AccountCandidate] = [:]
         if let explicitAccountID {
             ordered = [explicitAccountID]
         } else {
@@ -833,11 +862,22 @@ final class SyncEngine {
             guard let best = AccountSelector.select(candidates) else { return .invalidRequest("アカウントがありません") }
             let others = candidates.filter { $0.accountID != best && $0.canView != false }.sorted(by: AccountSelector.isPreferred)
             ordered = [best] + others.map(\.accountID)
+            for candidate in candidates { candidateByID[candidate.accountID] = candidate }
         }
         let interactive = RequestContext.priority >= .interactiveRead
         var lastError: RemoteError?
+        var previousWasRestricted = false
+        var attempted = false
         for (index, accountID) in ordered.enumerated() {
             guard let row = store.account(id: accountID) else { continue }
+            // An identity-mismatched account has no usable session (SPEC §3.2): never pick it automatically.
+            if explicitAccountID == nil && row.kind == .fanbox && row.sessionState == .error { continue }
+            if previousWasRestricted, let candidate = candidateByID[accountID], candidate.canView == nil {
+                // docs/API.md §1.8: after a restricted answer, another post.info is only worth it for an account that may
+                // be entitled — known viewable, or supporting the creator at the post's fee or above.
+                let fee = store.post(id: postID)?.feeRequired ?? 0
+                if fee > 0 && candidate.planFee < fee { continue }
+            }
             let context = row.context
             if !interactive, let until = postDetailBlockedUntil, until > clock() {
                 // The detail endpoint was refused recently: automatic work makes no detail request. Metadata is fetched only
@@ -845,16 +885,26 @@ final class SyncEngine {
                 if store.post(id: postID) == nil { await refreshPostMetadata(postID: postID, context: context) }
                 return .forbidden
             }
+            attempted = true
             do {
                 let detail = try await remote.dataSource(for: context).post(id: postID, account: context)
                 store.upsertPostDetail(detail, account: context)
                 postDetailBlockedUntil = nil
                 if !detail.summary.isRestricted { return nil }
                 lastError = nil     // restricted is a valid answer, not an error
+                previousWasRestricted = true
             } catch {
                 let mapped = handleFailure(error, accountID: accountID, operation: "post:\(postID)")
                 store.recordPostAccessError(postID: postID, accountID: accountID, message: mapped.userMessage)
                 lastError = mapped
+                if case .edgeBlocked = mapped {
+                    // post.info blocked at the edge: refresh the summary through post.get (docs/API.md §6.2); the cached
+                    // body stays. Other accounts are not tried (they would collect the same block), and automatic detail
+                    // fetches pause for a while (repeated blocked calls risk the session, docs/API.md §1.7).
+                    postDetailBlockedUntil = clock().addingTimeInterval(Self.postDetailBlockCooldown)
+                    await refreshPostMetadata(postID: postID, context: context)
+                    return mapped
+                }
                 switch mapped {
                 case .unauthorized, .notFound:
                     // Session / visibility problems of this account: another account may still read the post.
@@ -872,6 +922,7 @@ final class SyncEngine {
             }
             if explicitAccountID != nil || index == ordered.count - 1 { break }
         }
+        if !attempted { return .invalidRequest("利用できるアカウントがありません") }
         return lastError
     }
 
@@ -969,7 +1020,9 @@ final class SyncEngine {
         state.consecutiveFailures = 0
         if let account = store.account(id: accountID) {
             account.lastSyncAt = now
-            if account.sessionState != .valid {
+            // A successful sync proves the session works, but never clears an identity mismatch (`.error`): only a
+            // verified re-login / session check does.
+            if account.sessionState != .valid && account.sessionState != .error {
                 account.sessionState = .valid
                 account.sessionCheckedAt = now
             }
@@ -1000,10 +1053,12 @@ final class SyncEngine {
             lastError = mapped
             onFailure?(operation, accountID, mapped)
         }
-        if mapped == .unauthorized, let account = store.account(id: accountID) {
+        if mapped == .unauthorized, let account = store.account(id: accountID), account.sessionState != .error {
+            let wasExpired = account.sessionState == .expired
             account.sessionState = .expired
             account.sessionCheckedAt = .now
             store.save()
+            if !wasExpired && account.kind == .fanbox { onSessionExpired?(accountID) }
         }
         return mapped
     }

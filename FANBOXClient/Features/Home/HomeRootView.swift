@@ -56,6 +56,8 @@ struct HomeRootView: View {
             statusLine
             SyncStatusBanner(error: env.coordinator.lastError, lastSync: env.coordinator.lastRefreshAt)
                 .padding(.horizontal)
+            AccountReloginBanner()
+                .padding(.horizontal)
         }
         .padding(.vertical, 6)
         .background(.bar)

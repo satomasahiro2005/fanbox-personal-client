@@ -49,10 +49,17 @@ struct TransferToken: Hashable, Sendable {
     let id: UUID
 }
 
-/// A long-running transfer the scheduler can pause while text-first requests run. `URLSessionTask` conforms.
+/// A long-running transfer the scheduler can pause while text-first requests run, and cancel when the app switches to
+/// Offline. `URLSessionTask` conforms.
 protocol PausableTransfer: AnyObject, Sendable {
     func suspend()
     func resume()
+    func cancel()
+}
+
+extension PausableTransfer {
+    /// Default for transfers that cannot be cancelled (test doubles).
+    func cancel() {}
 }
 
 extension URLSessionTask: PausableTransfer {}
@@ -63,6 +70,10 @@ struct SchedulerLimits: Sendable, Equatable {
     var maxConcurrent: Int
     /// Per-class caps; classes missing here are only bounded by `maxConcurrent`.
     var perClass: [RequestPriority: Int]
+    /// SPEC §46 "Thumbnail → Display Image → Original / Video / Attachment": at most this many large media transfers
+    /// (originals, video, audio, attachments, uploads — see `MediaSizeClass`) hold foregroundMedia slots at once, so
+    /// thumbnails and display images always keep the remaining slots. nil = no separate cap.
+    var largeMediaCap: Int? = 1
 
     static let `default` = SchedulerLimits(maxConcurrent: 6, perClass: [
         .notificationPrefetch: 3,
@@ -70,6 +81,26 @@ struct SchedulerLimits: Sendable, Equatable {
         .backgroundSync: 2,
         .mediaPrefetch: 1,
     ])
+}
+
+/// Size class of a media request, derived from its scheduler label (`media.<variant>` endpoint keys, SPEC §46).
+enum MediaSizeClass: Int, Comparable, Sendable {
+    case thumbnail = 0
+    case display = 1
+    /// Originals, attachments (files / audio / video share `media.original`) and uploads.
+    case large = 2
+
+    static func < (lhs: MediaSizeClass, rhs: MediaSizeClass) -> Bool { lhs.rawValue < rhs.rawValue }
+
+    /// nil for non-media priorities (the size class only orders media admissions).
+    static func of(label: String, priority: RequestPriority) -> MediaSizeClass? {
+        guard priority.isMedia else { return nil }
+        switch label {
+        case "media.thumbnail": return .thumbnail
+        case "media.display": return .display
+        default: return .large
+        }
+    }
 }
 
 /// Text-first network scheduler (SPEC §29).
@@ -93,6 +124,7 @@ actor NetworkScheduler {
         let id: UInt64
         let priority: RequestPriority
         let label: String
+        let size: MediaSizeClass?
         let continuation: CheckedContinuation<Void, Error>
     }
 
@@ -103,6 +135,8 @@ actor NetworkScheduler {
     }
 
     private var active: [RequestPriority: Int] = [:]
+    /// Large media transfers in flight (subset of the media classes, see `SchedulerLimits.largeMediaCap`).
+    private var activeLarge = 0
     private var waiters: [Waiter] = []
     private var transfers: [TransferToken: Transfer] = [:]
     private var nextWaiterID: UInt64 = 0
@@ -132,13 +166,14 @@ actor NetworkScheduler {
             // Nested call from inside an admitted operation: it already holds a slot.
             return try await operation()
         }
-        try await acquire(priority, label: label)
+        let size = MediaSizeClass.of(label: label, priority: priority)
+        try await acquire(priority, label: label, size: size)
         do {
             let value = try await Self.$isAdmitted.withValue(true) { try await operation() }
-            release(priority)
+            release(priority, size: size)
             return value
         } catch {
-            release(priority)
+            release(priority, size: size)
             throw error
         }
     }
@@ -193,14 +228,33 @@ actor NetworkScheduler {
         for w in failed { w.continuation.resume(throwing: RemoteError.offline) }
     }
 
+    /// SPEC §30 Offline ("ネットワーク通信を完全停止する"): cancels every registered long-running transfer (downloads /
+    /// uploads) when the policy no longer allows network access. The transport reports them as `.offline`.
+    /// Admitted writes (`interactiveWrite`) are never cancelled: the server outcome would become ambiguous.
+    func cancelTransfersIfOffline() {
+        guard !policy.current.allowsNetwork else { return }
+        for (token, entry) in transfers where entry.priority != .interactiveWrite {
+            transfers.removeValue(forKey: token)
+            entry.transfer.cancel()
+            if entry.suspended { entry.transfer.resume() }
+        }
+    }
+
+    /// Makes sure the Offline observer is installed (the transport calls this when it registers a transfer).
+    func ensureObservingPolicy() { observePolicyIfNeeded() }
+
     // MARK: - Admission
 
-    /// Fails queued waiters as soon as the mode switches to Offline (registered lazily; actor inits cannot escape self).
+    /// Fails queued waiters and cancels registered transfers as soon as the mode switches to Offline
+    /// (registered lazily; actor inits cannot escape self).
     private func observePolicyIfNeeded() {
         guard observerToken == nil else { return }
         observerToken = policy.addObserver { [weak self] snapshot in
             guard !snapshot.allowsNetwork, let self else { return }
-            Task { await self.failQueuedIfOffline() }
+            Task {
+                await self.failQueuedIfOffline()
+                await self.cancelTransfersIfOffline()
+            }
         }
     }
 
@@ -210,10 +264,11 @@ actor NetworkScheduler {
 
     private func count(_ p: RequestPriority) -> Int { active[p] ?? 0 }
 
-    private func canAdmit(_ priority: RequestPriority) -> Bool {
+    private func canAdmit(_ priority: RequestPriority, size: MediaSizeClass? = nil) -> Bool {
         if priority.isInteractive { return true }
         if priority.isMedia && textFirstInFlight { return false }
         if let cap = limits.perClass[priority], count(priority) >= cap { return false }
+        if size == .large, let cap = limits.largeMediaCap, activeLarge >= cap { return false }
         let nonInteractive = RequestPriority.allCases.filter { !$0.isInteractive }.reduce(0) { $0 + count($1) }
         if priority == .notificationPrefetch {
             let media = count(.foregroundMedia) + count(.mediaPrefetch)
@@ -222,9 +277,11 @@ actor NetworkScheduler {
         return nonInteractive < limits.maxConcurrent
     }
 
-    private func acquire(_ priority: RequestPriority, label: String) async throws {
-        if canAdmit(priority) {
-            admit(priority)
+    private func acquire(_ priority: RequestPriority, label: String, size: MediaSizeClass?) async throws {
+        // Queued smaller media go first: a new large transfer never overtakes waiting thumbnails / display images.
+        let smallerWaiting = size == .large && waiters.contains { $0.priority == priority && ($0.size ?? .large) < .large }
+        if !smallerWaiting && canAdmit(priority, size: size) {
+            admit(priority, size: size)
             return
         }
         nextWaiterID &+= 1
@@ -235,7 +292,7 @@ actor NetworkScheduler {
                     continuation.resume(throwing: RemoteError.cancelled)
                     return
                 }
-                waiters.append(Waiter(id: id, priority: priority, label: label, continuation: continuation))
+                waiters.append(Waiter(id: id, priority: priority, label: label, size: size, continuation: continuation))
             }
         } onCancel: {
             Task { await self.cancelWaiter(id) }
@@ -248,16 +305,18 @@ actor NetworkScheduler {
         waiter.continuation.resume(throwing: RemoteError.cancelled)
     }
 
-    private func admit(_ priority: RequestPriority) {
+    private func admit(_ priority: RequestPriority, size: MediaSizeClass? = nil) {
         let wasTextFirst = textFirstInFlight
         active[priority, default: 0] += 1
+        if size == .large { activeLarge += 1 }
         if priority.pausesMedia && !wasTextFirst {
             suspendMediaTransfers()
         }
     }
 
-    private func release(_ priority: RequestPriority) {
+    private func release(_ priority: RequestPriority, size: MediaSizeClass? = nil) {
         active[priority] = max(0, count(priority) - 1)
+        if size == .large { activeLarge = max(0, activeLarge - 1) }
         if priority.pausesMedia && !textFirstInFlight {
             resumeMediaTransfers()
         }
@@ -274,9 +333,9 @@ actor NetworkScheduler {
         var admittedAny = true
         while admittedAny {
             admittedAny = false
-            for waiter in orderedWaiters() where canAdmit(waiter.priority) {
+            for waiter in orderedWaiters() where canAdmit(waiter.priority, size: waiter.size) {
                 waiters.removeAll { $0.id == waiter.id }
-                admit(waiter.priority)
+                admit(waiter.priority, size: waiter.size)
                 waiter.continuation.resume()
                 admittedAny = true
                 break
@@ -284,9 +343,18 @@ actor NetworkScheduler {
         }
     }
 
+    /// Priority first; within a media class smaller variants first (thumbnail → display → large); then FIFO.
     private func orderedWaiters() -> [Waiter] {
-        waiters.sorted { a, b in a.priority != b.priority ? a.priority > b.priority : a.id < b.id }
+        waiters.sorted { a, b in
+            if a.priority != b.priority { return a.priority > b.priority }
+            let sa = a.size ?? .thumbnail, sb = b.size ?? .thumbnail
+            if sa != sb { return sa < sb }
+            return a.id < b.id
+        }
     }
+
+    /// Large media transfers currently admitted (tests / Research Mode).
+    func activeLargeMediaCount() -> Int { activeLarge }
 
     private func suspendMediaTransfers() {
         for (token, entry) in transfers where entry.priority.isPausableTransferClass && !entry.suspended {

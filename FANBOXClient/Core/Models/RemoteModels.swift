@@ -242,6 +242,9 @@ struct RemoteNotification: Sendable, Hashable {
     var title: String
     var message: String
     var isUnread: Bool?
+    /// For post notifications: the bell's post says THIS account cannot view the body (nil = unknown).
+    /// Such posts are not prefetched with post.info (docs/API.md §1.8: restricted items only use up the budget).
+    var isRestricted: Bool? = nil
 }
 
 struct RemoteNewsletter: Sendable, Hashable {
@@ -348,9 +351,16 @@ enum RemoteError: Error, Sendable, Equatable {
     case offline
     /// Session missing / expired — re-login via Web Bridge.
     case unauthorized
+    /// FANBOX itself refused the resource (JSON 403): not entitled / not available to this account.
     case forbidden
     case notFound
     case rateLimited(retryAfter: TimeInterval?)
+    /// The request was stopped at the CDN edge (Cloudflare challenge / "ブロックされました" HTML, docs/API.md §1.6–§1.7),
+    /// not by FANBOX. Says nothing about the session; the transport may retry through the account WebView.
+    case edgeBlocked(retryAfter: TimeInterval?)
+    /// A write needs the CSRF token but none could be obtained (e.g. the www page was challenged). Nothing was sent;
+    /// the session is not known to be invalid, so this is transient.
+    case csrfUnavailable
     case server(status: Int)
     case decoding(endpoint: String, detail: String)
     case network(code: Int, detail: String)
@@ -368,6 +378,8 @@ enum RemoteError: Error, Sendable, Equatable {
         case .forbidden: return "アクセスできません"
         case .notFound: return "見つかりませんでした"
         case .rateLimited: return "しばらく待ってから再試行してください"
+        case .edgeBlocked: return "FANBOX 側で一時的にブロックされました"
+        case .csrfUnavailable: return "FANBOX の確認用トークンを取得できませんでした。しばらくしてから再試行します"
         case .server(let status): return "サーバーエラー (\(status))"
         case .decoding: return "応答を解釈できませんでした"
         case .network: return "通信エラー"
@@ -381,7 +393,7 @@ enum RemoteError: Error, Sendable, Equatable {
     /// Transient errors that may be retried automatically.
     var isTransient: Bool {
         switch self {
-        case .offline, .rateLimited, .network: return true
+        case .offline, .rateLimited, .network, .edgeBlocked, .csrfUnavailable: return true
         case .server(let status): return status >= 500
         default: return false
         }

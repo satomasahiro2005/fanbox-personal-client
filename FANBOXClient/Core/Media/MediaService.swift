@@ -173,7 +173,12 @@ final class MediaService {
 
         fetch.waiters += 1
         let fileURL = try await withTaskCancellationHandler {
-            try await fetch.task.value
+            do {
+                return try await fetch.task.value
+            } catch let error as RemoteError where (error == .offline || error == .cancelled) && !network.policy.allowsNetwork {
+                // SPEC §30: a transfer stopped because the app went Offline is "blocked by the mode", not a failure.
+                throw RemoteError.blockedByPolicy
+            }
         } onCancel: {
             // Cancel the shared download only when every waiter has gone away (e.g. cells scrolled off screen).
             Task { @MainActor in

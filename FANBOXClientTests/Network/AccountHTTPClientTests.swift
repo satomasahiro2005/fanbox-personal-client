@@ -140,10 +140,11 @@ final class AccountHTTPClientTests: XCTestCase {
                                   accountID: "A")
         XCTAssertNil(header("Cookie", NetModStubProtocol.requests.last))
 
-        // pixiv.net gets its own cookies, pximg gets a Referer.
+        // Updated for the transport fix (docs/API.md §1.3): pixiv.net cookies stay in the credential (for re-installing
+        // into the web store) but the native transport never sends them; pximg gets a Referer only.
         _ = try await client.send(HTTPRequest(url: URL(string: "https://www.pixiv.net/ajax/x")!, priority: .interactiveRead,
                                               endpointKey: "pixiv"), accountID: "A")
-        XCTAssertEqual(header("Cookie", NetModStubProtocol.requests.last), "PHPSESSID=pixiv-session")
+        XCTAssertNil(header("Cookie", NetModStubProtocol.requests.last))
         _ = try await client.send(HTTPRequest(url: URL(string: "https://pixiv.pximg.net/c/1.jpg")!, priority: .foregroundMedia,
                                               endpointKey: "img"), accountID: "A")
         XCTAssertEqual(header("Referer", NetModStubProtocol.requests.last), "https://www.fanbox.cc/")
@@ -173,9 +174,10 @@ final class AccountHTTPClientTests: XCTestCase {
         let before = NetModStubProtocol.requests.count
         do {
             _ = try await client.send(post, accountID: "B")
-            XCTFail("expected unauthorized")
+            XCTFail("expected csrfUnavailable")
         } catch {
-            XCTAssertEqual(error as? RemoteError, .unauthorized)
+            // Updated for the transport fix: a missing token is transient and says nothing about the session.
+            XCTAssertEqual(error as? RemoteError, .csrfUnavailable)
         }
         XCTAssertEqual(NetModStubProtocol.requests.count, before, "nothing sent without a CSRF token")
 
@@ -190,6 +192,8 @@ final class AccountHTTPClientTests: XCTestCase {
 
     // MARK: Status mapping
 
+    /// Updated for the transport fix: `send` RETURNS non-2xx answers (status, headers and body reach
+    /// `FanboxAPIClient.validate`, which tells FANBOX refusals from edge blocks); the mapping table is `HTTPErrorMapper`.
     func testStatusMapping() async throws {
         NetModStubProtocol.install { request in
             let code = Int(request.url?.lastPathComponent ?? "") ?? 200
@@ -197,26 +201,22 @@ final class AccountHTTPClientTests: XCTestCase {
             if code == 429 { stub.headers["Retry-After"] = "12" }
             return stub
         }
-        func status(_ code: Int) async -> RemoteError? {
+        for code in [204, 401, 403, 404, 429, 500, 503, 418] {
             let r = HTTPRequest(url: URL(string: "https://api.fanbox.cc/status/\(code)")!, priority: .interactiveRead, endpointKey: "status")
-            do {
-                _ = try await client.send(r, accountID: "A")
-                return nil
-            } catch {
-                return error as? RemoteError
-            }
+            let response = try await client.send(r, accountID: "A")
+            XCTAssertEqual(response.statusCode, code)
         }
-        let ok = await status(204)
-        XCTAssertNil(ok)
-        let e401 = await status(401), e403 = await status(403), e404 = await status(404)
-        let e429 = await status(429), e500 = await status(500), e503 = await status(503), e418 = await status(418)
-        XCTAssertEqual(e401, .unauthorized)
-        XCTAssertEqual(e403, .forbidden)
-        XCTAssertEqual(e404, .notFound)
-        XCTAssertEqual(e429, .rateLimited(retryAfter: 12))
-        XCTAssertEqual(e500, .server(status: 500))
-        XCTAssertEqual(e503, .server(status: 503))
-        XCTAssertEqual(e418, .server(status: 418))
+        let json = ["Content-Type": "application/json"]
+        XCTAssertNil(HTTPErrorMapper.error(status: 204, headers: json))
+        XCTAssertEqual(HTTPErrorMapper.error(status: 401, headers: json), .unauthorized)
+        XCTAssertEqual(HTTPErrorMapper.error(status: 403, headers: json, body: Data(#"{"error":"x"}"#.utf8)), .forbidden)
+        XCTAssertEqual(HTTPErrorMapper.error(status: 404, headers: json), .notFound)
+        XCTAssertEqual(HTTPErrorMapper.error(status: 429, headers: ["Retry-After": "12"]), .rateLimited(retryAfter: 12))
+        XCTAssertEqual(HTTPErrorMapper.error(status: 500, headers: json), .server(status: 500))
+        XCTAssertEqual(HTTPErrorMapper.error(status: 503, headers: json), .server(status: 503))
+        XCTAssertEqual(HTTPErrorMapper.error(status: 418, headers: json), .server(status: 418))
+        XCTAssertEqual(HTTPErrorMapper.error(status: 403, headers: ["Content-Type": "text/html", "Server": "cloudflare"],
+                                             body: Data("<html>Just a moment...</html>".utf8)), .edgeBlocked(retryAfter: nil))
     }
 
     func testURLErrorMapping() {

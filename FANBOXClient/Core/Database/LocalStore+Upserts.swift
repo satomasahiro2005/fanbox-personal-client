@@ -26,6 +26,13 @@ extension LocalStore {
         return result
     }
 
+    /// Metadata of one post without a body (post.get, when post.info is edge-blocked): updates the summary and the
+    /// account's PostAccess, never the cached body, and does not count as a feed listing.
+    func upsertPostMetadata(_ summary: RemotePostSummary, account: AccountContext) {
+        upsertSummariesCore([summary], account: account, source: nil)
+        save()
+    }
+
     func upsertPostDetail(_ detail: RemotePostDetail, account: AccountContext) {
         let summary = detail.summary
         // Metadata + PostAccess (canView = !isRestricted). A detail is not a listing: no seenBy / feed flags.
@@ -68,9 +75,6 @@ extension LocalStore {
     }
 
     /// Post metadata without a body (post.get fallback): updates title / excerpt / counts, never touches a cached body.
-    func upsertPostMetadata(_ summary: RemotePostSummary, account: AccountContext) {
-        upsertSummariesCore([summary], account: account, source: nil)
-    }
 
     // MARK: - Creators
 
@@ -492,6 +496,7 @@ extension LocalStore {
                 if e.actorIconURL == nil { e.actorIconURL = n.actorIconURL }
                 if e.message.isEmpty && !n.message.isEmpty { e.message = n.message }
                 if e.title.isEmpty && !n.title.isEmpty { e.title = n.title }
+                if n.isRestricted == false, n.type == .newPost, e.prefetchState == .notNeeded { e.prefetchState = .pending }
                 continue
             }
             // Older than the inbox retention: pruned locally on purpose, never re-imported as new.
@@ -504,7 +509,9 @@ extension LocalStore {
             e.actorIconURL = n.actorIconURL
             // Already read on FANBOX → do not surface as unread / do not notify again.
             e.isRead = n.isUnread == false
-            e.prefetchState = .pending
+            // A post this account cannot view is not prefetched: post.info would only spend the request budget
+            // (docs/API.md §1.8). Another account's unrestricted copy re-arms it below.
+            e.prefetchState = n.isRestricted == true && n.type == .newPost ? .notNeeded : .pending
             context.insert(e)
             known[key] = e
             newIDs.append(key)

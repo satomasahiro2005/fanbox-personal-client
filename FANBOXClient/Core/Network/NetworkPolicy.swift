@@ -74,9 +74,15 @@ struct NetworkPolicySnapshot: Sendable, Equatable {
     var mediaPrefetchWiFiOnly: Bool
     /// SPEC §30 Extreme: Thumbnail "Optional".
     var extremeShowsThumbnails: Bool
+    /// False after path monitoring started but before Network.framework reported the first path (e.g. a background
+    /// launch). Wi-Fi-only prefetch treats an unknown path as "not Wi-Fi" (SPEC §35).
+    var pathKnown: Bool = true
 
     static let `default` = NetworkPolicySnapshot(mode: .normal, pathSatisfied: true, isOnWiFi: true, isConstrained: false,
                                                  isExpensive: false, mediaPrefetchWiFiOnly: true, extremeShowsThumbnails: false)
+
+    /// Wi-Fi as far as prefetch decisions are concerned (an unreported path counts as cellular).
+    var isKnownWiFi: Bool { pathKnown && isOnWiFi }
 
     var allowsNetwork: Bool { mode != .offline }
 }
@@ -128,8 +134,8 @@ enum MediaPolicy {
     static func decide(kind: MediaKind, variant: MediaVariant, trigger: MediaTrigger, policy: NetworkPolicySnapshot) -> MediaDecision {
         if policy.mode == .offline || !policy.pathSatisfied { return .blocked }
 
-        // SPEC §35: optional Wi-Fi-only media prefetch.
-        if trigger == .prefetch, policy.mediaPrefetchWiFiOnly, !policy.isOnWiFi { return .blocked }
+        // SPEC §35: optional Wi-Fi-only media prefetch (an unreported path is not treated as Wi-Fi).
+        if trigger == .prefetch, policy.mediaPrefetchWiFiOnly, !policy.isKnownWiFi { return .blocked }
 
         switch policy.mode {
         case .offline:
@@ -138,7 +144,7 @@ enum MediaPolicy {
         case .normal:
             switch kind {
             case .image:
-                if trigger == .prefetch && variant == .original && !policy.isOnWiFi { return .blocked }
+                if trigger == .prefetch && variant == .original && !policy.isKnownWiFi { return .blocked }
                 return .allowed
             case .video, .audio, .file:
                 // Large payloads are never fetched implicitly while browsing.

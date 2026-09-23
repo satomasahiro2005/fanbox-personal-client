@@ -99,6 +99,7 @@ struct ResearchModeView: View {
                 .accessibilityIdentifier("researchSchedulerLink")
             }
 
+            WebTransportResearchSection()
             #if DEBUG
             ResearchDemoToolsSection()
             #endif

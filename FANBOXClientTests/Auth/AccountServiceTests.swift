@@ -424,13 +424,18 @@ final class AccountServiceTests: XCTestCase {
         XCTAssertEqual(cookies.first { $0.name == "FANBOXSESSID" }?.value, "from-keychain")
     }
 
+    /// Updated for the transport fix (docs/API.md §4.2): only a 401 changes the state; a challenge / edge block / FANBOX
+    /// 403 is "unknown" and never demotes a healthy account. `.error` is reserved for an identity mismatch.
     func testSessionStateMappingTable() {
         XCTAssertEqual(AccountService.sessionState(for: RemoteError.unauthorized), .expired)
-        XCTAssertEqual(AccountService.sessionState(for: RemoteError.forbidden), .error)
+        XCTAssertNil(AccountService.sessionState(for: RemoteError.forbidden))
+        XCTAssertNil(AccountService.sessionState(for: RemoteError.edgeBlocked(retryAfter: nil)))
+        XCTAssertNil(AccountService.sessionState(for: RemoteError.decoding(endpoint: "www.metadata", detail: "no metadata")))
+        XCTAssertNil(AccountService.sessionState(for: RemoteError.csrfUnavailable))
         XCTAssertNil(AccountService.sessionState(for: RemoteError.offline))
         XCTAssertNil(AccountService.sessionState(for: RemoteError.rateLimited(retryAfter: nil)))
         XCTAssertNil(AccountService.sessionState(for: RemoteError.server(status: 503)))
-        XCTAssertEqual(AccountService.sessionState(for: RemoteError.server(status: 400)), .error)
+        XCTAssertNil(AccountService.sessionState(for: RemoteError.server(status: 400)))
         XCTAssertNil(AccountService.sessionState(for: CancellationError()))
     }
 }

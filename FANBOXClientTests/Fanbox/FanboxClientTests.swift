@@ -312,7 +312,8 @@ final class FanboxClientTests: XCTestCase {
 
         await assertThrows(.unauthorized) { _ = try await h.source.homeTimeline(account: FanboxTestHarness.fan, cursor: nil) }
         await assertThrows(.rateLimited(retryAfter: 90)) { _ = try await h.source.supportingTimeline(account: FanboxTestHarness.fan, cursor: nil) }
-        await assertThrows(.forbidden) { _ = try await h.source.post(id: "1", account: FanboxTestHarness.fan) }
+        // Updated for the transport fix: a Cloudflare HTML 403 is an edge block, not a FANBOX refusal (docs/API.md §1.6).
+        await assertThrows(.edgeBlocked(retryAfter: nil)) { _ = try await h.source.post(id: "1", account: FanboxTestHarness.fan) }
         do {
             _ = try await h.source.creator(id: "x", account: FanboxTestHarness.fan)
             XCTFail("expected error")
@@ -373,7 +374,9 @@ final class FanboxClientTests: XCTestCase {
         XCTAssertEqual(update.method, "POST")
         XCTAssertEqual(update.priority, .interactiveWrite)
         XCTAssertTrue(update.headers["Content-Type"]?.hasPrefix("multipart/form-data; boundary=") ?? false)
-        let body = String(data: h.http.uploadBodies.last ?? Data(), encoding: .utf8) ?? ""
+        // Updated for the transport fix: a field-only form is sent from memory (`send`), never via a temp file.
+        XCTAssertTrue(h.http.uploadBodies.isEmpty, "post.update is not uploaded from a file")
+        let body = String(data: update.body ?? Data(), encoding: .utf8) ?? ""
         XCTAssertTrue(body.contains("name=\"tt\"\r\n\r\ntok-abc\r\n"))
         XCTAssertTrue(body.contains("name=\"postId\"\r\n\r\n9001\r\n"))
         XCTAssertTrue(body.contains(#"[{"text":"本文","type":"p"}]"#))
@@ -395,7 +398,7 @@ final class FanboxClientTests: XCTestCase {
         }
         let draft = RemotePostDraft(title: "更新", feeRequired: 500, planID: nil, tags: editable.tags, hasAdultContent: false, blocks: blocks, publish: true)
         try await h.source.updatePost(id: "m2", draft, account: FanboxTestHarness.creator)
-        let body = String(data: h.http.uploadBodies.last ?? Data(), encoding: .utf8) ?? ""
+        let body = String(data: h.http.requests(for: "post.update").last?.body ?? Data(), encoding: .utf8) ?? ""
         XCTAssertTrue(body.contains(#"[{"text":"本文","type":"p"},{"imageId":"im1","type":"image"},{"type":"url_embed","urlEmbedId":"ue1"}]"#))
         XCTAssertTrue(body.contains("name=\"status\"\r\n\r\npublished\r\n"))
 

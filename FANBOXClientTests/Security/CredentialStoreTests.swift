@@ -66,13 +66,25 @@ final class CredentialStoreTests: XCTestCase {
         XCTAssertFalse(reloaded?.cookies.contains { $0.name == "new_cookie" } ?? true)
     }
 
-    func testMergeCreatesCredentialWhenMissingAndDeleteRemoves() async throws {
+    /// Updated for the transport fix: Set-Cookie / CSRF updates never CREATE a credential (a late response for a
+    /// logged-out or removed account must not resurrect its Keychain item). Only an explicit `save` creates one.
+    func testMergeNeverCreatesCredentialAndDeleteRemoves() async throws {
         let store = CredentialStore(keychain: keychain)
         await store.mergeCookies([StoredCookie(name: "FANBOXSESSID", value: "v", domain: ".fanbox.cc")], for: "new")
+        await store.updateCSRFToken("t", for: "new")
+        let notCreated = await CredentialStore(keychain: keychain).credential(for: "new")
+        XCTAssertNil(notCreated)
+        XCTAssertEqual(try keychain.allKeys(), [])
+
+        try await store.save(SessionCredential(cookies: [StoredCookie(name: "FANBOXSESSID", value: "v", domain: ".fanbox.cc")]),
+                             for: "new")
+        await store.mergeCookies([StoredCookie(name: "x", value: "1", domain: ".fanbox.cc")], for: "new")
         let created = await CredentialStore(keychain: keychain).credential(for: "new")
-        XCTAssertEqual(created?.cookies.count, 1)
+        XCTAssertEqual(created?.cookies.count, 2)
 
         try await store.delete(for: "new")
+        // A late Set-Cookie after the delete does not bring it back.
+        await store.mergeCookies([StoredCookie(name: "FANBOXSESSID", value: "late", domain: ".fanbox.cc")], for: "new")
         let afterDelete = await store.credential(for: "new")
         XCTAssertNil(afterDelete)
         let fresh = await CredentialStore(keychain: keychain).credential(for: "new")
@@ -108,12 +120,24 @@ final class CredentialStoreTests: XCTestCase {
         XCTAssertEqual(credential.cookieHeader(for: URL(string: "https://www.pixiv.net/")!), "px=p")
     }
 
-    func testInMemoryStoreMergeAndCSRF() async {
+    /// Updated for the transport fix: like the Keychain store, the in-memory store only updates existing credentials,
+    /// and a rotated FANBOXSESSID drops the CSRF token bound to the old session.
+    func testInMemoryStoreMergeAndCSRF() async throws {
         let store = InMemoryCredentialStore()
         await store.updateCSRFToken("t", for: "x")
         await store.mergeCookies([StoredCookie(name: "FANBOXSESSID", value: "v", domain: ".fanbox.cc")], for: "x")
-        let c = await store.credential(for: "x")
-        XCTAssertEqual(c?.csrfToken, "t")
+        let missing = await store.credential(for: "x")
+        XCTAssertNil(missing)
+
+        try await store.save(SessionCredential(cookies: [StoredCookie(name: "FANBOXSESSID", value: "v", domain: ".fanbox.cc")]), for: "x")
+        await store.updateCSRFToken("t", for: "x")
+        await store.mergeCookies([StoredCookie(name: "__cf_bm", value: "b", domain: ".fanbox.cc")], for: "x")
+        var c = await store.credential(for: "x")
+        XCTAssertEqual(c?.csrfToken, "t", "an unrelated cookie keeps the token")
         XCTAssertTrue(c?.hasSessionCookie ?? false)
+        await store.mergeCookies([StoredCookie(name: "FANBOXSESSID", value: "v2", domain: ".fanbox.cc")], for: "x")
+        c = await store.credential(for: "x")
+        XCTAssertNil(c?.csrfToken, "the token of the previous session is dropped")
+        XCTAssertEqual(c?.sessionCookieValue, "v2")
     }
 }

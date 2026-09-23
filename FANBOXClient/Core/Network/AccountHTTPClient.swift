@@ -4,15 +4,28 @@ import os
 /// Per-account URLSession transport (SPEC §7.2 / §29 / §38). See `HTTPClient` for the contract.
 ///
 /// - One ephemeral `URLSession` per account (lazily created, cached): no shared cookie storage, no URL cache,
-///   cookies are attached manually from the account's `SessionCredential` and only for fanbox.cc / pixiv.net / pximg.net.
+///   cookies are attached manually from the account's `SessionCredential` and only for *.fanbox.cc (`FanboxHostPolicy`).
 /// - Every request runs through `NetworkScheduler.run(priority, label: endpointKey)`; downloads / uploads are also
-///   registered as pausable transfers so text-first requests can suspend them.
-/// - `Set-Cookie` from responses (and redirects) is merged back into the credential store.
+///   registered as pausable transfers so text-first requests can suspend them, and Offline cancels them (`.offline`).
+/// - `send` / `upload` return non-2xx answers (the API client classifies them); `download` throws for them.
+/// - `Set-Cookie` from responses (and redirects) is merged back into an EXISTING credential only. `invalidateSession`
+///   (logout / removal) cancels the account's tasks and bumps a per-account epoch: a response that started before it is
+///   dropped (`.cancelled`) without touching cookies, so nothing can resurrect a deleted credential.
 /// - One redacted `ResearchEntry` is recorded per request; bodies only while Research Mode is on.
-final class AccountHTTPClient: HTTPClient, @unchecked Sendable {
+final class AccountHTTPClient: CredentialBackedHTTPClient, SessionRevoking, @unchecked Sendable {
     let credentials: CredentialStoring
     let scheduler: NetworkScheduler
     let recorder: ResearchRecorder
+
+    /// Called (from any thread) when a response rotated the account's FANBOXSESSID, so the account's WebKit store can
+    /// be updated too (the web view and the API must present the same session). Set once while wiring.
+    var onSessionCookieChanged: (@Sendable (String) -> Void)? {
+        get { callbacks.withLockUnchecked { $0 } }
+        set { callbacks.withLockUnchecked { $0 = newValue } }
+    }
+    private let callbacks = OSAllocatedUnfairLock<(@Sendable (String) -> Void)?>(uncheckedState: nil)
+    /// Per-account generation, bumped by `invalidateSession`.
+    private let epochs = OSAllocatedUnfairLock(uncheckedState: [String: UInt64]())
 
     private struct SessionEntry {
         let session: URLSession
@@ -74,11 +87,21 @@ final class AccountHTTPClient: HTTPClient, @unchecked Sendable {
 
     // MARK: - Session management
 
-    /// Drops (and invalidates) the account's URLSession, e.g. after logout / account removal.
+    /// Drops (and invalidates) the account's URLSession, e.g. after logout / account removal: in-flight tasks are
+    /// cancelled and responses that were already on their way are discarded without merging cookies.
     func invalidateSession(accountID: String?) {
         let key = accountID ?? Self.anonymousKey
+        epochs.withLockUnchecked { $0[key, default: 0] &+= 1 }
         let entry = sessions.withLockUnchecked { $0.removeValue(forKey: key) }
         entry?.session.invalidateAndCancel()
+    }
+
+    func revokeSession(accountID: String) async {
+        invalidateSession(accountID: accountID)
+    }
+
+    private func epoch(for accountID: String?) -> UInt64 {
+        epochs.withLockUnchecked { $0[accountID ?? Self.anonymousKey] ?? 0 }
     }
 
     /// Number of cached per-account sessions (tests / diagnostics).
@@ -127,8 +150,18 @@ final class AccountHTTPClient: HTTPClient, @unchecked Sendable {
             r.setValue(value, forHTTPHeaderField: name)
         }
         try FanboxRequestHeaders.apply(to: &r, credential: credential, requiresCSRF: request.requiresCSRF,
-                                       callerHeaders: request.headers)
+                                       callerHeaders: request.headers, isMedia: isMediaRequest(request))
         return r
+    }
+
+    static func isMediaRequest(_ request: HTTPRequest) -> Bool { request.endpointKey.hasPrefix("media.") }
+
+    /// URLSession task priority: large media (originals / attachments) below thumbnails and display images (SPEC §46).
+    static func taskPriority(for request: HTTPRequest) -> Float {
+        if MediaSizeClass.of(label: request.endpointKey, priority: request.priority) == .large {
+            return min(request.priority.urlSessionTaskPriority, 0.3)
+        }
+        return request.priority.urlSessionTaskPriority
     }
 
     /// Cookies from a response's Set-Cookie header(s).
@@ -169,6 +202,7 @@ final class AccountHTTPClient: HTTPClient, @unchecked Sendable {
     private func perform(_ request: HTTPRequest, accountID: String?, mode: Mode,
                          progress: (@Sendable (Double) -> Void)?) async throws -> (HTTPResponse, URL?) {
         let started = Date()
+        let startEpoch = epoch(for: accountID)
         let credential: SessionCredential?
         if let accountID { credential = await credentials.credential(for: accountID) } else { credential = nil }
 
@@ -191,10 +225,11 @@ final class AccountHTTPClient: HTTPClient, @unchecked Sendable {
         case .download: task = entry.session.downloadTask(with: urlRequest)
         case .upload(let file): task = entry.session.uploadTask(with: urlRequest, fromFile: file)
         }
-        task.priority = request.priority.urlSessionTaskPriority
+        task.priority = Self.taskPriority(for: request)
 
         let handler = HTTPTransferHandler(credential: credential, requiresCSRF: request.requiresCSRF, callerHeaders: request.headers,
-                                          progress: progress, downloadDirectory: mode.isTransfer ? downloadDirectory : nil)
+                                          progress: progress, downloadDirectory: mode.isTransfer ? downloadDirectory : nil,
+                                          isMedia: Self.isMediaRequest(request))
         entry.delegate.add(handler, for: task)
 
         let outcome: HTTPTransferOutcome
@@ -215,10 +250,22 @@ final class AccountHTTPClient: HTTPClient, @unchecked Sendable {
                 task.cancel()
             }
         } catch {
-            let mapped = HTTPErrorMapper.map(error)
+            var mapped = HTTPErrorMapper.map(error)
+            if mapped == .cancelled, !scheduler.policy.current.allowsNetwork {
+                // Cancelled because the app switched to Offline (not by the caller): report it as such (SPEC §30).
+                mapped = .offline
+            }
             recordEntry(request: request, urlRequest: urlRequest, accountID: accountID, started: started, response: nil, data: nil,
                         bytes: nil, error: mapped)
             throw mapped
+        }
+
+        if epoch(for: accountID) != startEpoch {
+            // The account logged out / was removed while this request was in flight: drop the answer untouched.
+            if let file = outcome.fileURL { try? FileManager.default.removeItem(at: file) }
+            recordEntry(request: request, urlRequest: urlRequest, accountID: accountID, started: started, response: nil, data: nil,
+                        bytes: nil, error: .cancelled)
+            throw RemoteError.cancelled
         }
 
         guard let http = outcome.response as? HTTPURLResponse else {
@@ -230,24 +277,28 @@ final class AccountHTTPClient: HTTPClient, @unchecked Sendable {
         }
 
         let headers = Self.headerDictionary(http)
-        await mergeCookies(outcome: outcome, response: http, fallbackURL: request.url, accountID: accountID)
+        await mergeCookies(outcome: outcome, response: http, fallbackURL: request.url, accountID: accountID,
+                           sentSession: credential?.sessionCookieValue)
 
         let duration = Date().timeIntervalSince(started)
-        let statusError = HTTPErrorMapper.error(status: http.statusCode, headers: headers)
+        let isFileBody = mode.isTransfer && outcome.fileURL != nil
+        let statusError = HTTPErrorMapper.error(status: http.statusCode, headers: headers, body: isFileBody ? nil : outcome.data)
         recordEntry(request: request, urlRequest: urlRequest, accountID: accountID, started: started, response: http,
-                    data: mode.isTransfer && outcome.fileURL != nil ? nil : outcome.data, bytes: Int(outcome.bytesReceived),
-                    error: statusError)
+                    data: isFileBody ? nil : outcome.data, bytes: Int(outcome.bytesReceived), error: statusError)
         if let statusError {
-            if let file = outcome.fileURL { try? FileManager.default.removeItem(at: file) }
             AppLog.network.info("\(request.endpointKey, privacy: .public) → HTTP \(http.statusCode)")
-            throw statusError
+            if case .download = mode {
+                if let file = outcome.fileURL { try? FileManager.default.removeItem(at: file) }
+                throw statusError
+            }
         }
         let response = HTTPResponse(statusCode: http.statusCode, headers: headers, data: outcome.data, url: http.url,
                                     duration: duration)
         return (response, outcome.fileURL)
     }
 
-    private func mergeCookies(outcome: HTTPTransferOutcome, response: HTTPURLResponse, fallbackURL: URL, accountID: String?) async {
+    private func mergeCookies(outcome: HTTPTransferOutcome, response: HTTPURLResponse, fallbackURL: URL, accountID: String?,
+                              sentSession: String?) async {
         guard let accountID else { return }
         var cookies = outcome.redirectCookies
         let url = response.url ?? fallbackURL
@@ -256,6 +307,11 @@ final class AccountHTTPClient: HTTPClient, @unchecked Sendable {
         }
         guard !cookies.isEmpty else { return }
         await credentials.mergeCookies(cookies, for: accountID)
+        let rotated = cookies.contains {
+            $0.name == SessionCredential.sessionCookieName && !$0.value.isEmpty && $0.value != sentSession
+                && FanboxHostPolicy.isFanboxHost($0.normalizedDomain)
+        }
+        if rotated, let callback = onSessionCookieChanged { callback(accountID) }
     }
 
     // MARK: - Research
@@ -263,7 +319,8 @@ final class AccountHTTPClient: HTTPClient, @unchecked Sendable {
     private func recordEntry(request: HTTPRequest, urlRequest: URLRequest?, accountID: String?, started: Date,
                              response: HTTPURLResponse?, data: Data?, bytes: Int?, error: RemoteError?) {
         let captureBodies = recorder.capturesBodies
-        var requestHeaders = SecretRedactor.formatHeaders(urlRequest?.allHTTPHeaderFields ?? request.headers)
+        var requestHeaders = "# transport: \(TransportKind.native.rawValue)\n"
+            + SecretRedactor.formatHeaders(urlRequest?.allHTTPHeaderFields ?? request.headers)
         if captureBodies, let body = request.body, !body.isEmpty {
             let type = urlRequest?.value(forHTTPHeaderField: "Content-Type") ?? request.headers["Content-Type"]
             requestHeaders += "\n\n[request body]\n" + SecretRedactor.redactBody(body, contentType: type, limit: 16_000)
@@ -290,13 +347,15 @@ final class AccountHTTPClient: HTTPClient, @unchecked Sendable {
         recorder.record(entry)
     }
 
-    private static func describe(_ error: RemoteError) -> String {
+    static func describe(_ error: RemoteError) -> String {
         switch error {
         case .offline: return "offline"
         case .unauthorized: return "unauthorized"
         case .forbidden: return "forbidden"
         case .notFound: return "notFound"
         case .rateLimited(let retryAfter): return "rateLimited(retryAfter: \(retryAfter.map { String(Int($0)) } ?? "-"))"
+        case .edgeBlocked(let retryAfter): return "edgeBlocked(retryAfter: \(retryAfter.map { String(Int($0)) } ?? "-"))"
+        case .csrfUnavailable: return "csrfUnavailable"
         case .server(let status): return "server(\(status))"
         case .decoding(let endpoint, let detail): return "decoding(\(endpoint)): \(SecretRedactor.redact(detail))"
         case .network(let code, let detail): return "network(\(code)): \(SecretRedactor.redact(detail))"

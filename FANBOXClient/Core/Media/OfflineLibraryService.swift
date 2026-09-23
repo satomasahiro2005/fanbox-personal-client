@@ -99,9 +99,10 @@ final class OfflineLibraryService {
             saveProgress[postID] = nil
         }
 
-        // 1. Text first (SPEC §46 priority: body before any media).
+        // 1. Text first (SPEC §46 priority: body before any media). A post every enabled account is known NOT to be
+        // entitled to is not re-requested (docs/API.md §1.8: restricted post.info calls only spend the budget).
         var fetchError: RemoteError?
-        if store.post(id: postID)?.hasCachedBody != true {
+        if store.post(id: postID)?.hasCachedBody != true && !knownRestrictedForAllAccounts(postID: postID) {
             fetchError = await RequestContext.$priority.withValue(.interactiveRead) {
                 await engine.refreshPost(postID: postID, priority: .interactiveRead)
             }
@@ -144,6 +145,14 @@ final class OfflineLibraryService {
         summary.finishedAt = .now
         lastSummaries[postID] = summary
         return summary
+    }
+
+    /// True when every enabled account has a PostAccess row saying it cannot view the post.
+    func knownRestrictedForAllAccounts(postID: String) -> Bool {
+        let accountIDs = store.accounts().map(\.id)
+        guard !accountIDs.isEmpty else { return false }
+        let accesses = Dictionary(store.postAccesses(postID: postID).map { ($0.accountID, $0.canView) }, uniquingKeysWith: { a, _ in a })
+        return accountIDs.allSatisfy { accesses[$0] == false }
     }
 
     func remove(postID: String) {
