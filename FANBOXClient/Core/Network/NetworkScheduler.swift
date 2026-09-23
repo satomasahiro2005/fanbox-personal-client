@@ -36,6 +36,12 @@ enum RequestPriority: Int, Comparable, CaseIterable, Sendable {
         case .mediaPrefetch: return "mediaPrefetch"
         }
     }
+
+    /// Classes that pause media while they are in flight ("Text-first", SPEC §29).
+    var pausesMedia: Bool { isInteractive || self == .notificationPrefetch }
+
+    /// Transfers at or below this priority are suspended while text-first work runs.
+    var isPausableTransferClass: Bool { self <= .foregroundMedia }
 }
 
 /// Handle for a registered long-running transfer.
@@ -43,34 +49,256 @@ struct TransferToken: Hashable, Sendable {
     let id: UUID
 }
 
+/// A long-running transfer the scheduler can pause while text-first requests run. `URLSessionTask` conforms.
+protocol PausableTransfer: AnyObject, Sendable {
+    func suspend()
+    func resume()
+}
+
+extension URLSessionTask: PausableTransfer {}
+
+/// Admission limits (SPEC §29). Interactive classes are never limited.
+struct SchedulerLimits: Sendable, Equatable {
+    /// Overall cap for non-interactive requests in flight.
+    var maxConcurrent: Int
+    /// Per-class caps; classes missing here are only bounded by `maxConcurrent`.
+    var perClass: [RequestPriority: Int]
+
+    static let `default` = SchedulerLimits(maxConcurrent: 6, perClass: [
+        .notificationPrefetch: 3,
+        .foregroundMedia: 3,
+        .backgroundSync: 2,
+        .mediaPrefetch: 1,
+    ])
+}
+
 /// Text-first network scheduler (SPEC §29).
 ///
 /// - Every HTTP request runs through `run(_:label:operation:)`.
-/// - Interactive requests are admitted immediately; lower classes wait for free slots.
-/// - While any interactive / notification request is in flight, registered media transfers are suspended
-///   (`URLSessionTask.suspend()`) and resumed afterwards ("Media pause / deprioritize → Comment POST → Resume Media").
-/// - In Offline mode every request fails fast with `RemoteError.offline`.
+/// - Interactive requests are admitted immediately; lower classes wait for free slots in a queue ordered by
+///   priority, then FIFO. Caps: overall 6 (non-interactive), notificationPrefetch 3, foregroundMedia 3, backgroundSync 2,
+///   mediaPrefetch 1. notificationPrefetch does not count media against the overall cap (media is paused meanwhile).
+/// - While any interactive / notification request is in flight, no new media request is admitted and registered media
+///   transfers (priority ≤ foregroundMedia) are suspended (`URLSessionTask.suspend()`); they resume when none remain
+///   ("Media pause / deprioritize → Comment POST → Resume Media").
+/// - In Offline mode every request fails fast with `RemoteError.offline`; queued waiters are failed when the mode
+///   switches to Offline.
+/// - Cancelling the calling Task while it waits removes it from the queue and throws `RemoteError.cancelled`.
+/// - Re-entrant calls (an operation that itself calls `run`) bypass admission to avoid self-deadlock.
 actor NetworkScheduler {
     let policy: NetworkPolicyStore
+    let limits: SchedulerLimits
+
+    private struct Waiter {
+        let id: UInt64
+        let priority: RequestPriority
+        let label: String
+        let continuation: CheckedContinuation<Void, Error>
+    }
+
+    private struct Transfer {
+        let transfer: PausableTransfer
+        let priority: RequestPriority
+        var suspended: Bool
+    }
+
+    private var active: [RequestPriority: Int] = [:]
+    private var waiters: [Waiter] = []
+    private var transfers: [TransferToken: Transfer] = [:]
+    private var nextWaiterID: UInt64 = 0
+    private var observerToken: UUID?
+
+    @TaskLocal static var isAdmitted = false
 
     init(policy: NetworkPolicyStore) {
+        self.init(policy: policy, limits: .default)
+    }
+
+    init(policy: NetworkPolicyStore, limits: SchedulerLimits) {
         self.policy = policy
+        self.limits = limits
+    }
+
+    deinit {
+        if let observerToken { policy.removeObserver(observerToken) }
     }
 
     /// Runs `operation` under the given priority class.
     func run<T: Sendable>(_ priority: RequestPriority, label: String,
                           operation: @escaping @Sendable () async throws -> T) async throws -> T {
         guard policy.current.allowsNetwork else { throw RemoteError.offline }
-        return try await operation()
+        observePolicyIfNeeded()
+        if Self.isAdmitted {
+            // Nested call from inside an admitted operation: it already holds a slot.
+            return try await operation()
+        }
+        try await acquire(priority, label: label)
+        do {
+            let value = try await Self.$isAdmitted.withValue(true) { try await operation() }
+            release(priority)
+            return value
+        } catch {
+            release(priority)
+            throw error
+        }
     }
 
     /// Registers a media transfer so it can be paused while interactive requests run.
     func register(task: URLSessionTask, priority: RequestPriority) -> TransferToken {
-        TransferToken(id: UUID())
+        register(transfer: task, priority: priority)
     }
 
-    func unregister(_ token: TransferToken) {}
+    /// Registers any pausable transfer. Transfers with priority ≤ foregroundMedia are suspended immediately when
+    /// text-first work is in flight.
+    func register(transfer: PausableTransfer, priority: RequestPriority) -> TransferToken {
+        let token = TransferToken(id: UUID())
+        var entry = Transfer(transfer: transfer, priority: priority, suspended: false)
+        if priority.isPausableTransferClass && textFirstInFlight {
+            transfer.suspend()
+            entry.suspended = true
+        }
+        transfers[token] = entry
+        return token
+    }
+
+    /// Forgets a transfer (after it finished). A still-suspended transfer is resumed so it can complete or cancel.
+    func unregister(_ token: TransferToken) {
+        guard let entry = transfers.removeValue(forKey: token) else { return }
+        if entry.suspended { entry.transfer.resume() }
+    }
 
     /// Number of requests currently running per priority (Research Mode display).
-    func snapshot() -> [RequestPriority: Int] { [:] }
+    func snapshot() -> [RequestPriority: Int] { active.filter { $0.value > 0 } }
+
+    /// Number of requests waiting for admission per priority.
+    func queuedSnapshot() -> [RequestPriority: Int] {
+        var result: [RequestPriority: Int] = [:]
+        for w in waiters { result[w.priority, default: 0] += 1 }
+        return result
+    }
+
+    /// Labels of queued requests in admission order (Research Mode display / tests).
+    func queuedLabels() -> [String] { orderedWaiters().map(\.label) }
+
+    /// (registered, suspended) transfer counts.
+    func transferCounts() -> (registered: Int, suspended: Int) {
+        (transfers.count, transfers.values.filter(\.suspended).count)
+    }
+
+    /// Fails every queued request with `.offline` when the policy no longer allows network access.
+    func failQueuedIfOffline() {
+        guard !policy.current.allowsNetwork, !waiters.isEmpty else { return }
+        let failed = waiters
+        waiters.removeAll()
+        for w in failed { w.continuation.resume(throwing: RemoteError.offline) }
+    }
+
+    // MARK: - Admission
+
+    /// Fails queued waiters as soon as the mode switches to Offline (registered lazily; actor inits cannot escape self).
+    private func observePolicyIfNeeded() {
+        guard observerToken == nil else { return }
+        observerToken = policy.addObserver { [weak self] snapshot in
+            guard !snapshot.allowsNetwork, let self else { return }
+            Task { await self.failQueuedIfOffline() }
+        }
+    }
+
+    private var textFirstInFlight: Bool {
+        RequestPriority.allCases.contains { $0.pausesMedia && (active[$0] ?? 0) > 0 }
+    }
+
+    private func count(_ p: RequestPriority) -> Int { active[p] ?? 0 }
+
+    private func canAdmit(_ priority: RequestPriority) -> Bool {
+        if priority.isInteractive { return true }
+        if priority.isMedia && textFirstInFlight { return false }
+        if let cap = limits.perClass[priority], count(priority) >= cap { return false }
+        let nonInteractive = RequestPriority.allCases.filter { !$0.isInteractive }.reduce(0) { $0 + count($1) }
+        if priority == .notificationPrefetch {
+            let media = count(.foregroundMedia) + count(.mediaPrefetch)
+            return nonInteractive - media < limits.maxConcurrent
+        }
+        return nonInteractive < limits.maxConcurrent
+    }
+
+    private func acquire(_ priority: RequestPriority, label: String) async throws {
+        if canAdmit(priority) {
+            admit(priority)
+            return
+        }
+        nextWaiterID &+= 1
+        let id = nextWaiterID
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                if Task.isCancelled {
+                    continuation.resume(throwing: RemoteError.cancelled)
+                    return
+                }
+                waiters.append(Waiter(id: id, priority: priority, label: label, continuation: continuation))
+            }
+        } onCancel: {
+            Task { await self.cancelWaiter(id) }
+        }
+    }
+
+    private func cancelWaiter(_ id: UInt64) {
+        guard let index = waiters.firstIndex(where: { $0.id == id }) else { return }
+        let waiter = waiters.remove(at: index)
+        waiter.continuation.resume(throwing: RemoteError.cancelled)
+    }
+
+    private func admit(_ priority: RequestPriority) {
+        let wasTextFirst = textFirstInFlight
+        active[priority, default: 0] += 1
+        if priority.pausesMedia && !wasTextFirst {
+            suspendMediaTransfers()
+        }
+    }
+
+    private func release(_ priority: RequestPriority) {
+        active[priority] = max(0, count(priority) - 1)
+        if priority.pausesMedia && !textFirstInFlight {
+            resumeMediaTransfers()
+        }
+        pump()
+    }
+
+    /// Admits queued waiters in priority-then-FIFO order while slots are available.
+    private func pump() {
+        guard !waiters.isEmpty else { return }
+        guard policy.current.allowsNetwork else {
+            failQueuedIfOffline()
+            return
+        }
+        var admittedAny = true
+        while admittedAny {
+            admittedAny = false
+            for waiter in orderedWaiters() where canAdmit(waiter.priority) {
+                waiters.removeAll { $0.id == waiter.id }
+                admit(waiter.priority)
+                waiter.continuation.resume()
+                admittedAny = true
+                break
+            }
+        }
+    }
+
+    private func orderedWaiters() -> [Waiter] {
+        waiters.sorted { a, b in a.priority != b.priority ? a.priority > b.priority : a.id < b.id }
+    }
+
+    private func suspendMediaTransfers() {
+        for (token, entry) in transfers where entry.priority.isPausableTransferClass && !entry.suspended {
+            entry.transfer.suspend()
+            transfers[token]?.suspended = true
+        }
+    }
+
+    private func resumeMediaTransfers() {
+        for (token, entry) in transfers where entry.suspended {
+            entry.transfer.resume()
+            transfers[token]?.suspended = false
+        }
+    }
 }

@@ -12,4 +12,10 @@ enum AppLog {
     static let web = Logger(subsystem: subsystem, category: "web")
     static let auth = Logger(subsystem: subsystem, category: "auth")
     static let creator = Logger(subsystem: subsystem, category: "creator")
+    static let security = Logger(subsystem: subsystem, category: "security")
+    static let research = Logger(subsystem: subsystem, category: "research")
+    static let scheduler = Logger(subsystem: subsystem, category: "scheduler")
+
+    /// Redacts free text before it reaches a log line (use with `privacy: .public` only for redacted strings).
+    static func safe(_ text: String) -> String { SecretRedactor.redact(text) }
 }
