@@ -394,7 +394,21 @@ final class FanboxMappingTests: XCTestCase {
         XCTAssertEqual(field("commentingPermissionScope"), "supporters")
         XCTAssertEqual(field("tt"), "tok")
         XCTAssertEqual(field("body"), #"[{"text":"見出し","type":"header"},{"text":"一行目","type":"p"},{"text":"二行目","type":"p"}]"#)
-        XCTAssertEqual(text.components(separatedBy: "name=\"tags\"").count - 1, 2, "tags as repeated fields")
+        // Updated for the review of native uploads: one field holding the JSON array, as FANBOX's web client sends it.
+        XCTAssertEqual(text.components(separatedBy: "name=\"tags\"").count - 1, 1, "tags as ONE field")
+        XCTAssertEqual(field("tags"), #"["a","b"]"#)
+        // No tags: still sent, as an empty array.
+        var untagged = draft
+        untagged.tags = []
+        let bare = String(data: try FanboxPostUpdateForm.make(postID: "9001", draft: untagged, csrfToken: "tok", existing: .init(),
+                                                               boundary: "B").encodedData(), encoding: .utf8) ?? ""
+        XCTAssertTrue(bare.contains("name=\"tags\"\r\n\r\n[]\r\n"))
+        // Status: a draft stays a draft; a live (or already taken down) post is taken down with `archived`.
+        XCTAssertEqual(FanboxPostUpdateForm.statusValue(publish: false, currentStatus: "draft"), "draft")
+        XCTAssertEqual(FanboxPostUpdateForm.statusValue(publish: false, currentStatus: nil), "draft")
+        XCTAssertEqual(FanboxPostUpdateForm.statusValue(publish: false, currentStatus: "published"), "archived")
+        XCTAssertEqual(FanboxPostUpdateForm.statusValue(publish: false, currentStatus: "archived"), "archived")
+        XCTAssertEqual(FanboxPostUpdateForm.statusValue(publish: true, currentStatus: "archived"), "published")
         XCTAssertFalse(text.contains("styles"), "no empty styles key")
 
         let withImage = RemotePostDraft(title: "t", feeRequired: 0, planID: nil, tags: [], hasAdultContent: false,

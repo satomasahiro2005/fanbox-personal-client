@@ -68,12 +68,13 @@ final class FanboxUploadTests: XCTestCase {
 
     // MARK: Request building
 
-    func testImageUploadIsMultipartWithoutTheTokenAndTheBodyFileIsRemoved() async throws {
+    func testImageUploadIsStreamedWithTheTokenInTTAndNeverWritesABodyFile() async throws {
         let h = FanboxTestHarness()
         try await h.saveCredential(accountID: FanboxTestHarness.creator.accountID, csrf: token)
         h.http.stub("post.addImage", json: Self.imageBody)
         let image = try file("イラスト 1.png", bytes: "PNG-BYTES")
         let progress = ProgressRecorder()
+        let before = multipartBodyFiles().count
 
         let result = try await RequestContext.$priority.withValue(.foregroundMedia) {
             try await h.source.uploadImage(fileURL: image, postID: "9001", account: FanboxTestHarness.creator) { progress.append($0) }
@@ -82,20 +83,23 @@ final class FanboxUploadTests: XCTestCase {
         let request = try XCTUnwrap(h.http.requests(for: "post.addImage").first)
         XCTAssertEqual(request.method, "POST")
         XCTAssertEqual(request.url.absoluteString, "https://api.fanbox.cc/post.addImage")
-        XCTAssertTrue(request.requiresCSRF, "the transport adds X-CSRF-Token")
+        XCTAssertTrue(request.requiresCSRF, "the transport also sends X-CSRF-Token")
         XCTAssertEqual(request.priority, .foregroundMedia, "uploads are media: comment POSTs preempt them")
         XCTAssertTrue(request.headers["Content-Type"]?.hasPrefix("multipart/form-data; boundary=") ?? false)
         XCTAssertFalse(request.headers.values.contains(token), "the API layer never puts the token in a header itself")
-        XCTAssertNil(request.body, "streamed from a temporary body file")
+        XCTAssertNil(request.body, "streamed, not an in-memory body")
 
         let record = try XCTUnwrap(h.http.uploadRecords(for: "post.addImage").first)
+        XCTAssertNil(record.fileURL, "no body file: the form (with the token) is streamed")
+        XCTAssertEqual(record.declaredLength, Int64(record.body.count), "Content-Length matches the streamed body")
         let body = String(decoding: record.body, as: UTF8.self)
-        XCTAssertTrue(body.contains("name=\"postId\"\r\n\r\n9001\r\n"), body)
-        XCTAssertTrue(body.contains("name=\"image\"; filename=\"イラスト 1.png\"\r\nContent-Type: image/png\r\n\r\nPNG-BYTES\r\n"), body)
-        XCTAssertFalse(body.contains("name=\"tt\""), "no tt field in the body file")
-        XCTAssertFalse(record.body.range(of: Data(token.utf8)) != nil, "the CSRF token never reaches the disk")
-        XCTAssertTrue(record.fileURL.lastPathComponent.hasPrefix(MultipartFormData.temporaryFilePrefix))
-        XCTAssertFalse(FileManager.default.fileExists(atPath: record.fileURL.path), "temporary body file removed after the request")
+        // The web editor's order: postId, image, tt.
+        let postID = try XCTUnwrap(body.range(of: "name=\"postId\"\r\n\r\n9001\r\n"))
+        let part = try XCTUnwrap(body.range(of: "name=\"image\"; filename=\"イラスト 1.png\"\r\nContent-Type: image/png\r\n\r\nPNG-BYTES\r\n"), body)
+        let tt = try XCTUnwrap(body.range(of: "name=\"tt\"\r\n\r\n\(token)\r\n"), "the token travels in tt, as the web editor sends it")
+        XCTAssertTrue(postID.upperBound <= part.lowerBound && part.upperBound <= tt.lowerBound)
+        XCTAssertTrue(body.hasSuffix("--\r\n"))
+        XCTAssertEqual(multipartBodyFiles().count, before, "nothing was written to a temporary file")
 
         XCTAssertEqual(result, RemoteUploadResult(mediaID: "img-1", url: "https://downloads.fanbox.cc/images/post/9001/img-1.png",
                                                   postID: "9001", thumbnailURL: "https://downloads.fanbox.cc/images/post/9001/w/1200/img-1.jpeg",
@@ -116,9 +120,8 @@ final class FanboxUploadTests: XCTestCase {
         let body = String(decoding: record.body, as: UTF8.self)
         XCTAssertTrue(body.contains("name=\"postId\"\r\n\r\n9001\r\n"))
         XCTAssertTrue(body.contains("name=\"file\"; filename=\"資料.pdf\"\r\nContent-Type: application/pdf\r\n\r\nPDF-11bytes\r\n"), body)
-        XCTAssertFalse(body.contains("name=\"tt\""))
-        XCTAssertNil(record.body.range(of: Data(token.utf8)))
-        XCTAssertFalse(FileManager.default.fileExists(atPath: record.fileURL.path))
+        XCTAssertTrue(body.contains("name=\"tt\"\r\n\r\n\(token)\r\n"))
+        XCTAssertNil(record.fileURL)
         XCTAssertEqual(result.mediaID, "file-1")
         XCTAssertEqual(result.fileName, "資料")
         XCTAssertEqual(result.fileExtension, "pdf")
@@ -127,7 +130,7 @@ final class FanboxUploadTests: XCTestCase {
         XCTAssertEqual(result.postID, "9001")
     }
 
-    func testURLEmbedIsASmallInMemoryForm() async throws {
+    func testURLEmbedIsASmallInMemoryFormWithTT() async throws {
         let h = FanboxTestHarness()
         try await h.saveCredential(accountID: FanboxTestHarness.creator.accountID, csrf: token)
         h.http.stub("post.addUrlEmbed", json: Self.urlEmbedBody)
@@ -142,8 +145,8 @@ final class FanboxUploadTests: XCTestCase {
         let body = String(decoding: request.body ?? Data(), as: UTF8.self)
         XCTAssertTrue(body.contains("name=\"postId\"\r\n\r\n9001\r\n"))
         XCTAssertTrue(body.contains("name=\"url\"\r\n\r\nhttps://example.com/a\r\n"), "trimmed URL")
-        XCTAssertFalse(body.contains("name=\"tt\""))
-        XCTAssertTrue(h.http.uploadRecords.isEmpty, "no temporary file for a field-only form")
+        XCTAssertTrue(body.contains("name=\"tt\"\r\n\r\n\(token)\r\n"), "tt, as the web editor sends it")
+        XCTAssertTrue(h.http.uploadRecords.isEmpty, "a field-only form is sent from memory")
         XCTAssertEqual(result, RemoteUploadResult(mediaID: "ue-1", url: "https://example.com/a", postID: "9001"))
     }
 
@@ -176,7 +179,8 @@ final class FanboxUploadTests: XCTestCase {
 
     func testLimitsAndInputsAreCheckedBeforeAnyRequest() async throws {
         let h = FanboxTestHarness()
-        try await h.saveCredential(accountID: FanboxTestHarness.creator.accountID, csrf: token)
+        // No token stored: not even the token fetch happens for input that is refused locally.
+        try await h.saveCredential(accountID: FanboxTestHarness.creator.accountID, csrf: nil)
         let c = FanboxTestHarness.creator
         let before = multipartBodyFiles().count
 
@@ -206,8 +210,11 @@ final class FanboxUploadTests: XCTestCase {
         _ = await expectInvalidRequest { _ = try await h.source.uploadImage(fileURL: ok, postID: " ", account: c) { _ in } }
         _ = await expectInvalidRequest { _ = try await h.source.addURLEmbed(url: "ftp://example.com/x", postID: "1", account: c) }
         _ = await expectInvalidRequest { _ = try await h.source.addURLEmbed(url: "   ", postID: "1", account: c) }
+        let long = "https://example.com/" + String(repeating: "a", count: FanboxUploadForm.maxURLLength)
+        _ = await expectInvalidRequest { _ = try await h.source.addURLEmbed(url: long, postID: "1", account: c) }
+        _ = await expectInvalidRequest { _ = try await h.source.addURLEmbed(url: "https://example.com/", postID: "", account: c) }
 
-        XCTAssertTrue(h.http.requests.isEmpty, "nothing is sent for a file FANBOX's uploader would refuse")
+        XCTAssertTrue(h.http.requests.isEmpty, "nothing is sent (not even a token fetch) for input FANBOX's uploader would refuse")
         XCTAssertEqual(multipartBodyFiles().count, before, "no body file was written")
 
         // Every accepted extension passes; the whitelist is the web client's.
@@ -217,29 +224,36 @@ final class FanboxUploadTests: XCTestCase {
         XCTAssertNotNil(FanboxUploadForm.limits.problem(kind: .image, fileName: "a.heic", size: 10))
     }
 
-    func testAFileFormCarryingTheTokenIsRefused() async throws {
-        let h = FanboxTestHarness()
-        try await h.saveCredential(accountID: FanboxTestHarness.creator.accountID, csrf: token)
+    func testAFormCarryingTheTokenIsNeverWrittenToAFile() throws {
         var form = MultipartFormData()
         form.addField(name: "tt", value: token)
         form.addFile(name: "image", fileURL: try file("a.png"))
         let before = multipartBodyFiles().count
-        _ = await expectInvalidRequest {
-            _ = try await h.api.sendMultipart(.postAddImage(), form: form, accountID: FanboxTestHarness.creator.accountID)
+        XCTAssertThrowsError(try form.writeToTemporaryFile()) { error in
+            guard case .invalidRequest? = error as? RemoteError else { return XCTFail("\(error)") }
         }
-        XCTAssertTrue(h.http.requests.isEmpty)
         XCTAssertEqual(multipartBodyFiles().count, before, "the token was never written to a temporary file")
+
+        // The streamed body keeps the file on disk and everything else (the token included) in memory.
+        let body = try form.streamedBody()
+        XCTAssertEqual(body.segments.count, 3)
+        guard case .file(let url, let length) = body.segments[1] else { return XCTFail("\(body.segments)") }
+        XCTAssertEqual(url.lastPathComponent, "a.png")
+        XCTAssertEqual(length, Int64("hello-bytes".utf8.count))
+        XCTAssertEqual(body.length, try form.contentLength())
+        XCTAssertEqual(try body.assembled(), try form.encodedData())
     }
 
     // MARK: CSRF
 
-    func testMissingTokenIsFetchedAndAStaleOneIsRefreshedOnce() async throws {
+    func testMissingTokenIsFetchedAndAStaleOneIsRebuiltWithTheFreshToken() async throws {
         let h = FanboxTestHarness()
         try await h.saveCredential(accountID: FanboxTestHarness.creator.accountID, csrf: nil)
         h.http.stub("www.metadata", data: Data(FanboxFixtures.metadataHTML.utf8))
         h.http.stub("post.addImage", json: Self.imageBody)
         _ = try await h.source.uploadImage(fileURL: try file("a.png"), postID: "9001", account: FanboxTestHarness.creator) { _ in }
         XCTAssertEqual(h.http.requests.map(\.endpointKey), ["www.metadata", "post.addImage"])
+        XCTAssertTrue(String(decoding: h.http.uploadRecords[0].body, as: UTF8.self).contains("name=\"tt\"\r\n\r\ntok-fresh-123\r\n"))
 
         let stale = FanboxTestHarness()
         try await stale.saveCredential(accountID: FanboxTestHarness.creator.accountID, csrf: "stale")
@@ -249,15 +263,52 @@ final class FanboxUploadTests: XCTestCase {
         let result = try await stale.source.uploadImage(fileURL: try file("b.png"), postID: "9001", account: FanboxTestHarness.creator) { _ in }
         XCTAssertEqual(result.mediaID, "img-1")
         XCTAssertEqual(stale.http.requests.map(\.endpointKey), ["post.addImage", "www.metadata", "post.addImage"])
-        let records = stale.http.uploadRecords(for: "post.addImage")
+        let records = stale.http.uploadRecords(for: "post.addImage").map { String(decoding: $0.body, as: UTF8.self) }
         XCTAssertEqual(records.count, 2)
-        XCTAssertEqual(records[0].fileURL, records[1].fileURL, "the same token-free body file is re-sent")
-        XCTAssertFalse(FileManager.default.fileExists(atPath: records[0].fileURL.path))
+        XCTAssertTrue(records[0].contains("name=\"tt\"\r\n\r\nstale\r\n"))
+        XCTAssertTrue(records[1].contains("name=\"tt\"\r\n\r\ntok-fresh-123\r\n"), "the form is rebuilt with the refreshed token")
+        XCTAssertFalse(records[1].contains("\r\nstale\r\n"))
         let stored = await stale.credentials.credential(for: FanboxTestHarness.creator.accountID)
         XCTAssertEqual(stored?.csrfToken, "tok-fresh-123")
+
+        // Link cards (in memory) are rebuilt the same way; an unchanged token is never re-sent.
+        stale.http.stub("post.addUrlEmbed", status: 403, json: #"{"error":"general_error"}"#)
+        stale.http.stub("post.addUrlEmbed", json: Self.urlEmbedBody)
+        try await stale.saveCredential(accountID: FanboxTestHarness.creator.accountID, csrf: "stale-2")
+        _ = try await stale.source.addURLEmbed(url: "https://example.com/a", postID: "9001", account: FanboxTestHarness.creator)
+        let embeds = stale.http.requests(for: "post.addUrlEmbed").map { String(decoding: $0.body ?? Data(), as: UTF8.self) }
+        XCTAssertEqual(embeds.count, 2)
+        XCTAssertTrue(embeds[0].contains("\r\nstale-2\r\n"))
+        XCTAssertTrue(embeds[1].contains("name=\"tt\"\r\n\r\ntok-fresh-123\r\n"))
+
+        stale.http.stub("post.addUrlEmbed", status: 403, json: #"{"error":"general_error"}"#)
+        let sentBefore = stale.http.requests(for: "post.addUrlEmbed").count
+        do {
+            _ = try await stale.source.addURLEmbed(url: "https://example.com/b", postID: "9001", account: FanboxTestHarness.creator)
+            XCTFail("expected the refusal")
+        } catch let error as RemoteError {
+            XCTAssertEqual(error, .forbidden)
+        }
+        XCTAssertEqual(stale.http.requests(for: "post.addUrlEmbed").count, sentBefore + 1, "same token after the refresh: not re-sent")
     }
 
-    func testTheRealTransportSendsTheTokenAsTheHeaderOnly() async throws {
+    func testAFailedUploadLeavesNoBodyFile() async throws {
+        let h = FanboxTestHarness()
+        try await h.saveCredential(accountID: FanboxTestHarness.creator.accountID, csrf: token)
+        h.http.stub("post.addFile", status: 500, json: #"{"error":"general_error"}"#)
+        let before = multipartBodyFiles().count
+        do {
+            _ = try await h.source.uploadFile(fileURL: try file("a.zip"), postID: "9001", account: FanboxTestHarness.creator) { _ in }
+            XCTFail("expected the server error")
+        } catch let error as RemoteError {
+            XCTAssertEqual(error, .server(status: 500))
+        }
+        XCTAssertEqual(h.http.uploadRecords(for: "post.addFile").count, 1, "a 500 is not a stale token: sent once")
+        XCTAssertNil(h.http.uploadRecords[0].fileURL)
+        XCTAssertEqual(multipartBodyFiles().count, before, "no body file exists, before or after the failure")
+    }
+
+    func testTheRealTransportStreamsTheFormWithTheTokenInTTAndTheHeader() async throws {
         let credentials = InMemoryCredentialStore()
         try await credentials.save(SessionCredential(cookies: [StoredCookie(name: "FANBOXSESSID", value: "11_s", domain: ".fanbox.cc")],
                                                      userAgent: "UA", csrfToken: token), for: "A")
@@ -273,16 +324,25 @@ final class FanboxUploadTests: XCTestCase {
                 : .init(status: 404)
         }
         let before = multipartBodyFiles().count
+        // Larger than the producer's 64 KB chunks and the bound pair's buffer.
+        let payload = String(repeating: "0123456789abcdef", count: 20_000)
+        let image = try file("real.png", bytes: payload)
 
-        let result = try await source.uploadImage(fileURL: try file("real.png"), postID: "9001", account: account) { _ in }
+        let result = try await source.uploadImage(fileURL: image, postID: "9001", account: account) { _ in }
 
         XCTAssertEqual(result.mediaID, "img-1")
         let sent = try XCTUnwrap(NetModStubProtocol.requests.first { $0.url?.path == "/post.addImage" })
         XCTAssertEqual(sent.httpMethod, "POST")
-        XCTAssertEqual(sent.value(forHTTPHeaderField: "X-CSRF-Token"), token, "the token travels in the header")
+        XCTAssertEqual(sent.value(forHTTPHeaderField: "X-CSRF-Token"), token, "the header is sent as well")
         XCTAssertEqual(sent.value(forHTTPHeaderField: "Origin"), "https://www.fanbox.cc")
         XCTAssertTrue(sent.value(forHTTPHeaderField: "Content-Type")?.hasPrefix("multipart/form-data; boundary=") ?? false)
-        XCTAssertEqual(multipartBodyFiles().count, before, "the body file is removed after the request")
+        let body = try XCTUnwrap(NetModStubProtocol.streamedBody(path: "/post.addImage"), "the body reached the wire as a stream")
+        XCTAssertEqual(sent.value(forHTTPHeaderField: "Content-Length"), String(body.count), "not chunked")
+        let text = String(decoding: body, as: UTF8.self)
+        XCTAssertTrue(text.contains("name=\"postId\"\r\n\r\n9001\r\n"))
+        XCTAssertTrue(text.contains("filename=\"real.png\"\r\nContent-Type: image/png\r\n\r\n\(payload)\r\n"), "the whole file, in order")
+        XCTAssertTrue(text.contains("name=\"tt\"\r\n\r\n\(token)\r\n"))
+        XCTAssertEqual(multipartBodyFiles().count, before, "no body file")
     }
 
     // MARK: Response decoding

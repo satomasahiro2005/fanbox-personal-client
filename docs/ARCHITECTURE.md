@@ -241,8 +241,8 @@ The second transport is used only when the first one did not reach FANBOX:
 - a WebView GET whose script failed may be retried natively. A write with an unknown outcome (timeout, script error) is
   never re-sent.
 
-Downloads always use the native transport. Uploads from a body file use the native transport, with the same budget and
-classification.
+Downloads always use the native transport. Uploads (from a body file or a streamed body) use the native transport, with
+the same budget and classification.
 
 ### Edge-block classification
 
@@ -427,36 +427,53 @@ FANBOX stores images, files and link cards **into an existing post** (`post.addI
 `post.addUrlEmbed`, docs/API.md §15; `uploadsNeedPost`). A send runs:
 
 1. **Plan** (no request): title, tags, block kinds the post type can hold, upload limits (images jpg / png / gif ≤ 50 MB,
-   attachments ≤ 300 MB from FANBOX's extension list), http(s) link cards. Blockers and warnings stop the send here.
-2. **Existing post:** `post.getEditable` first; a newer revision or a changed status stops the send.
+   attachments ≤ 300 MB from FANBOX's extension list), http(s) link cards of at most 2048 characters, and (in
+   `DraftService`) that every file still to upload still exists locally. Blockers and warnings stop the send here, before
+   a FANBOX draft is created.
+2. **Existing post:** `post.getEditable` first; a revision newer than `Draft.remoteUpdatedAt` (edited elsewhere) or a
+   changed status stops the send. The revision just checked becomes the send's baseline.
 3. **New post with media or link cards:** `createEmptyPost` (`post.create`, interactiveWrite) and the new id is saved to
-   `Draft.remotePostID` **before** anything is uploaded. A retry therefore updates the same post; there is never a second
-   `post.create`.
+   `Draft.remotePostID` **before** anything is uploaded, then the new post is read once for its revision (the baseline).
+   A retry therefore updates the same post; there is never a second `post.create`, and an edit of that FANBOX draft in
+   the web editor between retries is detected.
 4. **Uploads:** `UploadQueue` runs one `UploadJob` at a time in block order at `foregroundMedia`, so comment POSTs
    (`interactiveWrite`) preempt them (SPEC §29). Each job uploads `uploadImage/uploadFile(fileURL:postID:...)` against
    `remotePostID`, from a per-job staging link that carries the block's display name (FANBOX shows an attachment's
    name). The result (`RemoteUploadResult`: id, URLs, size, and the post it belongs to) is written to the job and the
    block (`remoteMediaID`, `remoteMediaJSON`). Completed jobs are never re-sent; `retryFailed` re-queues failed jobs
    only; offline leaves jobs queued. A job of a new post that has no FANBOX id yet is paused with
-   `UploadQueue.awaitingPostMessage` (the upload button explains this) and resumed by the send after step 3.
+   `UploadQueue.awaitingPostMessage` (the upload button explains this) and resumed by the send after step 3. A job the app
+   could never save into its post (the draft has a `nativeUpdateBlocker`, or the post type cannot hold the block kind) is
+   paused, not uploaded, so no orphan asset is left on FANBOX. Outside a send (upload button, connectivity auto-start) the
+   queue checks the post's revision itself once per run (newer than the baseline → the draft's jobs are paused with
+   `UploadQueue.conflictMessage`) and adopts the revision after each upload. The staging link is made and removed inside
+   the upload task, off the main actor.
 5. **Link cards:** each new URL block is registered with `addURLEmbed` (interactiveWrite); a registered card keeps its
    id and is never registered again. An edited URL clears the id, so the new URL is registered on the next send.
 6. **Save:** `post.update` through `FanboxRemoteDataSource.updatePost`, which re-reads the post and accepts only ids that
    are already on it or were stored into this very post (`RemoteDraftBlock.media.postID`). Articles get the blocks array
    with `image` / `file` / `url_embed` blocks by id in block order; image- and file-type posts get `{text, images}` /
-   `{text, files}` with the full objects. `imageMap` / `fileMap` / `urlEmbedMap` and `coverImage` are never sent.
+   `{text, files}` with the full objects. `imageMap` / `fileMap` / `urlEmbedMap` and `coverImage` are never sent. `tags`
+   is one field holding the JSON array (`[]` included), and taking a published post down sends `status=archived`, as the
+   web editor does (`FanboxPostUpdateForm`).
 
 On any failure the local draft stays intact with `lastError`, together with `remotePostID` and every completed media
-id; the next send continues from where it stopped. New embed blocks, which have no add endpoint, are left out of the
+id; the next send continues from where it stopped. When the failed send had written into the post (uploads, link cards,
+a failed save), the post is re-read and its revision becomes the baseline, so the retry does not take the app's own
+writes for an edit made elsewhere (whether FANBOX's add calls bump `updatedAt` is unknown). A failure after a FANBOX
+draft was created always says so in `lastError`. New embed blocks, which have no add endpoint, are left out of the
 save and handed to the account web editor (text-first send with a checklist, SPEC §40); a new post with such items is
 saved as a FANBOX draft, never published unfinished.
 
-**CSRF and temporary files (SPEC §38 / §39).** `post.update` carries the token in its `tt` field and is encoded in
-memory. The media endpoints carry it **only** in the `X-CSRF-Token` header that the transport adds for `requiresCSRF`
-endpoints: image and file bodies are streamed from a temporary file (`MultipartFormData.writeToTemporaryFile`, complete
-file protection, deleted right after the request, stale ones purged at launch), and `FanboxAPIClient.sendMultipart`
-refuses a file form that contains `tt`. A missing token is fetched first; a 400 / 403 upload is retried once after a
-token refresh with the same token-free body file.
+**CSRF and temporary files (SPEC §38 / §39).** Every multipart write (`post.update`, `post.addImage`, `post.addFile`,
+`post.addUrlEmbed`) carries the token in its `tt` field, as FANBOX's web editor does, and the transport also adds the
+`X-CSRF-Token` header for `requiresCSRF` endpoints. `FanboxAPIClient.sendMultipart` takes a form builder
+(`(csrfToken) -> MultipartFormData`): field-only forms are encoded in memory; image and file forms are sent as a streamed
+body (`MultipartFormData.streamedBody` → `HTTPClient.upload(_:streamedBody:...)`: `AccountHTTPClient` uses
+`uploadTask(withStreamedRequest:)` with `Content-Length`, and `HTTPBodyStreamProducer` writes the in-memory parts and the
+file into a bound stream pair on its own thread). No body file is written. A missing token is fetched first; a 400 / 403
+answer triggers one token refresh, and the form is rebuilt with the refreshed token and sent once more only when the
+refreshed token differs from the one sent.
 
 The demo data source (`.demo` capabilities) runs the same create → upload → register → save flow against `DemoWorld`,
 with every block kind native; file names and URLs containing "fail" fail so the retry path can be tried.

@@ -47,7 +47,10 @@ struct DraftProcessedImage: Sendable {
 /// SPEC §18 "Resize / Convert if needed". Pure (no file system access), safe to call off the main actor.
 /// - long edge > `maxLongEdge` ⇒ downscale (orientation applied)
 /// - HEIC / HEIF (and other formats FANBOX does not take, e.g. TIFF) ⇒ JPEG quality 0.9
-/// - JPEG / PNG kept in their format (only re-encoded when resized); GIF kept byte-for-byte (animation)
+/// - an EXIF orientation other than "up" ⇒ redrawn upright in the same format. FANBOX does not apply the tag (its web
+///   client redraws such JPEGs itself before `post.addImage`, docs/API.md §15.1), and the stored width / height then match
+///   what FANBOX reports.
+/// - JPEG / PNG otherwise kept in their format (only re-encoded when resized or redrawn); GIF kept byte-for-byte (animation)
 /// - Location (GPS) metadata is stripped whenever the file is rewritten or can be rewritten losslessly.
 enum DraftImageProcessor {
     static let maxLongEdge = 4096
@@ -81,12 +84,15 @@ enum DraftImageProcessor {
         let isJPEG = sourceType.conforms(to: .jpeg)
         let needsResize = longEdge > maxLongEdge
         let needsConvert = !(isPNG || isJPEG)
+        // Pixels stored sideways / mirrored behind an orientation tag (e.g. an iPhone photo, 4032×3024 with orientation 6).
+        let needsUpright = (2...8).contains(orientation)
 
-        if !needsResize && !needsConvert {
+        if !needsResize && !needsConvert && !needsUpright {
             let stripped = stripLocation(source: source, type: sourceType) ?? data
             return DraftProcessedImage(data: stripped, type: sourceType, width: width, height: height, wasResized: false, wasConverted: false)
         }
 
+        // Re-rendered with the orientation applied (the output carries no orientation tag and no other metadata).
         let targetType: UTType = isPNG ? .png : .jpeg
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,

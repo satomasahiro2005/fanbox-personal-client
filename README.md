@@ -87,7 +87,7 @@ API Inspector) is the tool for it. The areas below are expected to need verifica
 | Endpoint shapes | Every decoder. The API Inspector marks new and missing fields per endpoint and object path; decode failures are recorded as events | API Schema, Sync / Errors |
 | Cloudflare | Whether list and count calls pass over `URLSession` with the web view's cookies and user agent; whether `post.info` passes through the hidden web view; whether the edge-block detection matches the real block pages; whether the request budget is conservative enough. The 通信経路 (transport) switch forces "Native のみ" (native only) or "WebView のみ" (web view only) | 通信経路 section, Requests |
 | Writes | Comments, replies and comment deletion, likes, `post.create` / `post.update` (multipart form with the CSRF token in `tt`), and the CSRF refresh after a rejected write. Their response bodies are unknown (docs/API.md §23.4) | Requests, Responses |
-| Media uploads | `post.addImage`, `post.addFile` and `post.addUrlEmbed` (docs/API.md §15): whether FANBOX accepts the CSRF token in the `X-CSRF-Token` header without a `tt` field (the app never writes the token into an upload body), the response shapes (`Image` / `File` / `UrlEmbed`), and the attachment name FANBOX shows. Try it on a throwaway draft first | Requests, Responses, API Schema |
+| Media uploads | `post.addImage`, `post.addFile` and `post.addUrlEmbed` (docs/API.md §15): the response shapes (`Image` / `File` / `UrlEmbed`), whether the calls bump the post's `updatedAt`, and the attachment name FANBOX shows. The app sends the CSRF token in `tt` as the web editor does (plus the header), with the upload body streamed so the token never reaches the disk. Try it on a throwaway draft first | Requests, Responses, API Schema |
 | Web pages | The URLs marked *unverified* in docs/API.md §20: login, plan pages, supporting plans list, payment settings and history, notifications list, newsletter inbox, new-post editor | Navigation, fallback banner |
 | Derived events | 決済要確認 from `hasUnpaidPayments` / `payment.listUnpaid`, 新規支援 from the fan list, 支援状態変化 from the supporting-plan list | Support State, notification inbox |
 | Background | When iOS runs `BGAppRefreshTask`, and what the native transport can fetch in the background | Scheduler, Requests |
@@ -109,6 +109,8 @@ been verified against the live service (docs/API.md §14–§15).
   are kept, and the next send continues where it stopped; only failed items are sent again. Uploads of a new post start
   when you send it, never from the upload button (so no FANBOX draft is created by surprise). The app checks FANBOX's
   own limits before sending: images jpg / png / gif up to 50 MB, attachments up to 300 MB with FANBOX's extension list.
+  Photos stored sideways (EXIF orientation) are redrawn upright when added, as FANBOX's web editor does before it
+  uploads.
 - **Still in the web editor.** New embed blocks (the current web client has no add-embed call), the R-18 flag and
   plan-specific gating (FANBOX gates by minimum fee), and the cover image. The editor marks new embeds "Web"; sending
   saves everything else first and hands off to the account's web editor with an ordered checklist. The demo account

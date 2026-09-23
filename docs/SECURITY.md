@@ -60,17 +60,23 @@ creator id, flags, timestamps).
   `RemoteError.csrfUnavailable` and nothing is sent. The web transport sends `x-csrf-token` from its page, or from the
   credential when the page has none.
 - **Refresh.** A missing token is fetched before a CSRF-protected write. When such a write is rejected with 403 or an
-  invalid-request error, the token is read again and the write is retried once, only if the token changed.
+  invalid-request error, the token is read again and the write is retried once, only if the token changed. A multipart
+  form that carries the token (`tt`, below) is rebuilt with the new token for that retry, never re-sent as it was.
 - **Rotation.** When a response rotates `FANBOXSESSID`, the token of the old session is dropped
   (`SessionCredential.mergeResponseCookies`). The same happens when a browse session brings a new session cookie.
-- **`post.update`.** FANBOX takes the token in the multipart field `tt`. That form has no file parts, so it is encoded
-  in memory (`MultipartFormData.encodedData`) and sent like any other request. It is never written to a file. In
-  Research logs a `multipart/form-data` body is summarized as `<binary N bytes, …>`, so the `tt` value is not recorded.
-- **Media uploads.** `post.addImage` / `post.addFile` bodies are streamed from a temporary file, so they carry the token
-  ONLY in the `X-CSRF-Token` header the transport adds (the web client's newer request layer does the same; its legacy
-  helper uses `tt`, docs/API.md §15.4). `FanboxAPIClient.sendMultipart` refuses a form with file parts that contains a
-  `tt` field before anything is written. `post.addUrlEmbed` has no file part and is sent from memory, also without `tt`.
-  A rejected upload is retried once after a token refresh with the same token-free body file.
+- **Multipart writes (`post.update`, `post.addImage`, `post.addFile`, `post.addUrlEmbed`).** FANBOX's web editor sends
+  the token in the multipart field `tt` (docs/API.md §14.4 / §15.4), and so does the app; the transport also adds the
+  `X-CSRF-Token` header. (The web client's newer request layer defines header-only variants of these calls, but the UI
+  never calls them.) The token never reaches the disk:
+  - Field-only forms (`post.update`, `post.addUrlEmbed`) are encoded in memory (`MultipartFormData.encodedData`) and sent
+    like any other request.
+  - Image / file uploads are sent as a streamed body (`MultipartFormData.streamedBody` →
+    `HTTPClient.upload(_:streamedBody:...)` → `uploadTask(withStreamedRequest:)`): the part headers and fields, the token
+    included, stay in memory and the file is read from disk while it is sent (`HTTPBodyStreamProducer`, a bound stream
+    pair). No body file is written.
+  - `MultipartFormData.writeToTemporaryFile` refuses a form that contains a `tt` field before anything is written.
+  - In Research logs a `multipart/form-data` body is summarized as `<binary N bytes, …>`, and a streamed body is not
+    recorded at all, so the `tt` value is not recorded.
 
 ## Cookie flow between the web store and the Keychain
 

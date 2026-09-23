@@ -218,8 +218,26 @@ enum FanboxPostUpdateForm {
         return .object(object)
     }
 
-    /// `body`: the blocks array unless a prepared body (image- / file-type post) is given.
+    /// `status` to send. `published` publishes (or keeps a live post published). Otherwise `draft`, except for a post that
+    /// is live (or already taken down) on FANBOX: its web editor unpublishes with `archived`, and a published post only
+    /// moves to `published` / `archived` (docs/API.md §14.4). `currentStatus` is the post's FANBOX status (nil = unknown).
+    static func statusValue(publish: Bool, currentStatus: String?) -> String {
+        if publish { return "published" }
+        switch currentStatus?.lowercased() {
+        case "published", "archived": return "archived"
+        default: return "draft"
+        }
+    }
+
+    /// `tags`: ONE field holding the JSON array, the way FANBOX's web client has sent it since 2020 (docs/API.md §14.4).
+    /// Always sent, `[]` included (the web client does the same; clearing is covered by the `tagsUnverified` warning).
+    static func tagsValue(_ tags: [String]) throws -> String {
+        String(decoding: try JSONValue.array(tags.filter { !$0.isEmpty }.map { .string($0) }).encoded(), as: UTF8.self)
+    }
+
+    /// `body`: the blocks array unless a prepared body (image- / file-type post) is given. `currentStatus`: see `statusValue`.
     static func make(postID: String, draft: RemotePostDraft, csrfToken: String, existing: ExistingMedia, body prepared: JSONValue? = nil,
+                     currentStatus: String? = nil,
                      boundary: String = "FANBOXClientBoundary-\(UUID().uuidString)") throws -> MultipartFormData {
         guard !csrfToken.isEmpty else { throw RemoteError.unauthorized }
         try validateBasics(draft)
@@ -229,13 +247,13 @@ enum FanboxPostUpdateForm {
         }
         var form = MultipartFormData(boundary: boundary)
         form.addField(name: "postId", value: postID)
-        form.addField(name: "status", value: draft.publish ? "published" : "draft")
+        form.addField(name: "status", value: statusValue(publish: draft.publish, currentStatus: currentStatus))
         form.addField(name: "feeRequired", value: String(max(0, draft.feeRequired)))
         form.addField(name: "title", value: draft.title)
         form.addField(name: "commentingPermissionScope", value: commentingScope(for: draft))
         form.addField(name: "body", value: bodyText)
-        for tag in draft.tags where !tag.isEmpty { form.addField(name: "tags", value: tag) }
-        form.addField(name: "tt", value: csrfToken)
+        form.addField(name: "tags", value: try tagsValue(draft.tags))
+        form.addField(name: MultipartFormData.csrfFieldName, value: csrfToken)
         return form
     }
 

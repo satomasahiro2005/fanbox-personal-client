@@ -1,7 +1,8 @@
 import Foundation
 
-/// `multipart/form-data` builder. Large bodies are streamed to a temporary file (for `HTTPClient.upload`), so image /
-/// file uploads never hold the whole payload in memory.
+/// `multipart/form-data` builder. A form with file parts is sent as a streamed body (`streamedBody()`: fields and part
+/// headers from memory, files read from disk while they are sent), so an image / file upload never holds the whole
+/// payload in memory and never writes it (with the CSRF token it carries) to disk.
 struct MultipartFormData: Sendable {
     enum Part: Sendable, Hashable {
         case field(name: String, value: String)
@@ -39,7 +40,33 @@ struct MultipartFormData: Sendable {
         return out
     }
 
-    /// Whether any part streams a file from disk (only such forms need a temporary body file).
+    /// The body for `HTTPClient.upload(_:streamedBody:...)`: part headers, fields and data parts in memory (adjacent ones
+    /// merged), each file part read from disk while it is sent (its current size is announced). Nothing is written
+    /// anywhere, so a form carrying the CSRF token (`tt`) may be sent this way.
+    func streamedBody() throws -> HTTPStreamedBody {
+        var segments: [HTTPStreamedBody.Segment] = []
+        var pending = Data()
+        for part in parts {
+            pending.append(Data(header(for: part).utf8))
+            switch part {
+            case .field(_, let value):
+                pending.append(Data(value.utf8))
+            case .data(_, let data, _, _):
+                pending.append(data)
+            case .file(_, let fileURL, _, _):
+                if !pending.isEmpty { segments.append(.data(pending)) }
+                pending = Data()
+                let size = (try FileManager.default.attributesOfItem(atPath: fileURL.path)[.size] as? NSNumber)?.int64Value ?? 0
+                segments.append(.file(fileURL, length: size))
+            }
+            pending.append(Data("\r\n".utf8))
+        }
+        pending.append(Data("--\(boundary)--\r\n".utf8))
+        segments.append(.data(pending))
+        return HTTPStreamedBody(segments: segments)
+    }
+
+    /// Whether any part is read from a file (such a form is sent as a streamed body).
     var hasFileParts: Bool {
         parts.contains { if case .file = $0 { return true } else { return false } }
     }
@@ -47,7 +74,7 @@ struct MultipartFormData: Sendable {
     /// Form field FANBOX's legacy multipart helper puts the CSRF token in.
     static let csrfFieldName = "tt"
 
-    /// Whether the form carries the CSRF token as a field (such a form must never be written to a temporary file).
+    /// Whether the form carries the CSRF token as a field (such a form is never written to a file).
     var carriesCSRFField: Bool {
         parts.contains { part in
             if case .field(let name, _) = part { return name == Self.csrfFieldName }
@@ -58,8 +85,12 @@ struct MultipartFormData: Sendable {
     static let temporaryFilePrefix = "fanbox-multipart-"
 
     /// Writes the body to a new temporary file (complete file protection) and returns its URL. The caller deletes it
-    /// after the upload.
+    /// after the upload. A form carrying the CSRF token is refused before anything is written (SPEC §39: the token lives
+    /// in the Keychain or in memory only); send such a form with `streamedBody()`.
     func writeToTemporaryFile(directory: URL = FileManager.default.temporaryDirectory) throws -> URL {
+        guard !carriesCSRFField else {
+            throw RemoteError.invalidRequest("CSRF トークンを含むフォームはファイルに書き出せません")
+        }
         let url = directory.appendingPathComponent("\(Self.temporaryFilePrefix)\(UUID().uuidString).body")
         guard FileManager.default.createFile(atPath: url.path, contents: nil,
                                              attributes: [.protectionKey: FileProtectionType.complete]) else {
@@ -77,7 +108,8 @@ struct MultipartFormData: Sendable {
         return url
     }
 
-    /// Deletes multipart body files left behind by an interrupted upload (app killed mid-request). Called at launch.
+    /// Deletes multipart body files left behind by an interrupted upload (app killed mid-request; uploads are streamed now,
+    /// but files from earlier versions may remain). Called at launch.
     /// Returns the number of files removed.
     @discardableResult
     static func removeStaleTemporaryFiles(in directory: URL = FileManager.default.temporaryDirectory,
@@ -94,21 +126,9 @@ struct MultipartFormData: Sendable {
         return removed
     }
 
-    /// Total body size in bytes (for progress reporting); file parts are measured on disk.
+    /// Total body size in bytes (the `Content-Length` of a streamed upload); file parts are measured on disk.
     func contentLength() throws -> Int64 {
-        var total: Int64 = 0
-        for part in parts {
-            total += Int64(header(for: part).utf8.count) + 2 // header + trailing CRLF
-            switch part {
-            case .field(_, let value): total += Int64(value.utf8.count)
-            case .data(_, let data, _, _): total += Int64(data.count)
-            case .file(_, let fileURL, _, _):
-                let attrs = try FileManager.default.attributesOfItem(atPath: fileURL.path)
-                total += (attrs[.size] as? NSNumber)?.int64Value ?? 0
-            }
-        }
-        total += Int64("--\(boundary)--\r\n".utf8.count)
-        return total
+        try streamedBody().length
     }
 
     // MARK: - Encoding

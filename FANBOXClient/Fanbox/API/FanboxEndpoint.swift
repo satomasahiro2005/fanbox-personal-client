@@ -248,18 +248,19 @@ struct FanboxEndpoint: Sendable, Hashable {
         FanboxEndpoint(key: "post.update", method: "POST", requiresCSRF: true)
     }
 
-    /// Multipart `{postId, image}` → `{ body: Image }` (docs/API.md §15.1). The form is built by `FanboxUploadForm`; the
-    /// CSRF token travels ONLY in the `X-CSRF-Token` header (added by the transport), never in the body file.
+    /// Multipart `{postId, image, tt}` → `{ body: Image }` (docs/API.md §15.1). The form is built by `FanboxUploadForm`; the
+    /// CSRF token travels in the `tt` field (as the web editor sends it) and in the header, and the body is streamed, so
+    /// it never reaches the disk.
     static func postAddImage() -> FanboxEndpoint {
         FanboxEndpoint(key: "post.addImage", method: "POST", requiresCSRF: true)
     }
 
-    /// Multipart `{postId, file}` → `{ body: File }` (docs/API.md §15.2). CSRF in the header only (see `postAddImage`).
+    /// Multipart `{postId, file, tt}` → `{ body: File }` (docs/API.md §15.2). CSRF as for `postAddImage`.
     static func postAddFile() -> FanboxEndpoint {
         FanboxEndpoint(key: "post.addFile", method: "POST", requiresCSRF: true)
     }
 
-    /// Multipart `{postId, url}` → `{ body: UrlEmbed }` (docs/API.md §15.3). CSRF in the header only.
+    /// Multipart `{postId, url, tt}` → `{ body: UrlEmbed }` (docs/API.md §15.3), encoded in memory. CSRF in `tt` and the header.
     static func postAddUrlEmbed() -> FanboxEndpoint {
         FanboxEndpoint(key: "post.addUrlEmbed", method: "POST", requiresCSRF: true)
     }

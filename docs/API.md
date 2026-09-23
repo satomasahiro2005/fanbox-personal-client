@@ -168,7 +168,7 @@ Scoping rules for this app, following SPEC §7 and §39:
 1. `GET https://www.fanbox.cc/` with the account's cookies.
 2. Select `<meta name="metadata" content="...">`. yogthot selects the same tag by `id="metadata"`.
 3. HTML-unescape the `content` attribute, JSON-decode it, and read `csrfToken` (§2.14).
-4. Send it as `x-csrf-token` on every POST. The only exception is `post.update`, which takes the token in the multipart field `tt` (§14.4).
+4. Send it as `x-csrf-token` on every POST. The exceptions are the multipart writes, `post.update` (§14.4) and the upload calls `post.addImage` / `post.addFile` / `post.addUrlEmbed` (§15.4): FANBOX's web editor sends the token in the multipart field `tt` for them.
 
 Rules:
 - The token is bound to the session. Keep it in memory only. Clear it whenever FANBOXSESSID changes, and re-fetch it at app start or after login (fankt).
@@ -176,13 +176,14 @@ Rules:
 - GET requests work without the token (Flare, cssxsh, Pixiv-Shaft, fc-downloader, hareku, gallery-dl). fankt and the old PixiView send `x-csrf-token` on every fanbox.cc request, empty when unknown, and nothing breaks.
 - Never send `x-csrf-token` to `pixiv.pximg.net` or `fanbox.pixiv.net`. fankt strips it for those hosts.
 
-These POSTs need the token: `post.likePost`, `post.addComment`, `post.deleteComment`, `post.likeComment`, `follow.create`, `follow.delete`, `notification.updateSettings`, `newsletter.markAsReadAll`, `post.create`, `post.delete`, and `post.update` (as `tt`).
+These POSTs need the token: `post.likePost`, `post.addComment`, `post.deleteComment`, `post.likeComment`, `follow.create`, `follow.delete`, `notification.updateSettings`, `newsletter.markAsReadAll`, `post.create`, `post.delete`, and (as `tt`) `post.update`, `post.addImage`, `post.addFile` and `post.addUrlEmbed`.
 
 **What the app does (unverified against the live service):** SPEC §39 allows the Keychain or memory, so the app keeps
 the token in the account's Keychain credential plus an in-memory cache; the hidden WebView transport (§1.11) keeps its
 page's token in memory only. The token is dropped when FANBOXSESSID rotates. A missing token is fetched before a write,
 and a write rejected with 403 / 400 is retried once after a refresh, only if the token changed. `x-csrf-token` is only
-ever sent to fanbox.cc hosts. The `post.update` form is built in memory, so `tt` is never written to a file. Details:
+ever sent to fanbox.cc hosts. Forms carrying `tt` also get the header, and are never written to a file: field-only forms
+are built in memory, and image / file uploads are streamed (fields from memory, the file from disk). Details:
 [SECURITY.md](SECURITY.md#csrf-token).
 
 ### 1.5 Response envelope
@@ -1483,18 +1484,18 @@ All endpoints in this section need an account where `context.user.isCreator` is 
 ### 14.4 `post.update`
 
 - **Method / URL:** `POST https://api.fanbox.cc/post.update`, **`multipart/form-data`** (defaultcf spec, fanbox-go). cromachina 2022 used `application/x-www-form-urlencoded`, and that also worked at the time.
-- **Auth:** required. **CSRF:** **yes, via the form field `tt`**. The spec declares only cookie security for this endpoint, with no `X-CSRF-Token` header. Also sending the header is probably harmless (inferred). **Confidence:** high.
+- **Auth:** required. **CSRF:** **yes, via the form field `tt`**. The spec declares only cookie security for this endpoint, with no `X-CSRF-Token` header, and FANBOX's web client sends none either. Also sending the header is probably harmless (inferred); the app sends both. **Confidence:** high.
 - **Purpose:** saves a post's title, content, fee, tags, comment permission and publish status. It is used to save a draft, publish and unpublish.
 
 | Field | In | Type | Req | Notes |
 |---|---|---|---|---|
 | `postId` | multipart | string | **yes** | |
-| `status` | multipart | `draft` or `published` | no | Publish = `published`. Unpublish = back to `draft` (inferred from the enum; untested) |
+| `status` | multipart | `draft`, `published`, `scheduled`, `archived`, … | no | Publish = `published`. The web client's transitions (§15 web-bundles): from a draft `draft` / `published` / `scheduled`; from a scheduled post `draft`; from a published post `published` or **`archived`** (its unpublish button); from an archived post `published` / `archived`; from a suspended post `suspended` / `in_review`. The app sends `published`, `draft` for a post that is a FANBOX draft, and `archived` to take down a post that is published (or already archived) on FANBOX (`FanboxPostUpdateForm.statusValue`) |
 | `feeRequired` | multipart | string (integer yen) | no | `"0"` = public. Posts are gated by a minimum fee; no source shows a `planId` field |
 | `title` | multipart | string | no | |
 | `commentingPermissionScope` | multipart | `everyone`, `supporters` or `none` | effectively yes | Added in spec commit 00a8df23 (2025-03-08), titled "fix: post update with new property", so updates probably fail without it. fanboxsync sends `supporters` when the fee is above 0 and `everyone` otherwise |
 | `body` | multipart | string holding JSON | no | The JSON of the **blocks array only**, not an object (fanboxsync and cromachina). Send `[]` rather than `null` for an empty body. **Omit `styles`** on paragraphs that have none; fanboxsync says an empty styles array must not be sent |
-| `tags` | multipart | string, repeated | no | The spec encodes it as a repeated form field. fanboxsync always sends an empty list. cromachina (2022) sent one field holding a JSON array string. At most 6 tags per post (Help 26439413791257). Whether omitting it keeps or clears the tags is unknown |
+| `tags` | multipart | string holding a JSON array | no | **One field** holding `JSON.stringify(tags)`, e.g. `["a","b"]`: FANBOX's own web client has sent it this way in every bundle from 2020-01 to 2026-09 (§15 web-bundles), as cromachina (2022) did. The defaultcf spec's repeated form field is not what the browser sends. The web client always sends it, `[]` included, and so does the app. The web UI stops accepting tags at 6 (Help 26439413791257). Whether omitting it keeps or clears the tags is unknown (the app never omits it) |
 | `tt` | multipart | string | **yes** | The anti-CSRF token, which is the same value as `metadata.csrfToken` (fanboxsync uses its configured csrf token; cromachina's hard-coded 32-hex value matches the token format) |
 
 ```jsonc
@@ -1506,7 +1507,8 @@ All endpoints in this section need an account where `context.user.isCreator` is 
 HTTP 400 { "error": "general_error" }
 ```
 
-- **Fields not seen in any source:** `planId`, cover image, scheduled publish time (the web UI has scheduled posting), a per-post adult flag, `imageMap` or `fileMap` on write, `excerpt`, content for non-article types, a visibility field. **Do not invent them.** Leave those features to the web editor at `/manage/posts/{postId}`.
+- **Fields the web client sends that the app does not:** `scheduledFor` (`YYYY-MM-DDTHH:mm:ssZ`, local time with offset; only when scheduling) and `coverImage` (a PNG blob sets the cover, `"delete"` removes it, omitting it keeps it; §15.5). Non-article bodies are known too: image `{text, images}`, file `{text, files}`, video `{text, video: {videoId, serviceProvider}}`, text `{text}` (§15.5).
+- **Fields not seen in any source:** `planId`, a per-post adult flag, `excerpt`, a visibility field. `imageMap` / `fileMap` / `urlEmbedMap` are **never** sent on write. **Do not invent them.** Leave those features to the web editor at `/manage/posts/{postId}`.
 - **Offsets:** fanboxsync counts style offset and length in **Unicode code points** (Go runes), while fankt and Pixiv-Shaft document **UTF-16 code units**. The two only differ for characters outside the BMP, such as emoji. Until this is verified, the native editor either blocks bold styles on text containing non-BMP characters, or falls back to the web editor for it (our policy).
 - **App scope:** native publishing covers article posts built from `p`, `header`, `image`, `file` and `url_embed` blocks, and image- / file-type posts (`{text, images}` / `{text, files}` bodies). Images, files and link cards are first stored into the post with the §15 endpoints and then referenced by id. New `embed` blocks, the R-18 flag and a plan id stay in the web editor.
 - **Sources:** defaultcf spec (`/post.update` security, `requestBodies.Update`, 00a8df23), fanbox-go (oas_request_encoders_gen.go), fanboxsync (fanbox.go `PushPost`, `convertJson`; entry.go `ConvertFanbox`; config.go `csrf_token`), cromachina @21ef099 (`post_update`, `convert_post`) and issue #3, Pixiv-Shaft (link offset note).
@@ -1550,6 +1552,7 @@ throwaway draft.
 |---|---|---|---|---|
 | `postId` | multipart | string | **yes** | The post the image belongs to |
 | `image` | multipart | file | **yes** | jpeg, png or gif. The part's file name and type come from the file |
+| `tt` | multipart | string | **yes** | The CSRF token (`metadata.csrfToken`), appended last by the web client (§15.4) |
 
 ```jsonc
 { "body": Image }   // Image = { id, extension, width, height, originalUrl, thumbnailUrl } (§2.5); inferred from use
@@ -1558,8 +1561,11 @@ throwaway draft.
 - **Client-side checks in the web editor:** MIME `image/jpeg`, `image/png` or `image/gif`; at most **50,000,000 bytes**
   (SI) in the article editor. The image-type post uploader has no size check. These are the web client's checks, not
   verified server limits.
-- **Web client behaviour (not required):** a JPEG whose EXIF orientation is 2 or more is redrawn upright and sent as
-  PNG; other files are sent as they are. Several images are started about 20 ms apart and upload in parallel. The legacy
+- **Orientation:** the web client redraws a JPEG whose EXIF orientation is 2 or more upright (sent as PNG) before
+  uploading (presumably because the server does not apply the tag; inferred); other files are sent as they are. The app redraws such images
+  upright when they are added to a draft (`DraftImageProcessor`, kept as JPEG), so the stored width / height match what
+  FANBOX reports.
+- **Web client behaviour (for reference):** several images are started about 20 ms apart and upload in parallel. The legacy
   helper uses a 20-minute timeout and reports upload progress.
 - **Saving:** article → block `{type: "image", imageId}`. Image-type post → `body.images[]` lists the full `Image`
   objects in display order. `imageMap` is never sent.
@@ -1573,6 +1579,7 @@ throwaway draft.
 |---|---|---|---|---|
 | `postId` | multipart | string | **yes** | |
 | `file` | multipart | file | **yes** | The original file; its multipart file name is the name supporters see (that the server takes `name` / `extension` from it is an inference) |
+| `tt` | multipart | string | **yes** | The CSRF token (§15.4) |
 
 ```jsonc
 { "body": File }   // File = { id, name, extension, size, url } (§2.5; `name` has no extension); inferred from use
@@ -1593,6 +1600,7 @@ throwaway draft.
 |---|---|---|---|
 | `postId` | multipart | string | **yes** |
 | `url` | multipart | string | **yes** |
+| `tt` | multipart | string | **yes** |
 
 ```jsonc
 { "body": UrlEmbed }   // UrlEmbed = { id, type, ... } as in urlEmbedMap (§2.7): type is
@@ -1608,16 +1616,17 @@ throwaway draft.
 
 The web editor calls all three through its legacy multipart helper, which adds the CSRF token as the form field `tt`
 and sends **no** `X-CSRF-Token` header. The same 2026 bundle also defines request-layer variants (`post_addImage`, …)
-that send the **`X-CSRF-Token` header and no `tt`**; the editor does not call them, but the only multipart call of that
-layer the UI does make (an unrelated upload) sends the header only. That the server accepts either form is an
+that send the **`X-CSRF-Token` header and no `tt`**, but the UI never calls them; the only multipart call of that layer
+the UI does make (an unrelated upload) sends the header only. That the server would accept the header alone is an
 **inference (medium)**.
 
-**App decision (SPEC §38 / §39):** the app sends the token **only as the `X-CSRF-Token` header** (the transport adds it
-for `requiresCSRF` endpoints) and never puts `tt` into these forms, because image and file bodies are streamed from a
-temporary file and the token must never be written to disk. A missing token is fetched before the upload; a 400 / 403
-answer is retried once after a token refresh with the same (token-free) body file. If live traffic shows that these
-endpoints require `tt`, uploads fail visibly (the job is marked failed, the draft and its post id are kept) and the web
-editor remains the fallback.
+**App decision (SPEC §38 / §39):** the app sends `tt` exactly as the web editor does, and the transport also adds the
+`X-CSRF-Token` header (`requiresCSRF`; probably harmless, inferred). The token is never written to disk: `post.addUrlEmbed`
+(fields only) is encoded in memory, and `post.addImage` / `post.addFile` are sent as a **streamed body**
+(`HTTPClient.upload(_:streamedBody:...)`: the part headers and fields, the token included, from memory, the file read
+from disk while it is sent, `Content-Length` set, nothing assembled into a file). A missing token is fetched first. A
+400 / 403 answer is treated as a possibly stale token: the token is refreshed and, only when it changed, the form is
+**rebuilt** with the new token and sent once more (the same rule applies to `post.update`).
 
 ### 15.5 The save call and the cover
 
@@ -1631,6 +1640,9 @@ Flow used by the app for a new post: `post.create {type: "article"}` → the id 
 `post.addImage` / `post.addFile` (one at a time, media priority) → `post.addUrlEmbed` → `post.update` with the ids in
 block order. A failed step leaves the created draft, its id and every completed asset in place; the next send continues
 on the same post and never re-uploads a completed asset (docs/ARCHITECTURE.md, "Creator Mode send and upload flow").
+Whether the add calls bump the post's `updatedAt` is unknown, so the app reads `post.getEditable` right after
+`post.create` and again after its own writes (uploads, link cards, a failed save): that revision is the baseline of the
+next conflict check, and only a newer one counts as an edit made elsewhere.
 
 ### 15.6 Sources
 
@@ -2160,8 +2172,8 @@ Verify each of these in Research Mode before building features that depend on it
 30. When exactly did `creator.listFollowing`, `listPixiv` and `listRecommended` move to `body.creators`?
 
 **Creator side**
-31. Media upload (§15): names, fields and the `postId` binding are known from the web client. Still open: the exact response bodies of `post.addImage` / `post.addFile` / `post.addUrlEmbed`, and whether they accept the `X-CSRF-Token` header without `tt`.
-32. `post.update`: scheduled publish, cover image, adult flag, `planId`, non-article content, and whether maps must be sent with the blocks. Is the encoding multipart with repeated `tags`, or urlencoded with a JSON string? Is `commentingPermissionScope` mandatory? Is an `X-CSRF-Token` header needed in addition to `tt`? Does omitting `tags` keep or clear them?
+31. Media upload (§15): names, fields (`tt` included) and the `postId` binding are known from the web client. Still open: the exact response bodies of `post.addImage` / `post.addFile` / `post.addUrlEmbed` (inferred from how the client uses them), whether they bump the post's `updatedAt` (the app assumes they may and re-reads the revision after its own writes), and whether the extra `X-CSRF-Token` header the app sends matters.
+32. `post.update`: answered by the web client (§14.4, §15.5): `scheduledFor`, `coverImage` (inline blob / `"delete"` / omitted), the non-article bodies, maps never sent, `tags` as one JSON-array field, multipart with `tt` and no header, unpublish = `archived`. Still open: the adult flag and `planId` (no field in any source), whether `commentingPermissionScope` is mandatory (the 2024-06 client did not send it), whether omitting `tags` keeps or clears them, and the success body (`{body: {post}}` is client-read, not seen on the wire).
 33. `post.listManaged`: pagination, caps, status filters, or a paginate-style variant?
 34. `relationship.listFans`: are large fan counts capped? Is there a total-months field? Is there any way to edit `note`? Which `status` values exist beyond `supporter`?
 35. Does `relationship.getFan` exist? Which endpoint does `/manage/relationships/{userId}` actually call?

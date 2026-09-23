@@ -247,11 +247,13 @@ struct FanboxRemoteDataSource: RemoteDataSource {
         guard nativePostWritesEnabled else { throw RemoteError.unsupported(operation: "createPost") }
         _ = try requireCreator(account)
         try FanboxPostUpdateForm.validateForCreate(draft)
-        guard let token = try await api.csrfToken(accountID: account.accountID) else { throw RemoteError.unauthorized }
+        // The save needs the token: make sure there is one before anything is created.
+        guard let token = try await api.csrfToken(accountID: account.accountID), !token.isEmpty else { throw RemoteError.unauthorized }
         let created = try await api.send(.postCreate(type: "article"), as: FanboxPostCreateBody.self, accountID: account.accountID)
         guard let postID = created.postId else { throw RemoteError.decoding(endpoint: "post.create", detail: "postId がありません") }
         do {
-            try await sendUpdate(postID: postID, draft: draft, token: token, existing: FanboxPostUpdateForm.ExistingMedia(), account: account)
+            try await sendUpdate(postID: postID, draft: draft, existing: FanboxPostUpdateForm.ExistingMedia(), currentStatus: "draft",
+                                 account: account)
         } catch {
             // The empty draft exists on FANBOX; never delete it automatically (the update may have been applied).
             // The id is handed back so the caller stores it and retries with post.update (never a second post.create).
@@ -273,14 +275,17 @@ struct FanboxRemoteDataSource: RemoteDataSource {
         existing.addUploads(for: id, in: draft.blocks)
         let body = try FanboxPostUpdateForm.bodyJSON(draft.blocks, type: FanboxAdapter.editablePostType(editable.post), existing: existing,
                                                     existingText: editable.post.body?.text)
-        guard let token = try await api.csrfToken(accountID: account.accountID) else { throw RemoteError.unauthorized }
-        try await sendUpdate(postID: id, draft: draft, token: token, existing: existing, body: body, account: account)
+        try await sendUpdate(postID: id, draft: draft, existing: existing, body: body, currentStatus: editable.post.status, account: account)
     }
 
-    private func sendUpdate(postID: String, draft: RemotePostDraft, token: String, existing: FanboxPostUpdateForm.ExistingMedia,
-                            body: JSONValue? = nil, account: AccountContext) async throws {
-        let form = try FanboxPostUpdateForm.make(postID: postID, draft: draft, csrfToken: token, existing: existing, body: body)
-        let response = try await api.sendMultipart(.postUpdate(), form: form, accountID: account.accountID)
+    /// post.update with the token in `tt` (rebuilt once with a refreshed token when it was stale). `currentStatus` is the
+    /// post's FANBOX status, which decides how a live post is taken down (`FanboxPostUpdateForm.statusValue`).
+    private func sendUpdate(postID: String, draft: RemotePostDraft, existing: FanboxPostUpdateForm.ExistingMedia,
+                            body: JSONValue? = nil, currentStatus: String?, account: AccountContext) async throws {
+        let response = try await api.sendMultipart(.postUpdate(), accountID: account.accountID) { token in
+            try FanboxPostUpdateForm.make(postID: postID, draft: draft, csrfToken: token, existing: existing, body: body,
+                                          currentStatus: currentStatus)
+        }
         if let json = try? JSONValue.parse(response.data), let code = json["error"]?.stringValue, json["body"] == nil {
             throw FanboxResponseHandling.mapErrorCode(code, statusCode: response.statusCode)
         }
@@ -307,41 +312,51 @@ struct FanboxRemoteDataSource: RemoteDataSource {
         return postID
     }
 
-    /// post.addImage `{postId, image}` → `{ body: Image }` (docs/API.md §15.1). Size / type are checked first; the CSRF
-    /// token goes only in the header and the temporary body file is removed right after the request.
+    /// post.addImage `{postId, image, tt}` → `{ body: Image }` (docs/API.md §15.1). Size / type are checked before any
+    /// request; the body is streamed (the token stays in memory, the file is read from disk while it is sent).
     func uploadImage(fileURL: URL, postID: String, account: AccountContext,
                      progress: @escaping @Sendable (Double) -> Void) async throws -> RemoteUploadResult {
-        let form = try uploadForm(.image, fileURL: fileURL, postID: postID, account: account)
-        let body = try await api.sendMultipart(.postAddImage(), form: form, as: FanboxUploadedImageBody.self,
-                                               accountID: account.accountID, progress: progress)
+        try checkUpload(.image, fileURL: fileURL, postID: postID, account: account)
+        let body = try await api.sendMultipart(.postAddImage(), as: FanboxUploadedImageBody.self, accountID: account.accountID,
+                                               progress: progress) { token in
+            try FanboxUploadForm.uploadForm(kind: .image, postID: postID, fileURL: fileURL, csrfToken: token)
+        }
         return try FanboxUploadForm.result(body.image, postID: postID)
     }
 
-    /// post.addFile `{postId, file}` → `{ body: File }` (docs/API.md §15.2). The multipart file name is the display name.
+    /// post.addFile `{postId, file, tt}` → `{ body: File }` (docs/API.md §15.2). The multipart file name is the display name.
     func uploadFile(fileURL: URL, postID: String, account: AccountContext,
                     progress: @escaping @Sendable (Double) -> Void) async throws -> RemoteUploadResult {
-        let form = try uploadForm(.file, fileURL: fileURL, postID: postID, account: account)
-        let body = try await api.sendMultipart(.postAddFile(), form: form, as: FanboxUploadedFileBody.self,
-                                               accountID: account.accountID, progress: progress)
+        try checkUpload(.file, fileURL: fileURL, postID: postID, account: account)
+        let body = try await api.sendMultipart(.postAddFile(), as: FanboxUploadedFileBody.self, accountID: account.accountID,
+                                               progress: progress) { token in
+            try FanboxUploadForm.uploadForm(kind: .file, postID: postID, fileURL: fileURL, csrfToken: token)
+        }
         return try FanboxUploadForm.result(body.file, postID: postID)
     }
 
-    /// post.addUrlEmbed `{postId, url}` → `{ body: UrlEmbed }` (docs/API.md §15.3); the card id goes into the url_embed block.
+    /// post.addUrlEmbed `{postId, url, tt}` → `{ body: UrlEmbed }` (docs/API.md §15.3), sent from memory; the card id goes
+    /// into the url_embed block.
     func addURLEmbed(url: String, postID: String, account: AccountContext) async throws -> RemoteUploadResult {
         guard nativePostWritesEnabled else { throw RemoteError.unsupported(operation: "addURLEmbed") }
         _ = try requireCreator(account)
-        let form = try FanboxUploadForm.urlEmbedForm(postID: postID, url: url)
-        let body = try await api.sendMultipart(.postAddUrlEmbed(), form: form, as: FanboxAddedURLEmbedBody.self,
-                                               accountID: account.accountID)
-        return try FanboxUploadForm.result(body.urlEmbed, postID: postID, requestedURL: FanboxUploadForm.linkURL(url))
+        try FanboxUploadForm.validatePostID(postID)
+        let link = try FanboxUploadForm.linkURL(url)
+        let body = try await api.sendMultipart(.postAddUrlEmbed(), as: FanboxAddedURLEmbedBody.self,
+                                               accountID: account.accountID) { token in
+            try FanboxUploadForm.urlEmbedForm(postID: postID, url: link, csrfToken: token)
+        }
+        return try FanboxUploadForm.result(body.urlEmbed, postID: postID, requestedURL: link)
     }
 
-    private func uploadForm(_ kind: FanboxUploadForm.Kind, fileURL: URL, postID: String, account: AccountContext) throws -> MultipartFormData {
+    /// Everything that can be refused without a request (nothing is sent, not even a token fetch).
+    private func checkUpload(_ kind: FanboxUploadForm.Kind, fileURL: URL, postID: String, account: AccountContext) throws {
         guard nativePostWritesEnabled else {
             throw RemoteError.unsupported(operation: kind == .image ? "uploadImage" : "uploadFile")
         }
         _ = try requireCreator(account)
-        return try FanboxUploadForm.uploadForm(kind: kind, postID: postID, fileURL: fileURL)
+        try FanboxUploadForm.validatePostID(postID)
+        try FanboxUploadForm.validate(fileURL: fileURL, kind: kind)
     }
 
     /// relationship.listFans?status=supporter (whole list, no paging) + plan titles from plan.listCreator.

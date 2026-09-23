@@ -5,6 +5,8 @@ import os
 ///
 /// - One ephemeral `URLSession` per account (lazily created, cached): no shared cookie storage, no URL cache,
 ///   cookies are attached manually from the account's `SessionCredential` and only for *.fanbox.cc (`FanboxHostPolicy`).
+/// - Uploads send a prebuilt body file (`upload(_:bodyFileURL:...)`) or a body streamed from memory and files
+///   (`upload(_:streamedBody:...)`, for forms that must never reach the disk as a whole).
 /// - Every request runs through `NetworkScheduler.run(priority, label: endpointKey)`; downloads / uploads are also
 ///   registered as pausable transfers so text-first requests can suspend them, and Offline cancels them (`.offline`).
 /// - `send` / `upload` return non-2xx answers (the API client classifies them); `download` throws for them.
@@ -81,6 +83,17 @@ final class AccountHTTPClient: CredentialBackedHTTPClient, SessionRevoking, @unc
                 progress: (@Sendable (Double) -> Void)?) async throws -> HTTPResponse {
         try await scheduler.run(request.priority, label: request.endpointKey) { [self] in
             let (response, _) = try await self.perform(request, accountID: accountID, mode: .upload(bodyFileURL), progress: progress)
+            return response
+        }
+    }
+
+    /// Streamed body (e.g. a multipart form carrying the CSRF token, plus a file read from disk while it is sent):
+    /// `uploadTask(withStreamedRequest:)` with `Content-Length`; the body is produced on demand
+    /// (`HTTPBodyStreamProducer`) and never written anywhere.
+    func upload(_ request: HTTPRequest, streamedBody: HTTPStreamedBody, accountID: String?,
+                progress: (@Sendable (Double) -> Void)?) async throws -> HTTPResponse {
+        try await scheduler.run(request.priority, label: request.endpointKey) { [self] in
+            let (response, _) = try await self.perform(request, accountID: accountID, mode: .stream(streamedBody), progress: progress)
             return response
         }
     }
@@ -192,6 +205,7 @@ final class AccountHTTPClient: CredentialBackedHTTPClient, SessionRevoking, @unc
         case data
         case download
         case upload(URL)
+        case stream(HTTPStreamedBody)
 
         var isTransfer: Bool {
             if case .data = self { return false }
@@ -206,10 +220,13 @@ final class AccountHTTPClient: CredentialBackedHTTPClient, SessionRevoking, @unc
         let credential: SessionCredential?
         if let accountID { credential = await credentials.credential(for: accountID) } else { credential = nil }
 
-        let urlRequest: URLRequest
+        var urlRequest: URLRequest
         do {
             var includeBody = true
-            if case .upload = mode { includeBody = false }
+            switch mode {
+            case .upload, .stream: includeBody = false
+            case .data, .download: break
+            }
             urlRequest = try Self.makeURLRequest(request, credential: credential, includeBody: includeBody)
         } catch {
             let mapped = HTTPErrorMapper.map(error)
@@ -218,18 +235,27 @@ final class AccountHTTPClient: CredentialBackedHTTPClient, SessionRevoking, @unc
             throw mapped
         }
 
+        var streamedBody: HTTPStreamedBody?
+        if case .stream(let body) = mode {
+            streamedBody = body
+            // A known length, so the body is not sent chunked (and upload progress has a total).
+            urlRequest.setValue(String(body.length), forHTTPHeaderField: "Content-Length")
+        }
+
         let entry = sessionEntry(for: accountID)
         let task: URLSessionTask
         switch mode {
         case .data: task = entry.session.dataTask(with: urlRequest)
         case .download: task = entry.session.downloadTask(with: urlRequest)
         case .upload(let file): task = entry.session.uploadTask(with: urlRequest, fromFile: file)
+        case .stream: task = entry.session.uploadTask(withStreamedRequest: urlRequest)
         }
         task.priority = Self.taskPriority(for: request)
 
         let handler = HTTPTransferHandler(credential: credential, requiresCSRF: request.requiresCSRF, callerHeaders: request.headers,
                                           progress: progress, downloadDirectory: mode.isTransfer ? downloadDirectory : nil,
-                                          isMedia: Self.isMediaRequest(request))
+                                          isMedia: Self.isMediaRequest(request), streamedBody: streamedBody)
+        handler.task = task
         entry.delegate.add(handler, for: task)
 
         let outcome: HTTPTransferOutcome

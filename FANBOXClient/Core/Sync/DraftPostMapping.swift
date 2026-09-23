@@ -66,6 +66,9 @@ enum DraftEmbedProvider: String, CaseIterable, Identifiable, Sendable {
 enum DraftPostMapping {
     /// FANBOX accepts at most this many tags per post (docs/API.md §14.4).
     static let maxTags = 6
+    /// Longest link-card URL sent to the service (`FanboxUploadForm.linkURL` refuses longer ones); checked in the plan so a
+    /// bad URL never fails after a FANBOX draft was created for it.
+    static let maxLinkCardURLLength = 2048
 
     /// Normalized FANBOX tags: trimmed, leading "#" removed, empty and duplicate entries dropped (order kept).
     static func normalizedTags(_ tags: [String]) -> [String] {
@@ -202,6 +205,8 @@ enum DraftPostMapping {
                 if capabilities.uploadsNeedPost {
                     if !isWebURL(url) {
                         problems.append("リンクカードの URL が正しくありません（http / https）: \(url.prefix(60))")
+                    } else if url.count > maxLinkCardURLLength {
+                        problems.append("リンクカードの URL が長すぎます（\(maxLinkCardURLLength) 文字まで）: \(url.prefix(60))…")
                     } else if allowPendingUploads {
                         pendingLinks.append(block.id)
                     } else {

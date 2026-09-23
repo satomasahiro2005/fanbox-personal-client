@@ -33,6 +33,45 @@ struct HTTPResponse: Sendable {
     var duration: TimeInterval
 }
 
+/// A request body sent as a stream: bytes held in memory and files read from disk while they are sent. For uploads whose
+/// body must never be written to a file as a whole (a multipart form carrying the CSRF token next to a large file,
+/// SPEC §39) and must not be held in memory either. Sent with `Content-Length: length` (not chunked).
+struct HTTPStreamedBody: Sendable, Equatable {
+    enum Segment: Sendable, Equatable {
+        case data(Data)
+        /// `length` bytes of a file (its size when the body was built), read in chunks while the body is sent.
+        case file(URL, length: Int64)
+    }
+
+    var segments: [Segment]
+
+    /// Total size in bytes.
+    var length: Int64 {
+        segments.reduce(0) { total, segment in
+            switch segment {
+            case .data(let data): return total + Int64(data.count)
+            case .file(_, let length): return total + length
+            }
+        }
+    }
+
+    /// The whole body in memory (test transports only; the app never assembles a streamed body).
+    func assembled() throws -> Data {
+        var out = Data()
+        for segment in segments {
+            switch segment {
+            case .data(let data):
+                out.append(data)
+            case .file(let url, let length):
+                let handle = try FileHandle(forReadingFrom: url)
+                defer { try? handle.close() }
+                out.append(try handle.read(upToCount: Int(length)) ?? Data())
+            }
+        }
+        return out
+    }
+}
+
 /// Per-account HTTP transport (SPEC §7.2). Implementations MUST:
 /// - isolate cookies / CSRF / session per account (no shared cookie storage),
 /// - run every request through `NetworkScheduler` with the request priority,
@@ -51,6 +90,18 @@ protocol HTTPClient: Sendable {
     /// Uploads `bodyFileURL` (e.g. a prebuilt multipart body) as the request body.
     func upload(_ request: HTTPRequest, bodyFileURL: URL, accountID: String?,
                 progress: (@Sendable (Double) -> Void)?) async throws -> HTTPResponse
+    /// Uploads `streamedBody` as the request body (`Content-Length` = its length). The body is produced while it is sent,
+    /// never assembled into one file or buffer. Registered with the scheduler as a pausable transfer like `upload`.
+    func upload(_ request: HTTPRequest, streamedBody: HTTPStreamedBody, accountID: String?,
+                progress: (@Sendable (Double) -> Void)?) async throws -> HTTPResponse
+}
+
+extension HTTPClient {
+    /// Transports without streamed uploads send nothing.
+    func upload(_ request: HTTPRequest, streamedBody: HTTPStreamedBody, accountID: String?,
+                progress: (@Sendable (Double) -> Void)?) async throws -> HTTPResponse {
+        throw RemoteError.unsupported(operation: "streamed upload")
+    }
 }
 
 /// A transport that reads the per-account `CredentialStoring` (the store `FanboxAPIClient` keeps the CSRF token in).

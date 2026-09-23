@@ -22,7 +22,11 @@ final class HTTPTransferHandler: @unchecked Sendable {
     let requiresCSRF: Bool
     let callerHeaders: [String: String]
     let isMedia: Bool
+    /// Body of a streamed upload (`uploadTask(withStreamedRequest:)`): a new producer feeds every stream URLSession asks for.
+    let streamedBody: HTTPStreamedBody?
     var credential: SessionCredential?
+    /// The task this handler belongs to (cancelled when the streamed body cannot be produced).
+    weak var task: URLSessionTask?
     /// Redirect hops followed so far (delegate queue only).
     fileprivate var redirectCount = 0
 
@@ -35,15 +39,51 @@ final class HTTPTransferHandler: @unchecked Sendable {
     private let lock = NSLock()
     private var result: Result<HTTPTransferOutcome, Error>?
     private var continuation: CheckedContinuation<HTTPTransferOutcome, Error>?
+    private var producers: [HTTPBodyStreamProducer] = []
+    private var bodyFailure: Error?
 
     init(credential: SessionCredential?, requiresCSRF: Bool, callerHeaders: [String: String],
-         progress: (@Sendable (Double) -> Void)?, downloadDirectory: URL?, isMedia: Bool = false) {
+         progress: (@Sendable (Double) -> Void)?, downloadDirectory: URL?, isMedia: Bool = false,
+         streamedBody: HTTPStreamedBody? = nil) {
         self.credential = credential
         self.requiresCSRF = requiresCSRF
         self.callerHeaders = callerHeaders
         self.isMedia = isMedia
         self.progress = progress
         self.downloadDirectory = downloadDirectory
+        self.streamedBody = streamedBody
+    }
+
+    /// A fresh body stream for URLSession (first send, or a re-send after a redirect / reconnect). Earlier producers stop.
+    fileprivate func makeBodyStream() -> InputStream? {
+        guard let streamedBody else { return nil }
+        let producer = HTTPBodyStreamProducer(body: streamedBody) { [weak self] error in self?.bodyStreamFailed(error) }
+        lock.lock()
+        let previous = producers
+        producers = [producer]
+        lock.unlock()
+        previous.forEach { $0.stop() }
+        producer.start()
+        return producer.inputStream
+    }
+
+    /// Stops every producer (the task finished). Returns the error of a body that could not be produced, if any.
+    fileprivate func finishBodyStreams() -> Error? {
+        lock.lock()
+        let stopping = producers
+        producers = []
+        let failure = bodyFailure
+        lock.unlock()
+        stopping.forEach { $0.stop() }
+        return failure
+    }
+
+    private func bodyStreamFailed(_ error: Error) {
+        lock.lock()
+        if bodyFailure == nil { bodyFailure = error }
+        lock.unlock()
+        // The request can no longer carry the announced Content-Length: end it now instead of waiting for a timeout.
+        task?.cancel()
     }
 
     /// Waits for completion (safe to call before or after the task finished).
@@ -114,6 +154,12 @@ final class HTTPTransferDelegate: NSObject, URLSessionDataDelegate, URLSessionDo
         guard let h = handler(for: dataTask) else { return }
         h.data.append(data)
         h.bytesReceived += Int64(data.count)
+    }
+
+    // MARK: Streamed upload body
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, needNewBodyStream completionHandler: @escaping (InputStream?) -> Void) {
+        completionHandler(handler(for: task)?.makeBodyStream())
     }
 
     // MARK: Upload progress
@@ -203,6 +249,11 @@ final class HTTPTransferDelegate: NSObject, URLSessionDataDelegate, URLSessionDo
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         guard let h = removeHandler(for: task) else { return }
+        if h.finishBodyStreams() != nil {
+            // The streamed body could not be read to the end (a file vanished or shrank): never report an answer to it.
+            h.complete(.failure(URLError(.cannotOpenFile)))
+            return
+        }
         if let error {
             if let file = h.fileURL { try? FileManager.default.removeItem(at: file) }
             h.complete(.failure(error))
@@ -214,5 +265,152 @@ final class HTTPTransferDelegate: NSObject, URLSessionDataDelegate, URLSessionDo
         }
         h.complete(.success(HTTPTransferOutcome(response: task.response, data: h.data, fileURL: h.fileURL,
                                                 bytesReceived: h.bytesReceived, redirectCookies: h.redirectCookies)))
+    }
+}
+
+/// Writes an `HTTPStreamedBody` into a bound stream pair from its own thread; URLSession reads the other end
+/// (`uploadTask(withStreamedRequest:)` → `urlSession(_:task:needNewBodyStream:)`). Files are read in 64 KB chunks as the
+/// connection drains, so the body never exists as one file or one buffer (a multipart form may hold the CSRF token,
+/// SPEC §39, next to a 300 MB attachment).
+///
+/// The producer runs an event-driven write loop on a dedicated thread's run loop (never a blocking write), so `stop()`
+/// always ends it: when the body is complete, when the reader goes away, or when the task finishes for any reason.
+final class HTTPBodyStreamProducer: NSObject, StreamDelegate, @unchecked Sendable {
+    static let chunkSize = 64 * 1024
+
+    let inputStream: InputStream
+    private let outputStream: OutputStream
+    private let onFailure: @Sendable (Error) -> Void
+
+    // Producer thread only.
+    private var remaining: [HTTPStreamedBody.Segment]
+    private var chunk = Data()
+    private var chunkOffset = 0
+    private var file: (handle: FileHandle, left: Int64)?
+    private var finished = false
+
+    // Guarded by `lock`.
+    private let lock = NSLock()
+    private var runLoop: CFRunLoop?
+    private var stopRequested = false
+
+    init(body: HTTPStreamedBody, onFailure: @escaping @Sendable (Error) -> Void) {
+        var input: InputStream?
+        var output: OutputStream?
+        Stream.getBoundStreams(withBufferSize: Self.chunkSize, inputStream: &input, outputStream: &output)
+        guard let input, let output else { preconditionFailure("bound stream pair unavailable") }
+        inputStream = input
+        outputStream = output
+        remaining = body.segments
+        self.onFailure = onFailure
+        super.init()
+    }
+
+    func start() {
+        let thread = Thread { [self] in self.run() }
+        thread.name = "HTTPBodyStreamProducer"
+        thread.qualityOfService = .utility
+        thread.start()
+    }
+
+    /// Ends production (closing the write side). Safe from any thread, before or after `start`.
+    func stop() {
+        lock.lock()
+        stopRequested = true
+        let loop = runLoop
+        lock.unlock()
+        guard let loop else { return }
+        CFRunLoopPerformBlock(loop, CFRunLoopMode.defaultMode.rawValue) { [self] in self.finish() }
+        CFRunLoopWakeUp(loop)
+    }
+
+    private func run() {
+        lock.lock()
+        runLoop = CFRunLoopGetCurrent()
+        let stopEarly = stopRequested
+        lock.unlock()
+        if !stopEarly {
+            outputStream.delegate = self
+            outputStream.schedule(in: .current, forMode: .default)
+            outputStream.open()
+            while !finished {
+                _ = RunLoop.current.run(mode: .default, before: .distantFuture)
+            }
+        }
+        finish()
+        lock.lock()
+        runLoop = nil
+        lock.unlock()
+    }
+
+    func stream(_ aStream: Stream, handle eventCode: Stream.Event) {
+        if eventCode.contains(.errorOccurred) || eventCode.contains(.endEncountered) {
+            finish()
+            return
+        }
+        if eventCode.contains(.hasSpaceAvailable) { writeAvailable() }
+    }
+
+    private func writeAvailable() {
+        while !finished && outputStream.hasSpaceAvailable {
+            if chunkOffset >= chunk.count {
+                do {
+                    guard let next = try nextChunk() else {
+                        finish()   // body complete: closing the write side is the end of the stream for the reader
+                        return
+                    }
+                    chunk = next
+                    chunkOffset = 0
+                } catch {
+                    onFailure(error)
+                    finish()
+                    return
+                }
+            }
+            let written = chunk.withUnsafeBytes { raw -> Int in
+                guard let base = raw.bindMemory(to: UInt8.self).baseAddress else { return 0 }
+                return outputStream.write(base + chunkOffset, maxLength: chunk.count - chunkOffset)
+            }
+            guard written > 0 else {
+                finish()   // the reader went away
+                return
+            }
+            chunkOffset += written
+        }
+    }
+
+    /// Next bytes to write, nil at the end of the body. A file shorter than announced throws.
+    private func nextChunk() throws -> Data? {
+        while true {
+            if let current = file {
+                if current.left > 0 {
+                    let data = try current.handle.read(upToCount: Int(min(Int64(Self.chunkSize), current.left))) ?? Data()
+                    guard !data.isEmpty else { throw CocoaError(.fileReadCorruptFile) }
+                    file = (current.handle, current.left - Int64(data.count))
+                    return data
+                }
+                try? current.handle.close()
+                file = nil
+            }
+            guard !remaining.isEmpty else { return nil }
+            switch remaining.removeFirst() {
+            case .data(let data):
+                if !data.isEmpty { return data }
+            case .file(let url, let length):
+                file = (try FileHandle(forReadingFrom: url), length)
+            }
+        }
+    }
+
+    private func finish() {
+        guard !finished else { return }
+        finished = true
+        outputStream.delegate = nil
+        outputStream.remove(from: .current, forMode: .default)
+        outputStream.close()
+        if let file { try? file.handle.close() }
+        file = nil
+        chunk = Data()
+        remaining = []
     }
 }

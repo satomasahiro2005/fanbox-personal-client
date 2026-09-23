@@ -15,11 +15,13 @@ final class NetModStubProtocol: URLProtocol {
     private static let lock = NSLock()
     private static var _handler: ((URLRequest) -> Stub)?
     private static var _requests: [URLRequest] = []
+    private static var _streamedBodies: [String: Data] = [:]
 
     static func install(_ handler: @escaping (URLRequest) -> Stub) {
         lock.lock()
         _handler = handler
         _requests = []
+        _streamedBodies = [:]
         lock.unlock()
     }
 
@@ -27,7 +29,15 @@ final class NetModStubProtocol: URLProtocol {
         lock.lock()
         _handler = nil
         _requests = []
+        _streamedBodies = [:]
         lock.unlock()
+    }
+
+    /// Bodies that reached the protocol as a stream (`uploadTask(withStreamedRequest:)`), read to the end, by URL path.
+    static func streamedBody(path: String) -> Data? {
+        lock.lock()
+        defer { lock.unlock() }
+        return _streamedBodies[path]
     }
 
     static var requests: [URLRequest] {
@@ -40,7 +50,22 @@ final class NetModStubProtocol: URLProtocol {
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
+        var streamed: Data?
+        if let stream = request.httpBodyStream {
+            // Read synchronously: the producer writes the other end of the bound pair on its own thread.
+            var data = Data()
+            var buffer = [UInt8](repeating: 0, count: 16 * 1024)
+            stream.open()
+            while true {
+                let n = stream.read(&buffer, maxLength: buffer.count)
+                if n <= 0 { break }
+                data.append(buffer, count: n)
+            }
+            stream.close()
+            streamed = data
+        }
         Self.lock.lock()
+        if let streamed, let path = request.url?.path { Self._streamedBodies[path] = streamed }
         Self._requests.append(request)
         let handler = Self._handler
         Self.lock.unlock()

@@ -2,14 +2,16 @@ import Foundation
 
 /// Multipart forms of the FANBOX media endpoints (docs/API.md §15) and the client-side limits of FANBOX's own uploader.
 ///
-/// - `post.addImage` `{postId, image}`, `post.addFile` `{postId, file}`, `post.addUrlEmbed` `{postId, url}`. Every upload
-///   is stored INTO an existing post, so a new post is created first (`post.create`).
-/// - Security (SPEC §38 / §39): these forms never contain the CSRF token. The web editor's legacy helper sends it as a
-///   `tt` form field; the same bundle's newer request layer sends the `X-CSRF-Token` header instead, and that is what this
-///   app does (`FanboxEndpoint.requiresCSRF` → the transport adds the header). An image / file body is streamed from a
-///   temporary file, and the token must never be written to disk.
+/// - `post.addImage` `{postId, image, tt}`, `post.addFile` `{postId, file, tt}`, `post.addUrlEmbed` `{postId, url, tt}`,
+///   in the order FANBOX's web editor builds them. Every upload is stored INTO an existing post, so a new post is created
+///   first (`post.create`).
+/// - CSRF: the token goes into the `tt` field exactly as the web editor sends it (docs/API.md §15.4), and the transport
+///   also sends the `X-CSRF-Token` header (`FanboxEndpoint.requiresCSRF`). The forms are never written to disk
+///   (SPEC §39): `FanboxAPIClient.sendMultipart` sends a field-only form from memory and streams a form with a file part
+///   (the file is read from disk while it is sent; the fields, token included, stay in memory).
 /// - Limits mirror the web client's own checks (not verified server limits): images jpeg / png / gif up to 50,000,000
-///   bytes, attachments from a fixed extension list up to 300,000,000 bytes. They are checked before anything is sent.
+///   bytes, attachments from a fixed extension list up to 300,000,000 bytes, link-card URLs up to
+///   `DraftPostMapping.maxLinkCardURLLength` characters. They are checked before anything is sent.
 enum FanboxUploadForm {
     enum Kind: Sendable {
         case image
@@ -26,7 +28,7 @@ enum FanboxUploadForm {
     static let fileExtensions: Set<String> = [
         "txt", "psd", "pdf", "zip", "jpg", "jpeg", "png", "gif", "wav", "mp3", "flac", "mp4", "mov", "avi", "clip",
     ]
-    static let maxURLLength = 2048
+    static let maxURLLength = DraftPostMapping.maxLinkCardURLLength
 
     static let limits = DraftMediaLimits(maxImageBytes: maxImageBytes, maxFileBytes: maxFileBytes,
                                          imageExtensions: imageExtensions, fileExtensions: fileExtensions)
@@ -69,25 +71,29 @@ enum FanboxUploadForm {
 
     // MARK: Forms
 
-    /// `{postId, image|file}`. No `tt` field: the token is sent in the header only.
-    static func uploadForm(kind: Kind, postID: String, fileURL: URL,
+    /// `{postId, image|file, tt}`. Sent as a streamed body (never written to disk: it holds the token).
+    static func uploadForm(kind: Kind, postID: String, fileURL: URL, csrfToken: String,
                            boundary: String = "FANBOXClientBoundary-\(UUID().uuidString)") throws -> MultipartFormData {
+        guard !csrfToken.isEmpty else { throw RemoteError.unauthorized }
         try validatePostID(postID)
         try validate(fileURL: fileURL, kind: kind)
         var form = MultipartFormData(boundary: boundary)
         form.addField(name: "postId", value: postID)
         form.addFile(name: kind.fieldName, fileURL: fileURL, fileName: fileURL.lastPathComponent,
                      mimeType: MultipartFormData.mimeType(forExtension: fileURL.pathExtension))
+        form.addField(name: MultipartFormData.csrfFieldName, value: csrfToken)
         return form
     }
 
-    /// `{postId, url}` (small; sent from memory).
-    static func urlEmbedForm(postID: String, url: String,
+    /// `{postId, url, tt}` (small; sent from memory).
+    static func urlEmbedForm(postID: String, url: String, csrfToken: String,
                              boundary: String = "FANBOXClientBoundary-\(UUID().uuidString)") throws -> MultipartFormData {
+        guard !csrfToken.isEmpty else { throw RemoteError.unauthorized }
         try validatePostID(postID)
         var form = MultipartFormData(boundary: boundary)
         form.addField(name: "postId", value: postID)
         form.addField(name: "url", value: try linkURL(url))
+        form.addField(name: MultipartFormData.csrfFieldName, value: csrfToken)
         return form
     }
 

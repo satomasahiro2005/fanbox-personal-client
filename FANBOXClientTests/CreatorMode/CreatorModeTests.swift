@@ -666,13 +666,16 @@ final class CreatorModeTests: XCTestCase {
         XCTAssertEqual(converted.width, 800)
         XCTAssertEqual(converted.height, 600)
 
-        // Small JPEG is kept as JPEG without resizing.
+        // Small upright JPEG is kept byte-for-byte (no GPS to strip), without resizing.
         let jpeg = try Self.makeImage(width: 120, height: 80, type: .jpeg)
         let kept = try DraftImageProcessor.process(jpeg)
         XCTAssertEqual(kept.type, .jpeg)
         XCTAssertFalse(kept.wasConverted)
         XCTAssertFalse(kept.wasResized)
         XCTAssertEqual(kept.width, 120)
+        XCTAssertEqual(kept.data, jpeg)
+        let taggedUp = try Self.makeImage(width: 120, height: 80, type: .jpeg, orientation: 1)
+        XCTAssertEqual(try DraftImageProcessor.process(taggedUp).data, taggedUp, "orientation 1 is already upright")
 
         // Large JPEG is downscaled, long edge = 4096.
         let tall = try Self.makeImage(width: 600, height: 4500, type: .jpeg)
@@ -689,6 +692,34 @@ final class CreatorModeTests: XCTestCase {
         }
 
         XCTAssertThrowsError(try DraftImageProcessor.process(Data("not an image".utf8)))
+    }
+
+    func testDraftImageProcessorRedrawsRotatedJPEGUpright() throws {
+        // Pixels stored 4032×3024 with orientation 6 (shown 3024×4032): FANBOX does not apply the tag.
+        let rotated = try Self.makeImage(width: 400, height: 300, type: .jpeg, orientation: 6)
+        let upright = try DraftImageProcessor.process(rotated)
+        XCTAssertEqual(upright.type, .jpeg, "kept as JPEG")
+        XCTAssertFalse(upright.wasConverted)
+        XCTAssertFalse(upright.wasResized)
+        XCTAssertEqual(upright.width, 300)
+        XCTAssertEqual(upright.height, 400)
+        XCTAssertNotEqual(upright.data, rotated, "re-rendered, not uploaded with the tag")
+        let source = try XCTUnwrap(CGImageSourceCreateWithData(upright.data as CFData, nil))
+        let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] ?? [:]
+        XCTAssertEqual((props[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue, 300, "the pixels themselves are upright")
+        XCTAssertEqual((props[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue, 400)
+        XCTAssertEqual((props[kCGImagePropertyOrientation] as? NSNumber)?.intValue ?? 1, 1)
+
+        // A mirrored PNG (when ImageIO can tag one) stays PNG.
+        let png = try Self.makeImage(width: 50, height: 20, type: .png, orientation: 2)
+        let pngProps = CGImageSourceCreateWithData(png as CFData, nil)
+            .flatMap { CGImageSourceCopyPropertiesAtIndex($0, 0, nil) as? [CFString: Any] } ?? [:]
+        if (pngProps[kCGImagePropertyOrientation] as? NSNumber)?.intValue == 2 {
+            let flipped = try DraftImageProcessor.process(png)
+            XCTAssertEqual(flipped.type, .png)
+            XCTAssertEqual(flipped.width, 50)
+            XCTAssertNotEqual(flipped.data, png)
+        }
     }
 
     // MARK: Pure helpers
@@ -737,7 +768,9 @@ final class CreatorModeTests: XCTestCase {
 
     // MARK: Image fixtures
 
-    static func makeImage(width: Int, height: Int, type: UTType) throws -> Data {
+    /// `orientation`: EXIF orientation tag written with the pixels as they are (1 = up; 6 = stored rotated, as an iPhone
+    /// "Most Compatible" portrait photo).
+    static func makeImage(width: Int, height: Int, type: UTType, orientation: Int? = nil) throws -> Data {
         let space = CGColorSpaceCreateDeviceRGB()
         guard let ctx = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0, space: space,
                                   bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { throw DraftMediaError.encodingFailed }
@@ -750,7 +783,8 @@ final class CreatorModeTests: XCTestCase {
         guard let dest = CGImageDestinationCreateWithData(out, type.identifier as CFString, 1, nil) else {
             throw DraftMediaError.encodingFailed
         }
-        CGImageDestinationAddImage(dest, image, nil)
+        let properties: [CFString: Any]? = orientation.map { [kCGImagePropertyOrientation: $0] }
+        CGImageDestinationAddImage(dest, image, properties as CFDictionary?)
         guard CGImageDestinationFinalize(dest) else { throw DraftMediaError.encodingFailed }
         return out as Data
     }

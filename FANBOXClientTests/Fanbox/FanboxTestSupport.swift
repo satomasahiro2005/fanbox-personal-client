@@ -23,12 +23,44 @@ final class FanboxFakeHTTPClient: HTTPClient, @unchecked Sendable {
     private var _uploadBodies: [Data] = []
     private var _uploadRecords: [UploadRecord] = []
     private var _accountIDs: [String?] = []
+    private var _holdsUploads = false
+    private var _transportErrors: [String: Error] = [:]
+    private var heldUploads: [HeldUpload] = []
+    private var heldWaiters: [CheckedContinuation<Void, Never>] = []
 
-    /// One `upload` call: the endpoint, the body read from the file, and the body file's URL (to check it was removed).
+    /// One `upload` call: the endpoint and the body (read from the body file, or assembled from a streamed body).
+    /// `fileURL` is the body file of a file upload (to check it was removed); nil for a streamed body, which has none.
     struct UploadRecord {
         var endpointKey: String
         var body: Data
-        var fileURL: URL
+        var fileURL: URL?
+        /// Streamed body: the length it announced (`Content-Length`).
+        var declaredLength: Int64?
+    }
+
+    /// Makes every request with this endpoint key fail in the transport (e.g. `URLError(.notConnectedToInternet)`), after
+    /// being recorded. nil clears it.
+    func failTransport(_ key: String, with error: Error?) {
+        lock.withLock { _transportErrors[key] = error }
+    }
+
+    /// While true, streamed uploads are recorded and then wait until the calling task is cancelled (an upload paused or
+    /// cancelled in the middle), then throw `CancellationError`.
+    var holdsUploads: Bool {
+        get { lock.withLock { _holdsUploads } }
+        set { lock.withLock { _holdsUploads = newValue } }
+    }
+
+    /// Returns once an upload is being held (see `holdsUploads`).
+    func waitForHeldUpload() async {
+        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+            let ready = lock.withLock { () -> Bool in
+                if heldUploads.contains(where: { !$0.isFinished }) { return true }
+                heldWaiters.append(c)
+                return false
+            }
+            if ready { c.resume() }
+        }
     }
 
     var requests: [HTTPRequest] { lock.withLock { _requests } }
@@ -73,7 +105,11 @@ final class FanboxFakeHTTPClient: HTTPClient, @unchecked Sendable {
     }
 
     func send(_ request: HTTPRequest, accountID: String?) async throws -> HTTPResponse {
-        respond(to: request, accountID: accountID)
+        if let error = lock.withLock({ _transportErrors[request.endpointKey] }) {
+            lock.withLock { _requests.append(request) }
+            throw error
+        }
+        return respond(to: request, accountID: accountID)
     }
 
     func download(_ request: HTTPRequest, accountID: String?, progress: (@Sendable (Double) -> Void)?) async throws -> (URL, HTTPResponse) {
@@ -86,6 +122,62 @@ final class FanboxFakeHTTPClient: HTTPClient, @unchecked Sendable {
         lock.withLock { _uploadRecords.append(UploadRecord(endpointKey: request.endpointKey, body: body, fileURL: bodyFileURL)) }
         progress?(1)
         return respond(to: request, accountID: accountID, uploadBody: body)
+    }
+
+    func upload(_ request: HTTPRequest, streamedBody: HTTPStreamedBody, accountID: String?,
+                progress: (@Sendable (Double) -> Void)?) async throws -> HTTPResponse {
+        let body = try streamedBody.assembled()
+        let hold = lock.withLock { () -> HeldUpload? in
+            _uploadRecords.append(UploadRecord(endpointKey: request.endpointKey, body: body, fileURL: nil,
+                                               declaredLength: streamedBody.length))
+            guard _holdsUploads else { return nil }
+            let held = HeldUpload()
+            heldUploads.append(held)
+            return held
+        }
+        if let hold {
+            let waiters = lock.withLock { () -> [CheckedContinuation<Void, Never>] in
+                let w = heldWaiters
+                heldWaiters = []
+                return w
+            }
+            waiters.forEach { $0.resume() }
+            try await hold.waitUntilCancelled()
+        }
+        progress?(1)
+        return respond(to: request, accountID: accountID, uploadBody: body)
+    }
+}
+
+/// One upload held by `FanboxFakeHTTPClient.holdsUploads` until its task is cancelled.
+final class HeldUpload: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Void, Error>?
+    private var cancelled = false
+    private var finished = false
+
+    var isFinished: Bool { lock.withLock { finished } }
+
+    func waitUntilCancelled() async throws {
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
+                let resumeNow = lock.withLock { () -> Bool in
+                    if cancelled { return true }
+                    continuation = c
+                    return false
+                }
+                if resumeNow { c.resume(throwing: CancellationError()) }
+            }
+        } onCancel: {
+            let pending = lock.withLock { () -> CheckedContinuation<Void, Error>? in
+                cancelled = true
+                finished = true
+                let c = continuation
+                continuation = nil
+                return c
+            }
+            pending?.resume(throwing: CancellationError())
+        }
     }
 }
 

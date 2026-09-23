@@ -238,6 +238,19 @@ final class RoutingHTTPClient: CredentialBackedHTTPClient, SessionRevoking, @unc
         return response
     }
 
+    /// Streamed bodies: native only (budgeted and classified like `send`).
+    func upload(_ request: HTTPRequest, streamedBody: HTTPStreamedBody, accountID: String?,
+                progress: (@Sendable (Double) -> Void)?) async throws -> HTTPResponse {
+        let host = request.url.host
+        if let remaining = await gate.breakerRemaining(accountID: accountID, endpointKey: request.endpointKey, transport: .native) {
+            throw RemoteError.edgeBlocked(retryAfter: remaining)
+        }
+        try await gate.admit(endpointKey: request.endpointKey, host: host, priority: request.priority)
+        let response = try await native.upload(request, streamedBody: streamedBody, accountID: accountID, progress: progress)
+        _ = await classify(response, request: request, accountID: accountID, transport: .native)
+        return response
+    }
+
     // MARK: - SessionRevoking
 
     func revokeSession(accountID: String) async {

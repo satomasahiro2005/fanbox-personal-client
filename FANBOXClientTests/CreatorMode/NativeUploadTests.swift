@@ -97,7 +97,9 @@ final class NativeUploadTests: XCTestCase {
         XCTAssertEqual(receipt.postID, "9100")
         XCTAssertTrue(receipt.sentPublished)
         XCTAssertTrue(receipt.webItems.isEmpty)
-        XCTAssertEqual(keys, ["post.create", "post.addImage", "post.addImage", "post.addFile", "post.addUrlEmbed",
+        // post.create → the new post's revision (baseline) → uploads → link card → post.update (which re-reads the post)
+        // → the revision after the save.
+        XCTAssertEqual(keys, ["post.create", "post.getEditable", "post.addImage", "post.addImage", "post.addFile", "post.addUrlEmbed",
                               "post.getEditable", "post.update", "post.getEditable"])
         XCTAssertEqual(try lastUpdateBodyJSON(), [
             ["type": "p", "text": "本文"],
@@ -120,14 +122,14 @@ final class NativeUploadTests: XCTestCase {
         XCTAssertEqual(h.http.requests(for: "post.addUrlEmbed").first?.priority, .interactiveWrite)
         XCTAssertEqual(h.http.requests(for: "post.update").first?.priority, .interactiveWrite)
 
-        // Upload bodies: postId + the display name, never the token.
+        // Upload bodies: postId + the display name + tt, streamed (no body file ever holds the token).
         let uploads = h.http.uploadRecords
         XCTAssertEqual(uploads.map(\.endpointKey), ["post.addImage", "post.addImage", "post.addFile"])
         for record in uploads {
             let body = String(decoding: record.body, as: UTF8.self)
             XCTAssertTrue(body.contains("name=\"postId\"\r\n\r\n9100\r\n"))
-            XCTAssertNil(record.body.range(of: Data("tok-abc".utf8)), "CSRF token never in a body file")
-            XCTAssertFalse(FileManager.default.fileExists(atPath: record.fileURL.path))
+            XCTAssertTrue(body.contains("name=\"tt\"\r\n\r\ntok-abc\r\n"))
+            XCTAssertNil(record.fileURL, "streamed: no body file")
         }
         XCTAssertTrue(String(decoding: uploads[2].body, as: UTF8.self).contains("filename=\"資料.pdf\""), "attachment keeps its name")
 
@@ -268,15 +270,18 @@ final class NativeUploadTests: XCTestCase {
         h.http.stub("post.getEditable", json: FanboxFixtures.envelope(FixCreatorFixtures.editable(id: "9400")))
         h.http.stub("post.update", json: #"{"body":{"post":{"id":"9400","status":"draft"}}}"#)
         _ = try await h.drafts.send(draftID: draft.id, publish: false).get()
-        XCTAssertEqual(keys, ["post.create", "post.addImage", "post.getEditable", "post.update", "post.getEditable"])
+        XCTAssertEqual(keys, ["post.create", "post.getEditable", "post.addImage", "post.getEditable", "post.update", "post.getEditable"])
         XCTAssertEqual(h.uploads.jobs(draftID: draft.id).map(\.state), [.completed])
 
-        // Once the post exists, a manual start uploads straight into it.
+        // Once the post exists, a manual start uploads straight into it after checking the post's revision, and adopts
+        // the revision the upload produced.
         try addMedia(.image, name: "b.png", to: draft)
         h.http.stub("post.addImage", json: Self.image("imgB", post: "9400"))
+        let before = h.http.requests.count
         h.uploads.enqueue(draftID: draft.id)
         await h.uploads.run()
         XCTAssertEqual(h.uploads.jobs(draftID: draft.id).map(\.state), [.completed, .completed])
+        XCTAssertEqual(h.http.requests.dropFirst(before).map(\.endpointKey), ["post.getEditable", "post.addImage", "post.getEditable"])
         XCTAssertEqual(h.http.requests(for: "post.create").count, 1)
     }
 
@@ -339,6 +344,221 @@ final class NativeUploadTests: XCTestCase {
         XCTAssertNil(body["blocks"])
         XCTAssertEqual(draft.orderedBlocks.filter { $0.kind == .text }.map(\.text), ["一枚目の説明", "二段落目"],
                        "text blocks stay paragraphs (never split by line) in an image post")
+    }
+
+    // MARK: Revision baseline (the app's own writes are not edits made elsewhere)
+
+    /// Editable article `id` at revision `updatedAt` (status draft).
+    private static func editable(_ id: String, updatedAt: String, status: String = "draft", type: String = "article") -> String {
+        FanboxFixtures.envelope(#"{"id":"\#(id)","type":"\#(type)","title":"T","status":"\#(status)","feeRequired":0,"tags":[],"#
+            + #""commentingPermissionScope":"everyone","updatedAt":"\#(updatedAt)","body":{"blocks":[{"type":"p","text":"本文"}],"#
+            + #""imageMap":{},"urlEmbedMap":{}}}"#)
+    }
+
+    func testRetryAfterOwnUploadsBumpedTheRevisionIsNotAConflict() async throws {
+        // FANBOX may bump updatedAt for every asset stored into the post: 10:00 → 10:05 after the first send's uploads.
+        h.http.stub("post.getEditable", json: Self.editable("p7", updatedAt: "2026-09-06T10:00:00+09:00"))   // import
+        h.http.stub("post.getEditable", json: Self.editable("p7", updatedAt: "2026-09-06T10:00:00+09:00"))   // send 1 check
+        h.http.stub("post.getEditable", json: Self.editable("p7", updatedAt: "2026-09-06T10:05:00+09:00"))   // after the uploads
+        h.http.stub("post.addImage", json: Self.image("imgA", post: "p7"))
+        h.http.stub("post.addImage", status: 500, json: #"{"error":"general_error"}"#)
+        h.http.stub("post.addImage", json: Self.image("imgB", post: "p7"))
+        h.http.stub("post.update", json: #"{"body":{"post":{"id":"p7","status":"draft"}}}"#)
+        let draft = try await h.drafts.importRemotePost(postID: "p7", accountID: h.account.id)
+        try addMedia(.image, name: "a.png", to: draft)
+        try addMedia(.image, name: "b.png", to: draft)
+
+        let first = await h.drafts.send(draftID: draft.id, publish: false)
+        guard case .failure(.invalidRequest) = first else { return XCTFail("expected the upload failure, got \(first)") }
+        XCTAssertEqual(draft.remoteUpdatedAt, FanboxFixtures.date("2026-09-06T10:05:00+09:00"),
+                       "the revision after the send's own uploads becomes the baseline")
+
+        let receipt = try await h.drafts.send(draftID: draft.id, publish: false).get()
+        XCTAssertEqual(receipt.postID, "p7")
+        XCTAssertEqual(h.http.uploadRecords(for: "post.addImage").count, 3, "a.png once, b.png twice")
+        XCTAssertEqual(try lastUpdateBodyJSON(), [["type": "p", "text": "本文"], ["type": "image", "imageId": "imgA"],
+                                                  ["type": "image", "imageId": "imgB"]])
+    }
+
+    func testCreatedPostGetsABaselineSoAWebEditBetweenRetriesIsDetected() async throws {
+        h.http.stub("post.create", json: #"{"body":{"postId":"9500"}}"#)
+        h.http.stub("post.getEditable", json: Self.editable("9500", updatedAt: "2026-09-06T10:00:00+09:00"))
+        h.http.stub("post.addImage", status: 500, json: #"{"error":"general_error"}"#)
+        let draft = h.drafts.createDraft(accountID: h.account.id)
+        draft.title = "T"
+        try addMedia(.image, name: "a.png", to: draft)
+
+        let first = await h.drafts.send(draftID: draft.id, publish: false)
+        guard case .failure = first else { return XCTFail("\(first)") }
+        XCTAssertEqual(draft.remotePostID, "9500")
+        XCTAssertEqual(draft.remoteUpdatedAt, FanboxFixtures.date("2026-09-06T10:00:00+09:00"), "read right after post.create")
+
+        // The creator edits the FANBOX draft in the web editor before retrying.
+        h.http.stub("post.getEditable", json: Self.editable("9500", updatedAt: "2026-09-06T11:00:00+09:00"))
+        let second = await h.drafts.send(draftID: draft.id, publish: false)
+        XCTAssertEqual(second.failureValue, .invalidRequest(DraftService.conflictMessage))
+        XCTAssertEqual(h.http.uploadRecords(for: "post.addImage").count, 1, "nothing is uploaded over an edit made elsewhere")
+        XCTAssertTrue(h.http.requests(for: "post.update").isEmpty)
+    }
+
+    func testQueuePausesUploadsIntoAPostEditedElsewhere() async throws {
+        h.http.stub("post.getEditable", json: Self.editable("p8", updatedAt: "2026-09-06T10:00:00+09:00"))
+        let draft = try await h.drafts.importRemotePost(postID: "p8", accountID: h.account.id)
+        try addMedia(.image, name: "a.png", to: draft)
+        h.http.stub("post.getEditable", json: Self.editable("p8", updatedAt: "2026-09-07T09:00:00+09:00"))
+        h.uploads.enqueue(draftID: draft.id)
+        await h.uploads.run()
+
+        let job = try XCTUnwrap(h.uploads.jobs(draftID: draft.id).first)
+        XCTAssertEqual(job.state, .paused, "never a failure; the send reports the conflict")
+        XCTAssertEqual(job.lastError, UploadQueue.conflictMessage)
+        XCTAssertTrue(h.http.uploadRecords.isEmpty)
+        XCTAssertEqual(draft.remoteUpdatedAt, FanboxFixtures.date("2026-09-06T10:00:00+09:00"), "the baseline is kept")
+    }
+
+    // MARK: Uploads the app could never save
+
+    func testQueueNeverUploadsIntoAPostItCannotSave() async throws {
+        // A video post is blocked from native updates: its uploads would stay behind on FANBOX unused.
+        h.http.stub("post.getEditable", json: Self.editable("v1", updatedAt: "2026-09-06T10:00:00+09:00", type: "video"))
+        let video = try await h.drafts.importRemotePost(postID: "v1", accountID: h.account.id)
+        XCTAssertNotNil(video.nativeUpdateBlocker)
+        try addMedia(.image, name: "a.png", to: video)
+        h.uploads.enqueue(draftID: video.id)
+        await h.uploads.run()
+        XCTAssertEqual(h.uploads.jobs(draftID: video.id).map(\.state), [.paused])
+        XCTAssertEqual(h.uploads.jobs(draftID: video.id).first?.lastError, UploadQueue.webOnlyMessage)
+
+        // An image-type post holds images, never files: the file waits, the image uploads.
+        h.http.stub("post.getEditable", json: Self.editable("i1", updatedAt: "2026-09-06T10:00:00+09:00", type: "image"))
+        let imagePost = try await h.drafts.importRemotePost(postID: "i1", accountID: h.account.id)
+        XCTAssertNil(imagePost.nativeUpdateBlocker)
+        try addMedia(.file, name: "a.zip", to: imagePost)
+        try addMedia(.image, name: "b.png", to: imagePost)
+        h.http.stub("post.addImage", json: Self.image("i2", post: "i1"))
+        h.uploads.enqueue(draftID: imagePost.id)
+        await h.uploads.run()
+        let jobs = h.uploads.jobs(draftID: imagePost.id)
+        XCTAssertEqual(jobs.map(\.state), [.paused, .completed])
+        XCTAssertTrue(jobs[0].lastError?.contains("「画像」形式の投稿にはファイルを保存できません") ?? false, jobs[0].lastError ?? "")
+        XCTAssertTrue(h.http.uploadRecords(for: "post.addFile").isEmpty)
+        XCTAssertEqual(h.http.uploadRecords(for: "post.addImage").count, 1)
+    }
+
+    // MARK: Input refused before a FANBOX draft is created
+
+    func testMissingLocalFileAndOverlongLinkAreRefusedBeforePostCreate() async throws {
+        let draft = h.drafts.createDraft(accountID: h.account.id)
+        draft.title = "T"
+        let image = try addMedia(.image, name: "a.png", to: draft)
+        h.mediaStore.removeFile(draftID: draft.id, fileName: try XCTUnwrap(image.localFileName))
+        let plan = try XCTUnwrap(h.drafts.plan(draftID: draft.id, publish: false))
+        XCTAssertFalse(plan.canSend)
+        XCTAssertTrue(plan.blockers.first?.contains("a.png") ?? false, plan.blockers.joined())
+        let refused = await h.drafts.send(draftID: draft.id, publish: false)
+        guard case .failure(.invalidRequest) = refused else { return XCTFail("\(refused)") }
+        XCTAssertTrue(h.http.requests.isEmpty, "no post.create for a file that cannot be uploaded")
+        h.drafts.deleteBlock(image)
+
+        let long = addLink("https://example.com/" + String(repeating: "x", count: DraftPostMapping.maxLinkCardURLLength), to: draft)
+        XCTAssertTrue(h.drafts.plan(draftID: draft.id, publish: false)?.blockers.first?.contains("長すぎます") ?? false)
+        let refusedLink = await h.drafts.send(draftID: draft.id, publish: false)
+        guard case .failure(.invalidRequest) = refusedLink else { return XCTFail("\(refusedLink)") }
+        XCTAssertTrue(h.http.requests.isEmpty)
+        long.url = "https://example.com/" + String(repeating: "x", count: DraftPostMapping.maxLinkCardURLLength - 20)
+        XCTAssertTrue(h.drafts.plan(draftID: draft.id, publish: false)?.canSend ?? false, "2048 characters are fine")
+    }
+
+    func testOfflineLinkCardFailureStillSaysADraftWasCreated() async throws {
+        h.http.stub("post.create", json: #"{"body":{"postId":"9600"}}"#)
+        h.http.stub("post.getEditable", json: Self.editable("9600", updatedAt: "2026-09-06T10:00:00+09:00"))
+        h.http.failTransport("post.addUrlEmbed", with: URLError(.notConnectedToInternet))
+        let draft = h.drafts.createDraft(accountID: h.account.id)
+        draft.title = "T"
+        _ = addLink("https://example.com/a", to: draft)
+
+        let result = await h.drafts.send(draftID: draft.id, publish: false)
+        XCTAssertEqual(result.failureValue, .offline)
+        XCTAssertEqual(draft.remotePostID, "9600")
+        XCTAssertTrue(draft.lastError?.contains(DraftService.createdDraftNote) ?? false, draft.lastError ?? "")
+    }
+
+    // MARK: Cleanup after failed / paused uploads
+
+    private var multipartBodyFiles: [String] {
+        ((try? FileManager.default.contentsOfDirectory(atPath: FileManager.default.temporaryDirectory.path)) ?? [])
+            .filter { $0.hasPrefix(MultipartFormData.temporaryFilePrefix) }
+    }
+
+    private var stagingEntries: [String] {
+        (try? FileManager.default.contentsOfDirectory(atPath: h.mediaStore.uploadStagingDirectory.path)) ?? []
+    }
+
+    func testFailedUploadRemovesItsStagingLinkAndWritesNoBodyFile() async throws {
+        h.http.stub("post.getEditable", json: Self.editable("p9", updatedAt: "2026-09-06T10:00:00+09:00"))
+        h.http.stub("post.addFile", status: 500, json: #"{"error":"general_error"}"#)
+        let draft = try await h.drafts.importRemotePost(postID: "p9", accountID: h.account.id)
+        try addMedia(.file, name: "a.zip", to: draft)
+        let before = multipartBodyFiles.count
+        h.uploads.enqueue(draftID: draft.id)
+        await h.uploads.run()
+
+        XCTAssertEqual(h.uploads.jobs(draftID: draft.id).map(\.state), [.failed])
+        XCTAssertEqual(h.http.uploadRecords(for: "post.addFile").count, 1, "a 500 is not retried")
+        XCTAssertTrue(stagingEntries.isEmpty, "the per-job staging link is removed after the failure")
+        XCTAssertEqual(multipartBodyFiles.count, before, "no body file was written")
+    }
+
+    func testPausingAnUploadMidwayLeavesItPausedAndCleansUp() async throws {
+        h.http.stub("post.getEditable", json: Self.editable("p10", updatedAt: "2026-09-06T10:00:00+09:00"))
+        let draft = try await h.drafts.importRemotePost(postID: "p10", accountID: h.account.id)
+        try addMedia(.image, name: "a.png", to: draft)
+        let before = multipartBodyFiles.count
+        h.http.holdsUploads = true
+        let job = try XCTUnwrap(h.uploads.enqueue(draftID: draft.id).first)
+        let run = Task { await h.uploads.run() }
+
+        await h.http.waitForHeldUpload()
+        XCTAssertEqual(job.state, .uploading)
+        XCTAssertFalse(stagingEntries.isEmpty, "the staging link exists while the upload runs")
+        h.uploads.pause(jobID: job.id)
+        await run.value
+
+        XCTAssertEqual(job.state, .paused, "paused, not failed")
+        XCTAssertEqual(job.progress, 0)
+        XCTAssertTrue(stagingEntries.isEmpty, "the staging link is removed when the upload is cancelled")
+        XCTAssertEqual(multipartBodyFiles.count, before, "no body file was written")
+        XCTAssertEqual(h.http.uploadRecords(for: "post.addImage").count, 1)
+    }
+
+    func testEnqueueReusesACompletedUploadOnlyForTheSamePost() throws {
+        /// A draft on `post` whose image was uploaded into `uploadedInto`, but whose block lost the write-back (app killed
+        /// at the wrong moment).
+        func draftWithLostWriteBack(post: String, uploadedInto: String) throws -> (Draft, DraftBlock) {
+            let draft = h.drafts.createDraft(accountID: h.account.id)
+            draft.title = "T"
+            draft.remotePostID = post
+            let block = try addMedia(.image, name: "a.png", to: draft)
+            let done = UploadJob(draftID: draft.id, draftBlockID: block.id, accountID: h.account.id, fileName: "a.png",
+                                 localFileName: try XCTUnwrap(block.localFileName), kind: .image, bytesTotal: 10, order: block.order)
+            done.state = .completed
+            done.remoteMediaID = "img-\(uploadedInto)"
+            done.remoteMedia = RemoteUploadResult(mediaID: "img-\(uploadedInto)", url: nil, postID: uploadedInto)
+            h.store.context.insert(done)
+            h.store.save()
+            return (draft, block)
+        }
+
+        // Same post: the completed upload is reused, nothing is queued.
+        let (same, sameBlock) = try draftWithLostWriteBack(post: "A", uploadedInto: "A")
+        XCTAssertEqual(h.uploads.enqueue(draftID: same.id).map(\.state), [.completed])
+        XCTAssertEqual(sameBlock.remoteMediaID, "img-A")
+
+        // Another post: an asset stored into A can never be referenced by B's save, so the image is uploaded again.
+        let (other, otherBlock) = try draftWithLostWriteBack(post: "B", uploadedInto: "A")
+        let jobs = h.uploads.enqueue(draftID: other.id)
+        XCTAssertEqual(Set(jobs.map(\.state)), [.completed, .queued])
+        XCTAssertNil(otherBlock.remoteMediaID, "not reused across posts")
     }
 
     // MARK: Demo parity

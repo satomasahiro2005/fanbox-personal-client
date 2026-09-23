@@ -131,8 +131,13 @@ final class FixTransportIntegrationTests: XCTestCase {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("fixtransport-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
+        // Updated for streamed uploads: a form carrying the CSRF token (`tt`) is refused before anything is written.
+        var secret = MultipartFormData()
+        secret.addField(name: "tt", value: "secret")
+        XCTAssertThrowsError(try secret.writeToTemporaryFile(directory: dir))
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: dir.path), [])
         var form = MultipartFormData()
-        form.addField(name: "tt", value: "secret")
+        form.addField(name: "postId", value: "1")
         XCTAssertFalse(form.hasFileParts)
         let file = try form.writeToTemporaryFile(directory: dir)
         let protection = try FileManager.default.attributesOfItem(atPath: file.path)[.protectionKey] as? FileProtectionType

@@ -556,8 +556,29 @@ final class FixCreatorFanboxRoundTripTests: XCTestCase {
         XCTAssertTrue(body.contains(#"{"embedId":"em1","type":"embed"}"#))
         XCTAssertTrue(body.contains("name=\"status\"\r\n\r\npublished\r\n"))
         XCTAssertTrue(body.contains("name=\"commentingPermissionScope\"\r\n\r\nnone\r\n"), "the post's own setting is kept")
-        XCTAssertTrue(body.contains("name=\"tags\"\r\n\r\na\r\n"))
+        XCTAssertTrue(body.contains("name=\"tags\"\r\n\r\n[\"a\",\"b\"]\r\n"), "one field holding the JSON array")
         XCTAssertTrue(body.contains("name=\"feeRequired\"\r\n\r\n500\r\n"))
+    }
+
+    func testUnpublishingALivePostSendsArchived() async throws {
+        h.http.stub("post.getEditable", json: FanboxFixtures.envelope(FixCreatorFixtures.editable(id: "p6", status: "published")))
+        h.http.stub("post.update", json: #"{"body":{"post":{"id":"p6","status":"archived"}}}"#)
+        let draft = try await h.drafts.importRemotePost(postID: "p6", accountID: h.account.id)
+        XCTAssertEqual(draft.remoteStatus, .published)
+        let plan = try XCTUnwrap(h.drafts.plan(draftID: draft.id, publish: false))
+        XCTAssertTrue(plan.unpublishes)
+
+        // Still published when the send checks it and when post.update re-reads it; archived afterwards.
+        let published = FanboxFixtures.envelope(FixCreatorFixtures.editable(id: "p6", status: "published"))
+        h.http.stub("post.getEditable", json: published)
+        h.http.stub("post.getEditable", json: published)
+        h.http.stub("post.getEditable", json: FanboxFixtures.envelope(FixCreatorFixtures.editable(id: "p6", status: "archived")))
+        _ = try await h.drafts.send(draftID: draft.id, publish: false, allowUnpublish: true).get()
+        let body = try XCTUnwrap(h.updateBodies.last)
+        XCTAssertTrue(body.contains("name=\"status\"\r\n\r\narchived\r\n"), "a published post only moves to published / archived")
+        XCTAssertFalse(body.contains("name=\"status\"\r\n\r\ndraft\r\n"))
+        XCTAssertEqual(draft.status, .readyToPublish)
+        XCTAssertEqual(draft.remoteStatus, .unknown, "archived is not modelled; a later take-down asks again")
     }
 
     func testEditedStyledParagraphKeepsShiftedStyles() async throws {
@@ -591,7 +612,7 @@ final class FixCreatorFanboxRoundTripTests: XCTestCase {
         _ = try await h.drafts.send(draftID: draft.id, publish: true, acceptWarnings: true).get()
         let body = try XCTUnwrap(h.updateBodies.last)
         XCTAssertTrue(body.contains("name=\"commentingPermissionScope\"\r\n\r\nsupporters\r\n"))
-        XCTAssertTrue(body.contains("name=\"tags\"\r\n\r\n既存タグ\r\n"))
+        XCTAssertTrue(body.contains("name=\"tags\"\r\n\r\n[\"既存タグ\"]\r\n"))
     }
 
     func testUnsupportedContentBlocksNativeUpdate() async throws {
@@ -680,7 +701,9 @@ final class FixCreatorFanboxRoundTripTests: XCTestCase {
         XCTAssertTrue(body.contains(#"[{"text":"本文","type":"p"},{"imageId":"im-new","type":"image"}]"#), body)
         XCTAssertTrue(body.contains("name=\"status\"\r\n\r\ndraft\r\n"), "never published unfinished")
         XCTAssertEqual(draft.remotePostID, "9002")
-        XCTAssertEqual(h.http.requests.map(\.endpointKey).filter { $0 != "www.metadata" }.prefix(2), ["post.create", "post.addImage"])
+        // Updated for the revision baseline: the new post is read once right after post.create.
+        XCTAssertEqual(h.http.requests.map(\.endpointKey).filter { $0 != "www.metadata" }.prefix(3),
+                       ["post.create", "post.getEditable", "post.addImage"])
         XCTAssertTrue(h.uploads.jobs(draftID: draft.id).allSatisfy { $0.state == .completed })
     }
 }
