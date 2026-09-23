@@ -176,6 +176,13 @@ Rules:
 
 These POSTs need the token: `post.likePost`, `post.addComment`, `post.deleteComment`, `post.likeComment`, `follow.create`, `follow.delete`, `notification.updateSettings`, `newsletter.markAsReadAll`, `post.create`, `post.delete`, and `post.update` (as `tt`).
 
+**What the app does (unverified against the live service):** SPEC §39 allows the Keychain or memory, so the app keeps
+the token in the account's Keychain credential plus an in-memory cache; the hidden WebView transport (§1.11) keeps its
+page's token in memory only. The token is dropped when FANBOXSESSID rotates. A missing token is fetched before a write,
+and a write rejected with 403 / 400 is retried once after a refresh, only if the token changed. `x-csrf-token` is only
+ever sent to fanbox.cc hosts. The `post.update` form is built in memory, so `tt` is never written to a file. Details:
+[SECURITY.md](SECURITY.md#csrf-token).
+
 ### 1.5 Response envelope
 
 ```jsonc
@@ -199,7 +206,7 @@ These POSTs need the token: `post.likePost`, `post.addComment`, `post.deleteComm
 | 400 | Missing `Origin`; bad parameters; logged out on some endpoints (`user.countUnreadMessages` gives `general_error`); missing cookie (konnokai); historically `post.listCreator` with `limit` > 300. | Check headers. Do not retry blindly. |
 | 401 | Not logged in (`post.listHome`), invalid or expired FANBOXSESSID, or a session revoked after bot detection (hareku #96). | Session expired → re-login in WebView. |
 | 403 `application/json` | FANBOX refused the resource: not entitled, or unavailable to this account. | Show the "not available" state. |
-| 403 `text/html` | **Cloudflare**, not FANBOX. Signs: `Server: cloudflare`, a `Cf-Ray` header, `cf-mitigated: challenge`, or markers such as `just a moment`, `cf-chl-`, `challenge-platform`, `attention required`, `cloudflare ray id`. Since 2026-04 the body can also be an HTML page titled "ブロックされました". | **Does not by itself mean the session is invalid** (fankt check-fanbox-api skill). Switch to the WebView transport (§1.11). |
+| 403 `text/html` | **Cloudflare**, not FANBOX. Signs: `Server: cloudflare`, a `Cf-Ray` header, `cf-mitigated: challenge`, or markers such as `just a moment`, `cf-chl-`, `challenge-platform`, `attention required`, `cloudflare ray id`. Since 2026-04 the body can also be an HTML page titled "ブロックされました" ("Blocked"). | **Does not by itself mean the session is invalid** (fankt check-fanbox-api skill). Switch to the WebView transport (§1.11). |
 | 404 | Not found. `legacy/manage/supporter/user` also returns 404 for "not a supporter". | — |
 | 429 | Rate limited, sometimes with `Retry-After` given in seconds or as an HTTP-date. fankt and piep parse both. In a browser the 429 comes from Cloudflare without CORS headers, so `fetch` only sees `TypeError: Failed to fetch` (PFD, 2025-07). `Retry-After` is also unreadable from a content-script fetch (ValerianDillon). | Back off globally (§1.8). |
 | 5xx | Server error. On downloads, `500 text/plain "failed to thumbnailing"` for very large originals. | Retry later; for images, fall back to `thumbnailUrl` (hareku). |
@@ -284,12 +291,21 @@ No source tests iOS. The following follows from §1.7:
 **Implemented (unverified against the live service):** `RoutingHTTPClient` (Core/Network) sends `post.info` and
 `post.getEditable` through the account's hidden WebView first while the app is in the foreground (`WebFetchHostPool`,
 Core/Web: same `WKWebsiteDataStore` as the account's web sessions, page `https://www.fanbox.cc/`, `fetch()` with
-`credentials: "include"` in an isolated content world, logged-in user checked against the account first). Every other
-call goes native first and is re-sent through the WebView only when the native answer is an edge block
-(`EdgeBlockDetector`: 403 / 503 with `cf-mitigated`, a Cloudflare HTML page, or a challenge / "ブロックされました"
-marker); that endpoint then prefers the WebView for 24 h. In the background only the native transport runs. A 429
-pauses every call device-wide for Retry-After (6 min without one); edge blocks trip breakers instead of being retried
-per account (`RateGate`). Research Mode has an Auto / Native only / WebView only switch to check the live behaviour.
+`credentials: "include"` in an isolated content world, logged-in user checked against the account first). The result
+comes back as the return value of `callAsyncJavaScript`, not through a script message handler. Other creator-side
+endpoints are not web-first. Every other call goes native first and is re-sent through the WebView only when the
+native answer is an edge block (`EdgeBlockDetector`: 403 / 503 with `cf-mitigated`, a Cloudflare HTML page, or a
+challenge / "ブロックされました" marker); that endpoint then prefers the WebView for 24 h. A request goes to the second
+transport only when the first one did not reach FANBOX (a native edge block, or a WebView that could not be used), so
+writes are never sent twice; a WebView write with an unknown outcome is not retried. Downloads and file uploads are
+native only. In the background only the native transport runs.
+
+`RateGate` spaces `post.info` / `post.getEditable` at least 1 s apart device-wide (other calls 0.2 s unless
+interactive) and lets background work start at most 6 of them per minute. A 429 pauses every call device-wide for
+Retry-After (6 min without one). Edge blocks trip breakers (native: that endpoint for 15 min; WebView: that account for
+6 min; WebView blocks on two accounts within 2 min: every call for 6 min) instead of being retried per account. These
+numbers follow §1.8 and are not measured. Research Mode has an Automatic / Native only / WebView only switch to check
+the live behaviour. See [ARCHITECTURE.md](ARCHITECTURE.md#transport).
 
 ---
 
@@ -1087,7 +1103,7 @@ App policy: the cheapest check is `bell.countUnread`, and it also feeds the badg
     "plan": Plan,
     "supportStartDatetime": string,          // ISO, e.g. +09:00
     "supporterCardImageUrl": string,         // 1280 px Fan Card background
-    "supportReservations": [],               // only ever seen empty; probably convenience-store 支援予約 (inferred)
+    "supportReservations": [],               // only ever seen empty; probably convenience-store 支援予約 (support reservation, inferred)
     "supportTransactions": [SupportTransaction]
 } }
 ```
@@ -1365,7 +1381,7 @@ App policy: the cheapest check is `bell.countUnread`, and it also feeds the badg
 // legacy decoders expected: { "body": [PaidRecord] }
 ```
 
-- **Notes:** it is unclear which cases produce unpaid records (an unpaid convenience-store bill? a failed card charge?). The app shows only the observed fact, per SPEC §15: "決済状態を確認できない".
+- **Notes:** it is unclear which cases produce unpaid records (an unpaid convenience-store bill? a failed card charge?). The app shows only the observed fact, per SPEC §15: "決済状態を確認できない" ("the payment status cannot be confirmed").
 - **Sources:** fankt (FanboxEndpoints.kt, FanboxResponses.kt), cssxsh (FanBoxPayment.kt), old PixiView.
 
 ---
@@ -1564,7 +1580,7 @@ HTTP 400 { "error": "general_error" }
 { "body": [FilterOption] }     // entries with planId != null are per-plan supporter buckets
 ```
 
-- **Notes:** it drives the Creator Dashboard's "支援者数" (SPEC §17): the sum of the plan buckets, or the `supporter` entry.
+- **Notes:** it drives the Creator Dashboard's "支援者数" (number of supporters, SPEC §17): the sum of the plan buckets, or the `supporter` entry.
 - **Sources:** JanMaki (ListFilterOptions.kt, FilterOptionData.kt), axtuki1 (fanbox/index.ts `getPlanList`).
 
 ### 16.3 `relationship.getFan` — **low**
@@ -1660,7 +1676,7 @@ Nothing may be shown as a number unless it came from one of these. Estimates mus
 - **Pagination:** by month, using `nextMonth` and `previousMonth`. No paging within a month has been observed.
 - **Notes:**
   - Two sources call the URL: JanMaki (2023, with the full response DTO) and yogthot (2024–25; the current importer no longer calls it). Only JanMaki documents the response.
-  - The matching web page is `/manage/pledges/monthly/{YYYY-MM}` (vrct_supporters, 2026-09). Help 360004253894 describes it under 支援金管理/振込 → 支援金詳細.
+  - The matching web page is `/manage/pledges/monthly/{YYYY-MM}` (vrct_supporters, 2026-09). Help 360004253894 describes it under 支援金管理/振込 (support earnings / payouts) → 支援金詳細 (earnings detail).
   - Whether the 2026 Cloudflare rule covers this endpoint is unknown.
   - A new transaction id in the current month is a candidate `newSupporter` signal (§18.8).
 - **Sources:** JanMaki (Monthly.kt, MonthlyData.kt, SupportTransactionData.kt, test GetSupportUser.kt), yogthot fansync (`GetPledges`), vrct_supporters (manifest.json, content.js; page URL only), Help 360004253894.
@@ -1844,13 +1860,13 @@ Suggested app-side support state, derived from those flags and `plan.listSupport
 | `none` | Otherwise |
 
 Help Center billing facts that matter for `supportChanged`:
-- **Support periods.** The first month runs from the start day to the end of that month. Automatic charges run on the 1st–5th. While "現在決済処理中です" is shown, plans cannot be changed.
+- **Support periods.** The first month runs from the start day to the end of that month. Automatic charges run on the 1st–5th. While "現在決済処理中です" ("payment is being processed") is shown, plans cannot be changed.
 - **Upgrade.** The difference is charged at once, the higher tier unlocks immediately, and a separate invoice is issued.
 - **Downgrade.** It takes effect next month.
 - **Stop.** The whole month is still charged, with no refund, and FANs-only posts stay visible until month end.
 - **Failed automatic charge.** Support stops automatically. Supporting again in the same month keeps the Fan Card start date.
 - **Timing.** A payment can take up to 15 minutes to show as active support.
-- **Convenience store.** Prepaid months become 支援予約; while any exist, you cannot cancel, downgrade or change the payment method.
+- **Convenience store.** Prepaid months become 支援予約 (support reservations); while any exist, you cannot cancel, downgrade or change the payment method.
 - **Deleted plan.** When the creator deletes a plan, the support stops and its supporters become followers (48515034524313).
 - **Creator block.** An existing support lasts through the current month and is cancelled from next month.
 
@@ -1929,9 +1945,9 @@ save lastKnownItemID = newest non-pinned id seen; lastSuccessfulSync = now
 
 ## 20. Web fallback URLs
 
-`WebBridgeDestination` in `FANBOXClient/Core/Web/WebBridge.swift` currently builds the URLs in the "Current code" column. The **Research status** column says whether this research found evidence for each URL. Every URL marked *unverified* should be checked by opening it in the account WebView (Research Mode) before release.
+`WebDestination` in `FANBOXClient/Core/Web/WebBridge.swift` builds the URLs in the "Current code" column. The **Research status** column says whether this research found evidence for each URL. Every URL marked *unverified* should be checked by opening it in the account WebView (Research Mode) before release.
 
-Until then the app does not rely on them blindly: when the first main-frame response of a requested page is 404 or 410, the account WebView switches to the next page of `WebDestination.fallbackSteps` (`FANBOXClient/Core/Web/WebDestination+Fallback.swift`) and says so in a banner. Every chain ends at a page marked **verified** below (plan → creator plans → creator page; payment settings → `payment.pixiv.net/cards` → user settings; payment history → invoices → user settings; supporting plans → home). Payment sessions also offer the same pages manually ("ページが表示されない場合"), because a single-page app may render "not found" with status 200.
+Until then the app does not rely on them blindly: when the first main-frame response of a requested page is 404 or 410, the account WebView switches to the next page of `WebDestination.fallbackSteps` (`FANBOXClient/Core/Web/WebDestination+Fallback.swift`) and says so in a banner. Every chain ends at a page marked **verified** below (plan → creator plans → creator page; payment settings → `payment.pixiv.net/cards` → user settings; payment history → invoices → user settings; supporting plans → home). Payment sessions also offer the same pages manually ("ページが表示されない場合" (if the page does not appear)), because a single-page app may render "not found" with status 200. Other chains: post → creator page; notifications / newsletters → home; new post editor → manage posts. `.login` has no fallback step.
 
 | Purpose | URL | Current code | Research status |
 |---|---|---|---|
@@ -1966,10 +1982,14 @@ Until then the app does not rely on them blindly: when the first main-frame resp
 | Creator: payouts | `/manage/payouts`, `/manage/payouts/history`, `/manage/payouts/settings` | — | Verified (Help) |
 | Creator: settings | `/manage/creator` (R-18, Discord, fees), `/manage/profile`, `/manage/newsletters`, `/manage/invoice_issuer`, `/manage/unregister` | — | Verified (Help) |
 
-Because several URLs above are unverified, `AccountWebView` follows a fallback chain when the initial page answers
-404 (`WebDestination.fallbacks`): plan → creator plans → creator page; payment settings → `https://payment.pixiv.net/cards`
-(verified); supporting plans / notifications / newsletters → home; `/login` → `https://accounts.pixiv.net/login?return_to=…`.
-After a payment session the supports are synced immediately and again about 4 minutes later (activation can lag, §18.10).
+`WebDestination.fallbacks` (in `WebBridge.swift`) is an older, second list that also maps `/login` to
+`https://accounts.pixiv.net/login?return_to=…`. The web session screen passes it to `AccountWebView`, but the app does
+not act on it: the automatic fallback is the `fallbackSteps` chain above. So if `https://www.fanbox.cc/login` does not
+exist, the login sheet shows FANBOX's error page.
+
+After a payment session the supports are synced at once. For plan, creator and supporting-plan pages the app checks
+again 1, 5 and 15 minutes later while it is alive, and stops at the first check that observes a change (activation can
+lag, §18.10).
 
 These are **WebView-only**, because no API exists in any source: starting, stopping, upgrading or downgrading support; changing the payment method or card; plan management; profile editing; sending newsletters; payout requests; media upload (§15).
 

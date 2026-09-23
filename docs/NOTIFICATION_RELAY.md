@@ -1,7 +1,10 @@
 # Optional APNs Relay — Design
 
 Status: **design document.** The client-side hooks are in the app. The relay server is **not part of v1.0**, and the
-app does not yet send its device token to a relay (see [What is implemented](#what-is-implemented-in-v10)).
+app does not yet send its device token to a relay (see [What is implemented](#what-is-implemented-in-v10)). The
+silent-push handler has never received a real push, because the app target has no `aps-environment` entitlement; only
+its result mapping is unit-tested. Like the rest of the FANBOX integration, the fetch it triggers has not been
+exercised against the live service.
 
 Related: [SPEC.md](../SPEC.md) §24–§28, [ARCHITECTURE.md](ARCHITECTURE.md#notification-pipeline),
 [SECURITY.md](SECURITY.md).
@@ -48,7 +51,7 @@ newsletter, support) ──>  notification mail   ──>   - check the sender  
 
 ### 1. Mail event detection
 
-- The user turns on FANBOX e-mail notifications for the events they care about (pixivFANBOX Help Center, "通知設定").
+- The user turns on FANBOX e-mail notifications for the events they care about (pixivFANBOX Help Center, "通知設定" (notification settings)).
 - Mail reaches the relay by one of two routes, both under the user's control:
   - a mail rule that forwards FANBOX notification mail to an address owned by the relay, or
   - the relay reads a dedicated mailbox (for example over IMAP with an app-specific password that can only read mail).
@@ -91,15 +94,22 @@ newsletter text, supporter or payment data, mail bodies.
 `AppDelegate.application(_:didReceiveRemoteNotification:)` → `RemoteRelay.shared.handleSilentPush(environment:)`:
 
 1. If there is no usable network (Offline mode or no path), return `.failed`.
-2. `SyncEngine.syncLightweightOutcomes(reason: .notification)`: notifications first, then supports and the newest
-   timeline page, for every enabled account, at `notificationPrefetch` priority.
-3. New `NotificationEvent`s go through the normal pipeline: text prefetch → local DB → local iOS notification.
-4. `ReplyQueue.flush()` sends queued replies.
-5. Return `.newData`, `.noData` or `.failed` to iOS.
+2. `ReplyQueue.flush()` sends queued replies first (§3.3).
+3. `SyncEngine.syncLightweightOutcomes(reason: .notification)`: notifications first, then supports and the newest
+   timeline page, plus the fan list of creator accounts (at most about every 6 hours), for every enabled account, at
+   `notificationPrefetch` priority. Accounts whose session is expired, logged out or quarantined are skipped.
+4. New `NotificationEvent`s go through the normal pipeline: text prefetch → local DB → local iOS notification.
+5. `ReplyQueue.flush()` runs again for replies queued meanwhile.
+6. Return `.newData` (something new was stored), `.failed` (every request failed) or `.noData` to iOS.
+
+The app is in the background during this work, so only the native `URLSession` transport runs; the hidden web view
+transport is foreground-only ([ARCHITECTURE.md](ARCHITECTURE.md#transport)). If FANBOX refuses `post.info` to
+`URLSession`, the post body of a new-post event cannot be prefetched here. The notification is then posted with the
+text of the notification listing, and the prefetch is retried when the app becomes active.
 
 ## App ↔ relay protocol (proposed)
 
-All requests use HTTPS. The app accepts only `https://` relay URLs without user info (Settings → 通知 → APNs Relay).
+All requests use HTTPS. The app accepts only `https://` relay URLs without user info (Settings → 通知 (notifications) → APNs Relay).
 
 | Request | Body | Notes |
 |---|---|---|

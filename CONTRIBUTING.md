@@ -50,4 +50,7 @@ These rules apply to changes made inside the project:
 - Never log or display secrets. Use `AppLog` and pass request / response text through `SecretRedactor`
   ([docs/SECURITY.md](docs/SECURITY.md)).
 - Keep the build green with `scripts/build.sh` and add unit tests under `FANBOXClientTests/<Module>/`.
+- Tests never reach FANBOX. Use the demo data source, fake `RemoteDataSource` implementations or `URLProtocol` stubs.
+  Behavior of the live service is checked on a device in Research Mode, and the result is written down in
+  [docs/API.md](docs/API.md) (facts only, with the date).
 - Do not add a `LICENSE` file until the license decision above has been made.

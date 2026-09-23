@@ -36,19 +36,19 @@ rows.
 | Foundation | Networking (`URLSession`), JSON, files, dates |
 | Observation | `@Observable` services and settings |
 | UIKit | App delegate, background fetch results, image types, system settings links |
-| WebKit | Account-aware `WKWebView` and per-account `WKWebsiteDataStore` |
+| WebKit | Account-aware `WKWebView`, the hidden per-account web view transport, per-account `WKWebsiteDataStore` |
 | Network | `NWPathMonitor` for automatic network mode |
 | UserNotifications | Local notifications and notification actions |
 | BackgroundTasks | `BGAppRefreshTask` / `BGProcessingTask` |
 | Security | Keychain (`SecItem*`) for session credentials |
-| CryptoKit | SHA-256 file names in the media cache |
-| ImageIO | Image downsampling and conversion of draft images before upload |
+| CryptoKit | SHA-256 file names in the media cache; stable colors of on-device demo images |
+| ImageIO | Image downsampling, conversion of draft images, demo image metadata |
 | PhotosUI | Photo picker in the post editor |
 | UniformTypeIdentifiers | File types of draft media and uploads |
 | QuickLook | Previews of files attached to posts |
 | AVKit | Audio / video playback in posts |
 | os | `Logger` (unified logging) |
-| XCTest | Unit and UI tests only (not in the app) |
+| XCTest, CoreGraphics | Unit and UI tests only (not in the app) |
 
 ## Build-time tools (not distributed)
 
@@ -86,7 +86,7 @@ requires all of the following first:
 3. **Permissive licenses (MIT, BSD, Apache-2.0, ISC, zlib, ...).** Record the copyright notice exactly. Check
    attribution requirements: MIT / BSD require the notice to be reproduced; Apache-2.0 requires any NOTICE file to be
    carried along and changes to be marked. Plan where the notice will appear in the app (for example the 法的情報
-   screen, `LegalView`).
+   (legal information) screen, `LegalView`).
 4. **Copyleft licenses (GPL, AGPL, LGPL, MPL, EPL, CC-BY-SA, ...).** Stop and review the impact before adoption:
    - GPL / AGPL: would require releasing the app's source under the same license. Not compatible with the current All
      Rights Reserved policy. Do not adopt.

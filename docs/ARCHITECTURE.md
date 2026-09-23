@@ -1,7 +1,11 @@
 # Architecture
 
 This document describes how FANBOX Personal Client is put together. The requirements are in [SPEC.md](../SPEC.md);
-section numbers below (§n) refer to it.
+section numbers below (§n) refer to it. "docs/API.md §n" refers to [API.md](API.md).
+
+It describes the code. The FANBOX side has not been exercised against the live service: no request was sent to
+fanbox.cc or pixiv.net during development, and the assumptions about FANBOX (endpoint shapes, Cloudflare behavior,
+rate limits) come from public reports collected in API.md. The demo accounts drive the UI today.
 
 ## Goals that shape the design
 
@@ -10,56 +14,77 @@ section numbers below (§n) refer to it.
 2. **Text before media** (§29, §46). Notifications, comments and post text are fetched and sent before images, video
    or attachments, including on a 128 kbps connection.
 3. **Many accounts, one view** (§3.2, §46). Each account has an isolated session. Data seen by several accounts is
-   merged into one row.
+   merged into one row. A session is never used for an account it does not belong to.
 4. **No mass collection** (§3.7). Sync reads the newest items and stops at the first known one.
 
 ## Layers
 
 ```text
-+--------------------------------------------------------------------------------------+
-| SwiftUI views (Features/*)                                                           |
-|   render SwiftData rows with @Query; start refreshes in .task / .refreshable          |
-|   never see endpoints, DTOs or JSON (§43)                                            |
-+--------------------------------------------------------------------------------------+
-| Services / use cases (Core/*, reached through AppEnvironment)                        |
-|   SyncEngine, SyncCoordinator, ReplyQueue, NotificationService, MediaService,        |
-|   OfflineLibraryService, AccountService, WebBridge, UploadQueue, DraftService,       |
-|   SearchService, SupportAnalyzer, AccountSelector                                    |
-+--------------------------------------------------------------------------------------+
-| Repository                                                                           |
-|   LocalStore (LocalDataSource)          RemoteDataSource (protocol)                   |
-|   SwiftData main context,               RemoteDataSourceProvider picks per account:  |
-|   the ONLY writer of normalized data      - FanboxRemoteDataSource (FanboxAdapter)   |
-|                                           - DemoRemoteDataSource (offline fixtures)  |
-+--------------------------------------------------------------------------------------+
-| FANBOX access (Fanbox/*, Core/Network/*)                                             |
-|   FanboxAPIClient -> HTTPClient (AccountHTTPClient) -> NetworkScheduler -> URLSession |
-|   DTOs are decoded leniently; SchemaInspector records unknown / missing fields        |
-+--------------------------------------------------------------------------------------+
-| FANBOX API (api.fanbox.cc) and web (www.fanbox.cc) in the account-aware WKWebView    |
-+--------------------------------------------------------------------------------------+
++----------------------------------------------------------------------------------------------+
+| SwiftUI views (Features/*)                                                                   |
+|   render SwiftData rows with @Query; start refreshes in .task / .refreshable                 |
+|   never see endpoints, DTOs or JSON (§43)                                                    |
++----------------------------------------------------------------------------------------------+
+| Services / use cases (Core/*, reached through AppEnvironment)                                |
+|   SyncEngine, SyncCoordinator, ReplyQueue, NotificationService, MediaService,                |
+|   MediaPrefetcher, OfflineLibraryService, AccountService, WebBridge, PaymentResyncScheduler, |
+|   UploadQueue, DraftService, SearchService, SupportAnalyzer, AccountSelector                 |
++----------------------------------------------------------------------------------------------+
+| Local store and remote sources                                                               |
+|   LocalStore (LocalDataSource)          RemoteDataSource (protocol)                          |
+|   SwiftData main context,               DefaultRemoteDataSourceProvider picks per account:   |
+|   the ONLY writer of normalized data      - FanboxRemoteDataSource (FanboxAdapter)           |
+|                                           - DemoRemoteDataSource (in-memory demo world)      |
++----------------------------------------------------------------------------------------------+
+| FANBOX access (Fanbox/*, Core/Network/*, Core/Web/*)                                         |
+|   FanboxAPIClient -> RoutingHTTPClient (asks RateGate first)                                 |
+|                     |-> AccountHTTPClient (per-account URLSession)       -> NetworkScheduler |
+|                     '-> WebFetchHostPool (per-account hidden WKWebView)  -> NetworkScheduler |
+|   DTOs are decoded leniently; SchemaInspector records unknown / missing fields               |
++----------------------------------------------------------------------------------------------+
+| FANBOX API (api.fanbox.cc), pages (www.fanbox.cc), media (downloads.fanbox.cc, pximg.net)    |
+| and the visible account-aware WKWebView (AccountWebView) for features that stay on the web   |
++----------------------------------------------------------------------------------------------+
 ```
 
 - `Remote*` value types (`Core/Models/RemoteModels.swift`) are the boundary between the FANBOX adapter and the rest of
   the app. When the FANBOX API changes, the fix belongs in `Fanbox/API`, `Fanbox/DTO` or `Fanbox/Adapter` (§43).
 - `DefaultFanboxRepository` (`Core/Sync/FanboxRepository.swift`) implements the §43 repository façade on top of
-  `LocalStore` and `SyncEngine` (local-first reads; an error only when nothing is cached). The notification pipeline
-  reads post text through it; most screens still use `@Query` plus the services directly.
+  `LocalStore` and `SyncEngine`: local-first reads, and an error only when nothing is cached. It is a thin façade, not
+  the main data path. Its only caller in v1.0 is the notification pipeline: `NotificationService` creates its own
+  instance for post text prefetch. `AppEnvironment.repository` exists, but screens read SwiftData with `@Query` and
+  call `SyncEngine` and the other services directly.
 
 ### Dependency container
 
-`AppEnvironment` (`App/AppEnvironment.swift`) creates every service once and wires the callbacks between them:
+`AppEnvironment` (`App/AppEnvironment.swift`) creates every service once and wires the callbacks between them
+(`wire()`):
 
-- `SyncEngine.onNewNotificationEvents` → `NotificationService.process(newEventIDs:)`
-- `ReplyQueue.onAttentionNeeded` → `NotificationService.handleReplyAttention(itemID:)` (notice for notification replies)
-- `SyncCoordinator.notifications` → failed-prefetch retry and badge refresh when the app becomes active
-- `NotificationService.mediaPrefetcher` → `MediaService.load` (Priority 2 avatars / thumbnails, still gated by `MediaPolicy`)
-- `NetworkModeController.onConnectivityRestored` → `ReplyQueue.handleConnectivityRestored()`
-- `WebBridge.onDismiss` after a payment flow → `SyncEngine.sync(.supports, …, reason: .afterWrite)`
+| Callback | Target |
+|---|---|
+| `SyncEngine.onNewNotificationEvents` | `NotificationService.process(newEventIDs:)`, then `MediaPrefetcher.notificationEventsProcessed` |
+| `SyncEngine.onSyncFinished` | `OfflineLibraryService.syncFinished` ("recent N" rules) and `MediaPrefetcher.syncFinished` |
+| `SyncEngine.onFailure` | `ResearchRecorder.recordSyncFailure` (Research Mode "Sync / Errors") |
+| `SyncEngine.onIdentityMismatch` | `AccountService.quarantineMismatchedSession` |
+| `SyncEngine.onSessionExpired` | `SessionExpiryNotifier.notify` (one local notification per account) |
+| `ReplyQueue.onAttentionNeeded` | `NotificationService.handleReplyAttention(itemID:)` |
+| `SyncCoordinator.notifications` | failed-prefetch retry and badge refresh when the app becomes active |
+| `NotificationService.mediaPrefetcher` | `MediaService.load` (avatars / thumbnails, still gated by `MediaPolicy`) |
+| `NetworkModeController.onConnectivityRestored` | `ReplyQueue.handleConnectivityRestored()` and `UploadQueue.start()` |
+| `WebBridge.onDismiss` | `PaymentResyncScheduler.handleDismissedPaymentSession`; a managed-posts sync after the web post editor (`CreatorWebReconcile`) |
+| `AccountService.sessionRevoker` | the `RoutingHTTPClient` (`SessionRevoking`) |
+| `AccountHTTPClient.onSessionCookieChanged` | `AccountService.installAPISessionIntoWeb` |
+| `WebFetchHostPool.accountResolver` / `prepareSession` / `onIdentityMismatch` | local account lookup, `AccountService.prepareWebSession`, `AccountService.handleWebIdentityMismatch` |
 
-Views read it with `@Environment(AppEnvironment.self)`. `AppEnvironment.live()` builds the production graph (on-disk
-store, Keychain credentials). `AppEnvironment.preview(seedDemo:)` builds an in-memory graph with demo accounts for
-previews and tests.
+Views read the container with `@Environment(AppEnvironment.self)`.
+
+- `AppEnvironment.live()` builds the production graph: on-disk store, Keychain credentials, transport preferences in
+  standard `UserDefaults`. With `-uiTesting` it uses an in-memory store, `InMemoryCredentialStore`, a throwaway
+  defaults suite and in-memory transport preferences; `-demoData` seeds three demo accounts when there are none. It then
+  applies the router's launch arguments, starts `NetworkModeController` (also for background launches without a
+  scene), deletes stale multipart body files, and deletes temporary login-probe credentials left by an interrupted
+  login.
+- `AppEnvironment.preview(seedDemo:)` builds an in-memory graph with demo accounts for previews and tests.
 
 ## Local-first flow
 
@@ -68,14 +93,16 @@ App launch
     |
     v
 Open SwiftData store (no network)            PersistenceController.makeContainer
-    |
+    |                                        (an unreadable store is moved aside, see SECURITY.md)
     v
 First frame from the local DB                RootView -> tabs -> @Query
     |
     v
-.task after the first frame                  NetworkModeController.start()
+.task after the first frame                  NetworkModeController.start() (already running; idempotent)
     |                                        NotificationService.configure()
-    |                                        SyncCoordinator.start()
+    |                                        SyncCoordinator.start(): reply flush, launch refresh,
+    |                                          foreground polling
+    |                                        RemoteRelay.registerIfEnabled (off by default)
     v
 Differential sync (background priority)      SyncEngine.syncAll(reason: .appLaunch)
     |
@@ -87,8 +114,8 @@ Normalize + upsert                           LocalStore+Upserts (Remote* -> @Mod
 ```
 
 On failure the screen keeps its cached rows and shows `SyncStatusBanner`
-("同期できませんでした / キャッシュ済みデータを表示しています / 最後の同期: HH:mm", §44). Network errors never delete
-cached rows.
+("同期できませんでした" (sync failed) / "キャッシュ済みデータを表示しています" (showing cached data) /
+"最後の同期: HH:mm" (last sync), §44). Network errors never delete cached rows.
 
 ## Data model
 
@@ -138,53 +165,180 @@ ResearchLog, APISchemaSnapshot                    (Research Mode / API Inspector
   ```
 
 - **Coalescing.** Concurrent requests for the same `(account, resource, scope)` share one run. `syncAll` is also
-  shared while it is running.
+  shared while it is running; a caller with a higher priority raises the priority of the batch's remaining requests.
 - **Plans.** `syncAll` (launch, pull to refresh): notifications, supports, timeline, supporting timeline, creators,
-  plus dashboard, creator comments and fans for creator accounts. `syncLightweight` (background, silent push):
-  notifications, supports, timeline.
+  plus dashboard, creator comments and fans for creator accounts. `syncLightweight` (background refresh, silent push):
+  notifications, supports, timeline, plus fans for creator accounts (so 新規支援 (new supporter) can be detected).
+- **Throttles.** Some resources answer from the local DB while their last refresh is recent: the fan list (about every
+  6 hours automatically, 10 minutes for screens that open with `.onDemand`), `payment.listPaid` (daily, every 6 hours
+  in the first week of the month, never automatically in Low Data / Extreme), the unpaid-payment check (6 hours, hourly
+  on the 1st–5th), and creator reads (`CreatorReadPolicy`: dashboard and creator comments 10 minutes, managed posts
+  5 minutes). Pull to refresh, after-write and notification-triggered syncs bypass the creator throttles.
 - **Priority by reason.** User-initiated work runs as `interactiveRead`; notification detection as
   `notificationPrefetch`; launch, polling and background work as `backgroundSync`. Notification listings are never
   below `notificationPrefetch`.
-- **Errors.** Mapped to `RemoteError`, stored in `SyncState.error`. `.unauthorized` marks the account session as
-  expired. Cached data stays.
-- **Account choice.** Post bodies use `AccountSelector` (§8: cached → can view → valid session → higher plan → main
-  account). If the chosen account only gets a restricted body, other accounts are tried.
+- **Session state gating.** FANBOX accounts in `.error` (identity mismatch) are never synced. Accounts in `.expired` /
+  `.loggedOut` are skipped for automatic reasons (launch, polling, background, silent push); explicit refreshes still
+  run. Offline returns at once without touching local data.
+- **Identity check.** The `session` resource reads the logged-in user. If it is not the account's `pixivUserID`, the
+  engine calls `onIdentityMismatch` (quarantine, see [Accounts, sessions and identity](#accounts-sessions-and-identity))
+  and stores nothing. `applyCurrentUser` never rebinds an account to another pixiv user, and a successful sync never
+  clears `.error`.
+- **Errors.** Mapped to `RemoteError`, stored in `SyncState.error`. `.unauthorized` marks the session expired (and
+  posts one local notice). Cached data stays.
+- **Account choice for post bodies.** `AccountSelector` (§8: cached → can view → valid session → higher plan → main
+  account). If the chosen account only gets a restricted body, other accounts are tried, but only accounts that may be
+  entitled. Accounts in `.error` are never picked automatically.
+- **Edge-blocked post bodies.** When the detail endpoint is edge-blocked (or answers 403), the engine does not try the
+  other accounts (they would get the same block), refreshes the summary through `post.get`, and pauses automatic detail
+  fetches for 15 minutes (`postDetailBlockCooldown`). The post screen then shows `SessionEdgeBlockNotice`, which says
+  the login is unaffected and offers the account web view.
 
 `SyncCoordinator` (`Core/Sync/SyncCoordinator.swift`) decides when to sync: after the first frame, on foreground
 polling (`AppSettings.foregroundPollingInterval`, never below 15 s; notifications every tick, newest timeline page every
 fifth tick), when the scene becomes active, on pull to refresh, and from `BGAppRefreshTask` / `BGProcessingTask`
-(`BackgroundRefresh`). The maintenance task enforces the cache size and prunes Research logs older than 14 days.
+(`BackgroundRefresh`). Queued replies are flushed at launch (alongside the launch refresh), on every polling tick,
+when the scene becomes active, and before background refresh work. The maintenance task enforces the cache size,
+prunes Research logs older than 14 days and prunes old inbox events.
+
+## Transport
+
+Every FANBOX request goes through `RoutingHTTPClient` (`Core/Network/RoutingHTTPClient.swift`), which is the app's
+`HTTPClient`. It chooses between two transports of the same account and applies the device-wide `RateGate`. The design
+follows docs/API.md §1.7–§1.11. It has not been checked against the live service; Research Mode can force either
+transport to check it.
+
+### The two transports
+
+| | Native | WebView |
+|---|---|---|
+| Type | `AccountHTTPClient` (`Core/Network/AccountHTTPClient.swift`) | `WebFetchHostPool` / `WebFetchHost` (`Core/Web/WebFetchHost.swift`) |
+| Session | One ephemeral `URLSession` per account; no cookie storage, no URL cache. Cookies are attached by hand from the account's Keychain credential, only for *.fanbox.cc. The user agent is the one captured from the account's web view (a WKWebView-shaped default until one is captured). | A hidden `WKWebView` per account that uses the account's own `WKWebsiteDataStore` and has `https://www.fanbox.cc/` loaded. `fetch(url, {credentials: "include"})` runs in the isolated `.defaultClient` content world through `callAsyncJavaScript`; the result comes back as the script's return value. |
+| Before first use | — | The page metadata is read; the logged-in user must equal the account's `pixivUserID`. A mismatch shuts the page down and reports it to `AccountService`. |
+| Limits | — | Foreground only. At most 2 live pages (LRU), closed after 3 minutes idle, on entering the background, on a memory warning, in Offline mode, and on logout / removal. The page (and its CSRF token) is reloaded after 30 minutes. Only `https://api.fanbox.cc` and `https://www.fanbox.cc` URLs; writes use `redirect: "manual"`. |
+| Research log | One redacted entry per request, marked `transport: native` | One redacted entry per request, marked `transport: webview` |
+
+Both transports run inside `NetworkScheduler.run(priority, label:)`, so priorities and Offline apply to both.
+
+### Routing
+
+`TransportRouter.plan(...)` gives an ordered list of transports to try:
+
+| Situation | Order |
+|---|---|
+| Host is not api.fanbox.cc / www.fanbox.cc (media hosts, pximg) | native only, outside `RateGate` |
+| App in the background, no account, or no web transport | native only |
+| Research override "Native のみ" (native only) | native only |
+| Research override "WebView のみ" (web view only) | WebView only (native while in the background) |
+| `post.info`, `post.getEditable` (`webFirstEndpoints`), or an endpoint whose native request was edge-blocked in the last 24 hours (`TransportPreferences`) | WebView, then native |
+| Everything else | native, then WebView |
+
+The second transport is used only when the first one did not reach FANBOX:
+
+- the native answer was an edge block (below), or native had no CSRF token while the WebView page has its own;
+- the WebView could not be used (`WebFetchError.unavailable`: background, no usable web session, page not ready,
+  identity mismatch). Nothing was sent in these cases, so this also applies to writes;
+- a WebView GET whose script failed may be retried natively. A write with an unknown outcome (timeout, script error) is
+  never re-sent.
+
+Downloads always use the native transport. Uploads from a body file use the native transport, with the same budget and
+classification.
+
+### Edge-block classification
+
+`EdgeBlockDetector` (`Core/Network/EdgeBlockDetector.swift`) tells a CDN block apart from FANBOX's own refusal:
+
+- only 403 and 503 can be edge blocks;
+- a `cf-mitigated` header means an edge block;
+- a JSON content type or a body that starts like JSON is FANBOX's answer (401 / 403 / 404 decide the session or the
+  entitlement);
+- an HTML page from `Server: cloudflare`, or a body containing a challenge / block marker ("just a moment",
+  `cf-chl-`, "challenge-platform", "attention required", "cloudflare ray id", `cf-error-details`, `__cf_chl`,
+  "ブロックされました" (blocked)), is an edge block;
+- 429 is always rate limiting (`RemoteError.rateLimited`), never an edge block.
+
+Inside the web view a CORS-less edge answer surfaces only as a `TypeError`; while the network is up it is mapped to
+`RemoteError.edgeBlocked`. An edge block never changes the account's session state (`AccountService.sessionState(for:)`
+treats it as "unknown").
+
+### Request budget, cooldowns and breakers
+
+`RateGate` (`Core/Network/RateGate.swift`) is consulted before every attempt to api.fanbox.cc / www.fanbox.cc, on both
+transports, before the request takes a scheduler slot. The numbers are inferred from third-party reports
+(docs/API.md §1.8), not measured.
+
+| Rule | Value |
+|---|---|
+| Heavy lane (`post.info`, `post.getEditable`) | at least 1 s between starts, device-wide, every priority; interactive requests are served before queued background ones |
+| Light lane (other calls) | 0.2 s between starts unless interactive |
+| Background budget (heavy lane) | at most 6 starts per 60 s for backgroundSync / notificationPrefetch / mediaPrefetch; a request that would wait more than 30 s fails with `.rateLimited` |
+| 429 cooldown | every budgeted call fails fast for Retry-After, or 6 minutes without one (at most 1 hour). Interactive requests are not exempt. |
+| Native edge block | device-wide breaker for that endpoint on the native transport, 15 minutes (longer if Retry-After says so) |
+| WebView edge block | breaker for that account's WebView transport, 6 minutes |
+| WebView edge blocks on two accounts within 2 minutes | device-wide cooldown, 6 minutes |
+
+Breakers never repeat one block across accounts. Logout, removal and re-login reset the account's breakers. Research
+Mode shows the cooldown, the breakers, the per-endpoint WebView preference and the background budget, and can reset
+them.
 
 ## Network scheduler and modes
 
-Every HTTP request goes through `NetworkScheduler.run(priority, label:operation:)` (`Core/Network/NetworkScheduler.swift`).
+Every HTTP request runs inside `NetworkScheduler.run(priority, label:operation:)` (`Core/Network/NetworkScheduler.swift`).
 Callers set the priority with the task-local `RequestContext.$priority`.
 
 | Priority | Value | Typical use |
 |---|---:|---|
-| interactiveWrite | 100 | posting a comment / reply, likes, uploads started by the user |
+| interactiveWrite | 100 | posting a comment / reply, likes, post create / update |
 | interactiveRead | 90 | opening a post, pull to refresh |
-| notificationPrefetch | 80 | text of a newly detected notification |
-| foregroundMedia | 50 | images on screen |
+| notificationPrefetch | 80 | notification listings and the text of a newly detected notification |
+| foregroundMedia | 50 | images on screen, media uploads |
 | backgroundSync | 20 | launch / polling / background sync |
 | mediaPrefetch | 5 | offline saving, image prefetch |
 
-Interactive requests are admitted at once. While any interactive or notification request is in flight, registered
-media transfers are suspended and resumed afterwards. The effective mode (Automatic / Normal / Low Data / Extreme /
-Offline) comes from `NetworkModeController` and `MediaPolicy`. See [NETWORK_MODES.md](NETWORK_MODES.md).
+Interactive requests are admitted at once. While any interactive or notification request is in flight, no new media
+request is admitted and registered media transfers are suspended, then resumed. At most one large media transfer
+(original, video, audio, attachment, upload) runs at a time.
 
-## Accounts and sessions
+Offline gating (§30):
+
+- the scheduler fails new and queued requests with `.offline`, and cancels registered downloads and uploads (an
+  admitted `interactiveWrite` is left alone, because its outcome would become ambiguous);
+- `WebFetchHostPool` closes every hidden page, and `WebFetchHost` cancels any navigation;
+- the visible account web view loads nothing: `AccountWebSessionView` shows an offline state instead of the page, stops a
+  running load when the mode switches, and `AccountWebCoordinator` cancels every http(s) navigation of the page and its
+  popups;
+- `SyncEngine` returns without touching local data; `ReplyQueue` and `UploadQueue` keep their items queued and resume
+  when `NetworkModeController.onConnectivityRestored` fires. The demo data source also answers `.offline`.
+
+The effective mode (Automatic / Normal / Low Data / Extreme / Offline) comes from `NetworkModeController` and
+`MediaPolicy`. See [NETWORK_MODES.md](NETWORK_MODES.md).
+
+## Accounts, sessions and identity
 
 - `AccountService` (`Core/Authentication/AccountService.swift`) adds accounts through a login in the account-aware web
-  view, validates sessions, removes accounts and manages the main account.
+  view, checks sessions, logs out, removes accounts and manages the main account.
 - `WebSessionStore` gives each account its own `WKWebsiteDataStore(forIdentifier: Account.webProfileID)`.
-- `CredentialStore` keeps each account's cookies, CSRF token and user agent as one Keychain item.
-- `AccountHTTPClient` keeps one ephemeral `URLSession` per account and attaches that account's cookies itself, only for
-  fanbox.cc / pixiv.net / pximg.net (`FanboxHostPolicy`).
+- `CredentialStore` keeps each account's cookies, CSRF token and user agent as one Keychain item. The item is created
+  only for a verified session (a login, or a re-login verified in a web session); cookie, token and user-agent updates
+  from responses change an existing item only.
 - `WebBridge.openWeb(account:destination:purpose:)` opens `AccountWebView` for features that stay on the web
   (payment, some creator tools, fallbacks) (§14, §40).
 
-Details: [SECURITY.md](SECURITY.md).
+Identity integrity (§3.2, §7.1, §40): a session is used for an account only after its logged-in pixiv user was
+compared with the account's `pixivUserID`.
+
+| Where | Check | On mismatch |
+|---|---|---|
+| Login / re-login | Page user compared before anything is stored; the captured session is probed under a temporary Keychain key (`login-probe-<uuid>`) and saved only if the user matches and no other local account already has that user | Nothing is stored; the web store is reset to the account's own session (a new placeholder is discarded) |
+| Browse / payment web session | Every FANBOX page that finishes loading is inspected; a new session cookie without a page naming its user is probed first | The page and any popup stop, the web store is reset, nothing is copied |
+| Hidden WebView transport | The page's user must match before the first fetch | The page is closed; the web store is reset |
+| Session check / `session` sync | `currentUser` compared with the account | Quarantine: the account goes to `.error`, requests are revoked, the Keychain credential is deleted and the web store is cleared. Sync skips the account until a verified re-login. |
+
+Teardown on logout and removal: `AccountService` first calls `RoutingHTTPClient.revokeSession(accountID:)`. It
+invalidates the account's `URLSession` and bumps a per-account epoch, so a response that started earlier is dropped
+without touching cookies. It also closes the account's hidden WebView before the data store is cleared, and resets the
+account's breakers. Then the Keychain credential is deleted and the web store is cleared (logout) or removed
+(removal). Details: [SECURITY.md](SECURITY.md).
 
 ## Notification pipeline
 
@@ -194,9 +348,9 @@ Detection                       Prefetch (text first)              Local DB     
 launch refresh                  NotificationService.process        NotificationEvent  UNNotificationRequest
 foreground polling      ──>     highest priority first:     ──>    Post / Comment ──> (title + body from
 BGAppRefreshTask                 comment + thread,                  Newsletter          the local DB)
-silent push (optional relay)     post title + body,                 Support                 |
+silent push (optional relay)     post title + body,                 Support / Fan           |
                                  newsletter body,                                           v
-                                 support metadata                                    tap / inline reply
+                                 support / fan metadata                              tap / inline reply
                                 (RequestPriority.notificationPrefetch)                     |
                                                                                            v
                                                                NotificationService.open: local render,
@@ -207,83 +361,139 @@ silent push (optional relay)     post title + body,                 Support     
   bells carry no comment id, so the same comment seen by two accounts is matched by post, text, author and time.
 - Automatic polling asks `bell.countUnread` first and lists `bell.list` only when the count changed or 15 minutes
   passed; `newsletter.list` is polled at most every 10 minutes. Expired sessions are not polled.
-- Derived events (docs/API.md §18.8 B): 支援状態変化 from the supporting-plan diff, 決済要確認 from `hasUnpaidPayments`,
-  `payment.listUnpaid` or a plan that disappears on the 1st–5th, 新規支援 from the fan-list diff. The first sync of each
-  source is a silent baseline, and the texts state observed facts only (§15).
-- Prefetch follows the §24.2 table (`NotificationEventType.prefetchTarget`) and records `prefetchState`. For comment
-  events the commented comment is resolved from the thread (`NotificationCommentResolver`). After the text, avatars and
-  thumbnails are prefetched (§25 Priority 2). Failed or interrupted prefetches are retried when the app becomes active.
-- The iOS notification is posted after the prefetch, so its text and the screen behind it are already local. Critical
-  events use `.timeSensitive` only when the Time Sensitive entitlement is available; otherwise `.active`.
+- Event types and priorities (§24.2, `NotificationEventType`):
+
+  | Type | Source | Priority | Prefetch |
+  |---|---|---|---|
+  | `comment`, `commentReply` | FANBOX bells | critical | comment thread (+ post body) |
+  | `newPost` | FANBOX bells | high | post body |
+  | `newsletter` (おたより) | `newsletter.list` | high | newsletter body |
+  | `supportChanged` (支援状態変化, support changed) | supporting-plan list diff | high | supports |
+  | `paymentAttention` (決済要確認, payment needs checking) | page metadata `hasUnpaidPayments` turning true, a creator listed by `payment.listUnpaid`, or a supported plan that disappears on the 1st–5th of the month | critical | supports |
+  | `newSupporter` (新規支援, new supporter) | new supporters in the creator's fan list | normal | fan list |
+
+  Derived events (docs/API.md §18.8 B) are created by `LocalStore+Upserts`. The first sync of each source is a silent
+  baseline. A `paymentAttention` reason is announced at most once per account, creator and month. The texts state
+  observed facts only; they never say that a payment failed (§15).
+- Prefetch follows `NotificationEventType.prefetchTarget` and records `prefetchState`. For comment events the commented
+  comment is resolved from the thread (`NotificationCommentResolver`). After the text, `NotificationService` asks for
+  avatars and thumbnails, and `MediaPrefetcher` adds thumbnails and up to three display images per post (not in a
+  background launch). Both run at `mediaPrefetch`, and `MediaPolicy` decides whether anything is downloaded.
+- The iOS notification is posted after the prefetch attempt. When the prefetch succeeded, its text and the screen behind
+  it are already local. When it failed (offline, edge block, background without the WebView transport), the
+  notification uses the text of the listing, and the prefetch is retried when the app becomes active (events of the last
+  48 hours, at most 20). Events older than 3 days are imported without a banner.
+- Critical events use `.timeSensitive` only when the Time Sensitive entitlement is available; the target has no
+  entitlements file today, so they are delivered as `.active`.
 - Inline replies are queued in `ReplyQueue` first (they work offline) and are sent as `interactiveWrite`, threaded under
   the resolved comment. If the comment cannot be identified, the text is kept as a draft and a notice asks the user to
   choose the target in the thread; a reply is never turned into a top-level comment.
+- A session that moves to `.expired` posts one local notice per account (`SessionExpiryNotifier`).
 - Inbox: read events older than 90 days are pruned, and remote items older than that are not re-imported.
 - The optional APNs relay only wakes the app; see [NOTIFICATION_RELAY.md](NOTIFICATION_RELAY.md).
 
 ## Reply queue
 
 `ReplyQueue` (`Core/Sync/ReplyQueue.swift`) stores every comment / reply as an `OutgoingComment` before sending:
-`draft → queued → sending → sent | failed | needsConfirmation` (§22). Short outages are retried with backoff. Items that
-waited longer than `AppSettings.staleReplyThreshold` go to `needsConfirmation` unless `autoSendStaleReplies` is on
-(off by default). A send interrupted by an app kill also asks for confirmation, to avoid duplicate comments.
-`post.addComment` has no idempotency key, so before any re-send (automatic or manual) the thread is re-read and an own
-comment with the same text and parent is taken as the earlier send (docs/API.md §9.2); when that check is not possible,
-the item waits in `needsConfirmation`. Items that need a decision are shown in the 送信キュー screen, reachable from a
-banner on every tab and from the inbox. Queued replies are flushed before the launch / foreground refresh (§3.3).
+`draft → queued → sending → sent | failed | needsConfirmation` (§22).
+
+- Transient failures are retried with backoff (2 s doubling, at most 60 s, 5 attempts). Losing connectivity keeps the
+  item queued without using up an attempt.
+- Items that waited longer than `AppSettings.staleReplyThreshold` go to `needsConfirmation` unless
+  `autoSendStaleReplies` is on (off by default).
+- **Duplicate protection.** `post.addComment` has no idempotency key (docs/API.md §9.2). Before any re-send, automatic
+  or manual, the queue reads up to 3 comment pages and looks for an own comment with the same trimmed text and the same
+  parent, created after the item was written (10 minutes of clock skew allowed), that no other sent item has claimed.
+  If it finds one, the item is marked sent. If the lookup cannot decide, an automatic retry waits in
+  `needsConfirmation`; an explicit user retry sends.
+- A send interrupted by an app kill goes to `needsConfirmation`. When retries are used up after errors that do not
+  prove a rejection (timeouts, lost connections, 5xx), the item also goes to `needsConfirmation`; 4xx answers mark it
+  `failed`.
+- When FANBOX does not return the new comment's id, the item stays visible as sent and is matched to the real comment
+  by a thread refresh, so no provisional comment row is stored.
+- Items that need a decision are shown in the 送信キュー (send queue) screen, reachable from a banner on every tab and
+  from the inbox. Replies written from a notification get a local notice when they need attention.
+- Queued replies are flushed at launch, on polling ticks and scene activation, and before background refresh and
+  silent push work (§3.3).
+
+## Web sessions
+
+- `AccountWebSessionView` (`Core/Web/WebBridgePresenter.swift`, presented by the `WebBridgePresenter` modifier) shows
+  `AccountWebView` for one account with a banner naming it, and inspects every FANBOX page that finishes loading
+  (identity, cookie refresh).
+- Several destination URLs are unverified (docs/API.md §20). When the first main-frame response of the requested page
+  is 404 or 410, `AccountWebController` loads the next page of `WebDestination.fallbackSteps`
+  (`Core/Web/WebDestination+Fallback.swift`) and shows a banner. Each chain ends at a page the research marked verified.
+  Payment sessions also offer these pages by hand ("ページが表示されない場合" (if the page does not appear)). `.login`
+  has no fallback step. (`WebDestination.fallbacks` in `WebBridge.swift` is a second, older list. It is passed to
+  `AccountWebView` and stored by `AccountWebCoordinator`, but only tests call its lookup, so it has no effect in the
+  app.)
+- After a payment session, `PaymentResyncScheduler` syncs supports at once (`.afterWrite`). For plan, creator and
+  supporting-plan pages it checks again 1, 5 and 15 minutes later while the app is alive, and stops at the first check
+  that observes a change.
+- After the web post editor or post management was used, the managed post list is synced again.
 
 ## Media and offline library
 
 - `MediaService` (`Core/Media/MediaService.swift`) loads images in stages (thumbnail → display → original, §6) and asks
-  `MediaPolicy` before any fetch. Files live under `Caches/Media/<variant>/` (`MediaCache.swift`).
+  `MediaPolicy` before any fetch. Evictable files live under `Caches/Media/<variant>/`; pinned (saved) files live under
+  `Application Support/OfflineMedia/<variant>/`, outside Caches and excluded from backup (`MediaCache.swift`).
 - Eviction order (§32): unpinned → old (not used for 30 days) → original → display → thumbnail. Text is never evicted.
 - `OfflineLibraryService` saves a post, the latest N posts of a creator, or (optionally) every viewed post, and pins
-  their media. It never crawls history (§31).
+  their media. A post counts as saved only when its body text is local. It never crawls history (§31).
+- `MediaPrefetcher` prefetches thumbnails of new timeline posts after a foreground sync and notification media after
+  the text is ready. It never prefetches originals, video or attachments, and never runs in a background launch.
 
 ## Research Mode and API Inspector
 
-- `AccountHTTPClient` records one `ResearchEntry` per request; `AccountWebView` records main-frame navigations.
-  `ResearchRecorder` (`Fanbox/Research/ResearchRecorder.swift`) redacts every field again, keeps at most 3,000
-  `ResearchLog` rows, and stores response bodies only while Research Mode is on.
+- Every request is recorded as one redacted `ResearchEntry` by the transport that sent it (`AccountHTTPClient` or
+  `WebFetchHostPool`, with the transport named). `RoutingHTTPClient` and the web transport add notes (edge blocks,
+  fallbacks, unavailable pages). `AccountWebView` records main-frame navigations. Sync failures and undecodable 2xx
+  responses are recorded as events.
+- `ResearchRecorder` (`Fanbox/Research/ResearchRecorder.swift`) redacts every field again, keeps at most 3,000
+  `ResearchLog` rows, and stores bodies only while Research Mode is on.
 - `SchemaInspector` compares each JSON response with the fields the DTO knows and updates `APISchemaSnapshot`
   (known / observed / new / missing per endpoint and object path). Decoders ignore unknown fields, so a new field is
   reported, not fatal (§37).
-- The UI lives in `Features/Settings/Research/`: request, response, navigation and event lists, a detail screen
-  (HTTP status, endpoint, method, safe response body, headers, account, timestamp — §44), the API schema list with
-  "New" badges, account / sync state, support state, and scheduler state. Every displayed string passes through
-  `ResearchLogFormatter.safe`, which applies `SecretRedactor` once more plus a display-side pass. Logs can be cleared
-  and exported as redacted text.
+- The UI lives in `Features/Settings/Research/` and `Core/Web/WebTransportResearchSection.swift`: Requests, Responses,
+  Navigation and Sync / Errors lists; a detail screen (HTTP status, endpoint, method, safe response body, headers,
+  account, timestamp, §44); the API schema list with "New" badges; account, sync, support and scheduler state; the
+  通信経路 (transport) section with the Automatic / Native only / WebView only switch, the cooldown, breakers and
+  per-endpoint preferences; and, in debug builds, the demo tools (`ResearchDemoTools`). Every displayed string passes
+  through `ResearchLogFormatter.safe`. Logs can be cleared and exported as redacted text.
 
 ## Module and file map
 
 | Path | Contents |
 |---|---|
-| `App/` | `FANBOXClientApp` (entry, app delegate, BG task registration), `AppEnvironment`, `AppRouter` (tabs, `AppRoute`), `AppSettings` (UserDefaults, non-secret), `RootView` |
+| `App/` | `FANBOXClientApp` (entry, app delegate, BG task registration), `AppEnvironment`, `AppRouter` (tabs, `AppRoute`, launch arguments), `AppSettings` (UserDefaults, non-secret), `RootView` |
 | `Core/Models/` | SwiftData `@Model` classes, `DomainEnums`, `RemoteModels` (Remote* values, `RemoteError`) |
-| `Core/Database/` | `PersistenceController`, `LocalStore` (+ upserts), fetch descriptors, `SearchService` |
-| `Core/Network/` | `HTTPClient`, `AccountHTTPClient`, `NetworkScheduler`, `RequestContext`, `NetworkPolicy` (`MediaPolicy`), `NetworkModeController`, `FanboxHostPolicy` |
-| `Core/Authentication/` | `AccountService`, `CredentialStore` / `SessionCredential` |
-| `Core/Sync/` | `SyncEngine`, `SyncCoordinator` + `BackgroundRefresh`, `ReplyQueue`, `RemoteDataSource`, `FanboxRepository`, `AccountSelector`, creator tools (`UploadQueue`, `DraftService`) |
-| `Core/Notifications/` | `NotificationService`, `RemoteRelay` |
-| `Core/Media/` | `MediaService`, `MediaCache` (file layout, eviction), `OfflineLibraryService`, image downsampling |
-| `Core/Payments/` | `SupportAnalyzer`, `PaymentProfileValidator` |
+| `Core/Database/` | `PersistenceController` (store location, protection, recovery), `LocalStore` (+ upserts, managed posts), fetch descriptors, `SearchService` |
+| `Core/Network/` | `HTTPClient`, `RoutingHTTPClient` (+ `TransportRouter`, `TransportPreferences`), `RateGate`, `EdgeBlockDetector`, `AccountHTTPClient`, `HTTPTransferDelegate`, `NetworkScheduler`, `RequestContext`, `NetworkPolicy` (`MediaPolicy`), `NetworkModeController`, `FanboxHostPolicy` |
+| `Core/Authentication/` | `AccountService`, `CredentialStore` / `SessionCredential`, `SessionExpiryNotifier` |
+| `Core/Sync/` | `SyncEngine`, `SyncCoordinator` + `BackgroundRefresh`, `ReplyQueue`, `RemoteDataSource`, `FanboxRepository`, `AccountSelector`, creator tools (`CreatorTools`: `UploadQueue`, `DraftService`; `DraftSendPlan`, `DraftPostMapping`, `DraftMediaStore`, `CreatorCapabilities`) |
+| `Core/Notifications/` | `NotificationService`, `NotificationCommentResolver`, `RemoteRelay` |
+| `Core/Media/` | `MediaService`, `MediaCache` (file layout, eviction), `MediaPrefetcher`, `OfflineLibraryService`, `ImageDownsampler`, `DemoMediaRenderer` |
+| `Core/Payments/` | `SupportAnalyzer`, `PaymentProfileValidator`, `PaymentResync`, support stop rules and texts |
 | `Core/Security/` | `SecretRedactor`, `KeychainStore`, `AppLog` |
-| `Core/Web/` | `WebBridge`, `WebBridgePresenter`, `AccountWebView`, `WebSessionStore`, `WebPageMetadata` |
-| `Fanbox/API`, `Fanbox/DTO`, `Fanbox/Adapter` | FANBOX endpoints, lenient DTOs, mapping to Remote* |
-| `Fanbox/Demo/` | `DemoRemoteDataSource` and fixtures for demo accounts |
+| `Core/Web/` | `WebBridge` (`WebDestination`), `WebDestination+Fallback`, `WebBridgePresenter` (`AccountWebSessionView`), `AccountWebView`, `WebFetchHost` (`WebFetchHostPool`), `WebSessionStore`, `WebPageMetadata`, `WebTransportResearchSection` |
+| `Fanbox/API`, `Fanbox/DTO`, `Fanbox/Adapter` | FANBOX endpoints, multipart forms, lenient DTOs, mapping to Remote*, `post.update` form |
+| `Fanbox/Demo/` | `DemoRemoteDataSource`, `DemoWorld` and fixtures for demo accounts |
 | `Fanbox/Research/` | `ResearchRecorder`, `SchemaInspector` |
 | `Features/Home` | unified timeline, post detail, comment threads |
 | `Features/Creator` | creator list and creator detail (merged over accounts) |
 | `Features/Support` | support dashboard, per-creator / per-account views, history, payment profiles, payment web flow |
-| `Features/CreatorMode` | dashboard, posts, drafts and editor, comments, fans, plans |
-| `Features/Notifications` | notification inbox, newsletters |
+| `Features/CreatorMode` | dashboard, posts, drafts and editor, web hand-off, comments, fans, plans |
+| `Features/Notifications` | notification inbox, newsletters, reply queue |
 | `Features/Library` | offline library, local search, tags |
 | `Features/Settings` | settings sheet, accounts, network mode, notifications and relay, cache, Research Mode, legal |
-| `UI/` | shared components (`AccountBadge`, `SyncStatusBanner`, `EmptyStateView`, `PillLabel`, `RemoteImageView`, `ImageViewer`) |
+| `UI/` | shared components (`AccountBadge`, `SyncStatusBanner`, `EmptyStateView`, `PillLabel`, `RemoteImageView`, `ImageViewer`, `AccountReloginBanner`, `SessionEdgeBlockNotice`) |
 
 ## Testing
 
 Unit tests are hosted in the app (`FANBOXClientTests/<Module>/`). They use
-`PersistenceController.makeContainer(inMemory: true)`, `AppEnvironment.preview(seedDemo:)`, `InMemoryCredentialStore`
-and per-module fake `RemoteDataSource` implementations, so they never reach FANBOX. `FANBOXClientUITests` launches the
-app with `-uiTesting -demoData`.
+`PersistenceController.makeContainer(inMemory: true)`, `AppEnvironment.preview(seedDemo:)`, `InMemoryCredentialStore`,
+per-module fake `RemoteDataSource` implementations and `URLProtocol` stubs for the transport, so they never reach
+FANBOX. `RateGate` and the payment resync run on injected clocks. `FANBOXClientUITests` launches the app with
+`-uiTesting -demoData`: a smoke test and a screen tour that opens every screen with demo data. None of the tests can
+confirm how the live service behaves.
