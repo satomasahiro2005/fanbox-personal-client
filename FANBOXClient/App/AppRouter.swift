@@ -61,6 +61,49 @@ final class AppRouter {
 
     init() {}
 
+    /// Debug / screenshot hooks read from launch arguments (UserDefaults argument domain), e.g.
+    /// `-initialTab support`, `-openRoute post:<id>` / `creator:<id>` / `comments:<postID>`, `-openSheet settings|notifications`.
+    func applyLaunchArguments(_ defaults: UserDefaults = .standard) {
+        if let raw = defaults.string(forKey: "initialTab"), let tab = AppTab(rawValue: raw) {
+            selectedTab = tab
+        }
+        if let raw = defaults.string(forKey: "openRoute"), let route = Self.route(fromLaunchValue: raw) {
+            open(route)
+        }
+        switch defaults.string(forKey: "openSheet") {
+        case "settings": isSettingsPresented = true
+        case "notifications": isNotificationInboxPresented = true
+        default: break
+        }
+    }
+
+    static func route(fromLaunchValue raw: String) -> AppRoute? {
+        let parts = raw.split(separator: ":", maxSplits: 1).map(String.init)
+        guard parts.count == 2 else {
+            switch raw {
+            case "supportHistory": return .supportHistory
+            case "paymentProfiles": return .paymentProfiles
+            case "creatorComments": return .creatorComments
+            case "fans": return .fans
+            case "offlineLibrary": return .offlineLibrary
+            default: return nil
+            }
+        }
+        switch parts[0] {
+        case "post": return .post(postID: parts[1])
+        case "creator": return .creator(creatorID: parts[1])
+        case "comments": return .comments(postID: parts[1], focusCommentID: nil)
+        case "newsletter": return .newsletter(newsletterID: parts[1])
+        case "supportCreator": return .supportCreator(creatorID: parts[1])
+        case "supportAccount": return .supportAccount(accountID: parts[1])
+        case "draft": return .draft(draftID: parts[1])
+        case "plans": return .plans(creatorID: parts[1])
+        case "search": return .search(query: parts[1])
+        case "tag": return .tag(name: parts[1])
+        default: return nil
+        }
+    }
+
     func binding(for tab: AppTab) -> Binding<NavigationPath> {
         Binding(
             get: { [unowned self] in self.path(for: tab) },

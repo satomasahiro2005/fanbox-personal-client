@@ -97,6 +97,7 @@ final class AppEnvironment {
         if arguments.contains("-demoData") {
             env.seedDemoIfNeeded()
         }
+        env.router.applyLaunchArguments()
         return env
     }
 
