@@ -1,14 +1,14 @@
-# FANBOX Personal Client — 内部 API リファレンス
+# FANBOX Personal Client — internal API reference
 
 > **Status:** research snapshot, 2026-09-24.
 > The pixivFANBOX API is **unofficial and undocumented**. Nothing in this file has been checked yet by a request from this app. Before relying on a shape, confirm it in Research Mode / API Inspector (SPEC §36–37).
 > This file sits under the repository's All Rights Reserved policy (SPEC §3.5).
 
-## 目次
+## Contents
 
-- [0. 出典と法的注記 (Provenance / legal)](#0-出典と法的注記-provenance--legal)
-- [1. Transport（通信層）](#1-transport通信層)
-- [2. 共通オブジェクト (Common objects)](#2-共通オブジェクト-common-objects)
+- [0. Provenance / legal](#0-provenance--legal)
+- [1. Transport](#1-transport)
+- [2. Common objects](#2-common-objects)
 - [3. Endpoint index](#3-endpoint-index)
 - [4. Session](#4-session)
 - [5. Timeline](#5-timeline)
@@ -17,7 +17,7 @@
 - [8. Plans / Support](#8-plans--support)
 - [9. Comments](#9-comments)
 - [10. Notifications (bell)](#10-notifications-bell)
-- [11. Newsletters（おたより）](#11-newslettersおたより)
+- [11. Newsletters (おたより)](#11-newsletters-おたより)
 - [12. Payments](#12-payments)
 - [13. Follow](#13-follow)
 - [14. Creator-side management (posts)](#14-creator-side-management-posts)
@@ -25,7 +25,7 @@
 - [16. Fans](#16-fans)
 - [17. Dashboard (creator earnings)](#17-dashboard-creator-earnings)
 - [18. Enum tables](#18-enum-tables)
-- [19. Differential sync（差分同期）](#19-differential-sync差分同期)
+- [19. Differential sync](#19-differential-sync)
 - [20. Web fallback URLs](#20-web-fallback-urls)
 - [21. Appendix: legacy / unverified endpoints](#21-appendix-legacy--unverified-endpoints)
 - [22. Open questions / unknowns](#22-open-questions--unknowns)
@@ -33,7 +33,7 @@
 
 ---
 
-## 0. 出典と法的注記 (Provenance / legal)
+## 0. Provenance / legal
 
 ### 0.1 How this information was obtained
 
@@ -119,7 +119,7 @@ Skeletons use a JSON-like notation. They are not valid JSON:
 
 ---
 
-## 1. Transport（通信層）
+## 1. Transport
 
 ### 1.1 Hosts
 
@@ -283,7 +283,7 @@ No source tests iOS. The following follows from §1.7:
 
 ---
 
-## 2. 共通オブジェクト (Common objects)
+## 2. Common objects
 
 ### 2.1 UserRef
 
@@ -496,7 +496,7 @@ The server flattens a reply to a reply into its root's `replies`: `rootCommentId
 - In the real capture, keys that do not apply to a type are **absent**, not null. fankt's handcrafted fixtures fill them with null. Decode every type-specific key as optional.
 - fankt uses the bell id as the comment id for `post_comment`. Whether the bell id really equals the comment id is **unverified**.
 
-### 2.12 NewsLetter（おたより）
+### 2.12 NewsLetter (おたより)
 
 ```jsonc
 {
@@ -1278,7 +1278,7 @@ App policy: the cheapest check is `bell.countUnread`, and it also feeds the badg
 
 ---
 
-## 11. Newsletters（おたより）
+## 11. Newsletters (おたより)
 
 ### 11.1 `newsletter.list`
 
@@ -1866,7 +1866,7 @@ Help Center billing facts that matter for `supportChanged`:
 
 ---
 
-## 19. Differential sync（差分同期）
+## 19. Differential sync
 
 This section implements SPEC §3.7 and §34: fetch the latest page, walk newest → oldest, **stop at a known post id**, and never run a full-history crawl.
 
@@ -2044,7 +2044,7 @@ Verify each of these in Research Mode before building features that depend on it
 | Plans / Support | 3 | 3 | 0 | 0 |
 | Comments | 5 | 4 | 1 | 0 |
 | Notifications (bell) | 5 | 3 | 2 | 0 |
-| Newsletters（おたより） | 3 | 0 | 2 | 1 |
+| Newsletters (おたより) | 3 | 0 | 2 | 1 |
 | Payments | 2 | 1 | 1 | 0 |
 | Follow | 2 | 2 | 0 | 0 |
 | Creator-side management | 5 | 2 | 3 | 0 |
