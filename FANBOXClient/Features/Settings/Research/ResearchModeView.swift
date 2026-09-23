@@ -133,11 +133,17 @@ struct ResearchModeView: View {
         .navigationTitle("Research Mode")
         .navigationBarTitleDisplayMode(.inline)
         .accessibilityIdentifier("researchModeView")
-        .task { counts = ResearchLogCounts.load(store: env.store) }
-        .refreshable { counts = ResearchLogCounts.load(store: env.store) }
+        .task {
+            env.research.flush()
+            counts = ResearchLogCounts.load(store: env.store)
+        }
+        .refreshable {
+            env.research.flush()
+            counts = ResearchLogCounts.load(store: env.store)
+        }
         .confirmationDialog("Research ログを削除しますか？", isPresented: $confirmClearLogs, titleVisibility: .visible) {
             Button("ログを削除", role: .destructive) {
-                ResearchMaintenance.clearLogs(store: env.store)
+                env.research.clearAll()
                 ResearchExportBuilder.removeExports()
                 exportFileURL = nil
                 counts = ResearchLogCounts.load(store: env.store)
@@ -156,6 +162,7 @@ struct ResearchModeView: View {
     private func prepareExport() {
         isExporting = true
         defer { isExporting = false }
+        env.research.flush()
         exportFileURL = ResearchExportBuilder.writeExport(store: env.store, researchModeEnabled: env.settings.researchModeEnabled)
     }
 }
