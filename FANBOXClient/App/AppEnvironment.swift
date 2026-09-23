@@ -70,6 +70,7 @@ final class AppEnvironment {
         }
         networkMode.onConnectivityRestored = { [weak self] in
             self?.replies.handleConnectivityRestored()
+            self?.uploads.start()
         }
         web.onDismiss = { [weak self] request in
             guard let self else { return }
