@@ -293,6 +293,7 @@ private struct DraftEditorContent: View {
 
             if hasMedia {
                 DraftUploadPanel(draft: draft, jobs: jobs, canUpload: capabilities.uploadsMedia,
+                                 awaitsPost: capabilities.uploadsNeedPost && draft.remotePostID == nil,
                                  webItemCount: plan.webItems.filter { $0.kind == .image || $0.kind == .file }.count,
                                  showChecklist: { showHandoff = true })
             }

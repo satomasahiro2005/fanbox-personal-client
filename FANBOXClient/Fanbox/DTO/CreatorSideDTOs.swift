@@ -93,6 +93,64 @@ struct FanboxPostCreateBody: FanboxResponseBody {
     static var responseSchema: [String: Set<String>] { ["body": ["postId"]] }
 }
 
+/// post.addImage `{ body: Image }` (docs/API.md §15.1; the shape is inferred from how the web client uses the answer, so a
+/// wrapped `{ image: Image }` is accepted too).
+struct FanboxUploadedImageBody: FanboxResponseBody {
+    var image: FanboxImageDTO
+
+    init(from decoder: Decoder) throws {
+        let o = try LenientObject(decoder)
+        if o.has("id") {
+            image = try FanboxImageDTO(from: decoder)
+        } else if let wrapped = o.decode("image", as: FanboxImageDTO.self) {
+            image = wrapped
+        } else {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath,
+                                                    debugDescription: "addImage without id (keys: \(o.keys.sorted()))"))
+        }
+    }
+
+    static var responseSchema: [String: Set<String>] { FanboxImageDTO.knownSchema(at: "body") }
+}
+
+/// post.addFile `{ body: File }` (docs/API.md §15.2; `{ file: File }` accepted too).
+struct FanboxUploadedFileBody: FanboxResponseBody {
+    var file: FanboxFileDTO
+
+    init(from decoder: Decoder) throws {
+        let o = try LenientObject(decoder)
+        if o.has("id") {
+            file = try FanboxFileDTO(from: decoder)
+        } else if let wrapped = o.decode("file", as: FanboxFileDTO.self) {
+            file = wrapped
+        } else {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath,
+                                                    debugDescription: "addFile without id (keys: \(o.keys.sorted()))"))
+        }
+    }
+
+    static var responseSchema: [String: Set<String>] { FanboxFileDTO.knownSchema(at: "body") }
+}
+
+/// post.addUrlEmbed `{ body: UrlEmbed }` (docs/API.md §15.3; `{ urlEmbed: UrlEmbed }` accepted too).
+struct FanboxAddedURLEmbedBody: FanboxResponseBody {
+    var urlEmbed: FanboxURLEmbedDTO
+
+    init(from decoder: Decoder) throws {
+        let o = try LenientObject(decoder)
+        if o.has("id") {
+            urlEmbed = try FanboxURLEmbedDTO(from: decoder)
+        } else if let wrapped = o.decode("urlEmbed", as: FanboxURLEmbedDTO.self) {
+            urlEmbed = wrapped
+        } else {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath,
+                                                    debugDescription: "addUrlEmbed without id (keys: \(o.keys.sorted()))"))
+        }
+    }
+
+    static var responseSchema: [String: Set<String>] { FanboxURLEmbedDTO.knownSchema(at: "body") }
+}
+
 /// relationship.listFans element `{ status: supporter|follower, user, planId, activatedAt, note }`.
 struct FanboxFanDTO: Decodable, Hashable, Sendable, SchemaDescribed {
     var status: String?

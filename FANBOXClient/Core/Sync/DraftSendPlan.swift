@@ -98,6 +98,21 @@ enum DraftSendPlanner {
             plan.warnings.append("コメントできる人の設定を FANBOX から読み取れませんでした。既定値（有料なら支援者のみ、無料なら全員）で送信されます。")
         }
 
+        if capabilities.uploadsNeedPost, let payload {
+            let uploads = payload.pendingUploadBlockIDs.count
+            let links = payload.pendingLinkCardBlockIDs.count
+            let steps = [uploads > 0 ? "画像・ファイル \(uploads) 件のアップロード" : nil, links > 0 ? "リンクカード \(links) 件の登録" : nil]
+                .compactMap { $0 }.joined(separator: "と")
+            if !steps.isEmpty {
+                plan.notes.append(isExisting
+                    ? "\(steps)をこの投稿に対して行ってから、本文を保存します。完了した項目は再送しません。"
+                    : "先に FANBOX に下書きを作成し、\(steps)を行ってから本文を保存します。途中で失敗しても作成した下書きは残り、再送すると同じ下書きに続きから送信します（完了した項目は再送しません）。")
+            }
+        }
+        let draftType = draft.remotePostType
+        if isExisting, capabilities.allowedKinds(in: draftType) != nil {
+            plan.notes.append("「\(draftType.creatorLabel)」形式の投稿として保存します（\(draftType == .image ? "画像" : "ファイル")はブロックの順、テキストは段落ごとに空行で区切った本文になります）。")
+        }
         if !plan.webItems.isEmpty {
             plan.notes.append("\(summary(of: plan.webItems))はアプリから送信できません。本文を先に FANBOX に保存し、残りは Web エディタで追加します。")
             if publish && !sendsPublished {

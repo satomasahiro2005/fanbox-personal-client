@@ -401,7 +401,25 @@ actor DemoWorld {
         return false
     }
 
-    func completeUpload(fileURL: URL, kind: UploadKind) -> RemoteUploadResult {
+    /// Empty draft of the self creator (the first step of FANBOX's create → upload → update flow).
+    func createEmptyPost(account: AccountContext) throws -> String {
+        _ = try creatorViewer(account)
+        sequence += 1
+        let id = "demo-post-new-\(sequence)"
+        posts[id] = DemoStoredPost(id: id, creatorID: DemoFixtures.selfCreatorID, type: .article, title: "", feeRequired: 0, planID: nil,
+                                   status: .draft, tags: [], hasAdultContent: false, blocks: [], coverImageURL: nil, publishedAt: nil,
+                                   updatedAt: mutationDate(), baseLikeCount: 0)
+        return id
+    }
+
+    /// Throws unless `postID` is a post of the self creator (uploads are stored into a post, like on FANBOX).
+    func requireOwnPost(_ postID: String, account: AccountContext) throws {
+        _ = try creatorViewer(account)
+        guard let post = posts[postID], post.creatorID == DemoFixtures.selfCreatorID else { throw RemoteError.notFound }
+    }
+
+    /// `postID`: the post the upload is stored into (nil = legacy post-independent upload).
+    func completeUpload(fileURL: URL, kind: UploadKind, postID: String? = nil) -> RemoteUploadResult {
         sequence += 1
         let name = fileURL.deletingPathExtension().lastPathComponent
         let ext = fileURL.pathExtension.lowercased()
@@ -413,14 +431,31 @@ actor DemoWorld {
             let set = DemoMedia.imageSet(seed: "upload-\(sequence)", width: w, height: h)
             mediaIndex[mediaID] = RemoteBlock(kind: .image, mediaID: mediaID, thumbnailURL: set.thumbnail, displayURL: set.display,
                                               originalURL: set.original, width: w, height: h)
-            return RemoteUploadResult(mediaID: mediaID, url: set.display)
+            return RemoteUploadResult(mediaID: mediaID, url: set.display, postID: postID, thumbnailURL: set.thumbnail, width: w, height: h,
+                                      fileExtension: ext.isEmpty ? nil : ext)
         case .file:
             let mediaID = "demo-upload-file-\(sequence)"
             let url = DemoMedia.fileURL(name: ext.isEmpty ? name : "\(name).\(ext)", size: size)
             mediaIndex[mediaID] = RemoteBlock(kind: DemoWorld.fileBlockKind(ext: ext), mediaID: mediaID, fileName: name,
                                               fileExtension: ext.isEmpty ? nil : ext, fileSize: size, url: url)
-            return RemoteUploadResult(mediaID: mediaID, url: url)
+            return RemoteUploadResult(mediaID: mediaID, url: url, postID: postID, fileExtension: ext.isEmpty ? nil : ext, fileName: name,
+                                      fileSize: size)
         }
+    }
+
+    /// Link card registered in a post (FANBOX post.addUrlEmbed). URLs containing "fail" are refused so the retry of a
+    /// failed card can be exercised.
+    func addURLEmbed(url: String, postID: String, account: AccountContext) throws -> RemoteUploadResult {
+        try requireOwnPost(postID, account: account)
+        let trimmed = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard DraftPostMapping.isWebURL(trimmed) else { throw RemoteError.invalidRequest("リンクカードの URL が正しくありません（http / https）") }
+        if trimmed.lowercased().contains("fail") {
+            throw RemoteError.invalidRequest("Demo: リンクカードを登録できませんでした（\(trimmed)）")
+        }
+        sequence += 1
+        let id = "demo-urlembed-\(sequence)"
+        mediaIndex[id] = RemoteBlock(kind: .url, mediaID: id, url: trimmed, title: URL(string: trimmed)?.host ?? trimmed)
+        return RemoteUploadResult(mediaID: id, url: trimmed, postID: postID)
     }
 
     func fans(account: AccountContext, cursor: String?) throws -> RemotePage<RemoteFan> {
@@ -662,7 +697,11 @@ actor DemoWorld {
             let name = draft.text.isEmpty ? (draft.mediaID ?? "file") : draft.text
             return RemoteBlock(kind: .file, mediaID: draft.mediaID, fileName: name, url: DemoMedia.fileURL(name: name, size: 0))
         case .url:
-            return RemoteBlock(kind: .url, url: draft.url, title: draft.text.isEmpty ? draft.url : draft.text)
+            if let id = draft.mediaID, var known = mediaIndex[id] {
+                if !draft.text.isEmpty { known.title = draft.text }
+                return known
+            }
+            return RemoteBlock(kind: .url, mediaID: draft.mediaID, url: draft.url, title: draft.text.isEmpty ? draft.url : draft.text)
         case .embed:
             return RemoteBlock(kind: .embed, text: draft.text, url: draft.url, embedProvider: draft.embedProvider,
                                embedContentID: draft.embedContentID)

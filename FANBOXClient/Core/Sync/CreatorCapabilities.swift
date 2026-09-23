@@ -3,9 +3,12 @@ import Foundation
 /// What a remote data source can write for Creator Mode posts (SPEC §18 / §20 / §40). Decided up front, so the editor can
 /// badge blocks and explain limits BEFORE the creator taps publish, instead of failing at send time.
 ///
-/// - `.full`: everything the native editor offers (demo data source, test fakes).
-/// - `.textOnly`: FANBOX today (docs/API.md §14.4 "App scope", §15): text / header blocks natively; media already on the
-///   post round-trips by id; new uploads, new link cards and new embeds are added in the account web editor.
+/// - `.full`: everything the native editor offers, uploads not bound to a post (test fakes).
+/// - `.demo`: everything, with the same create-first upload flow as FANBOX (demo accounts).
+/// - `.fanbox` (defined next to the FANBOX adapter): text / headers, image and file uploads and new link cards natively,
+///   all stored into the post (created first when new); new embeds, the R-18 flag and plan ids go to the web editor.
+/// - `.textOnly`: text / header blocks natively; media already on the post round-trips by id; new uploads, link cards
+///   and embeds are added in the account web editor.
 /// - `.webOnly`: native writes switched off; everything goes through the web editor.
 struct DraftCapabilities: Sendable, Hashable {
     /// Create / update posts natively at all.
@@ -24,10 +27,23 @@ struct DraftCapabilities: Sendable, Hashable {
     var sendsCommentPermission: Bool
     /// Non-article posts (image / file / text / video types) can be updated with a block body.
     var updatesNonArticlePosts: Bool
+    /// Uploads and new link cards are stored INTO an existing post (FANBOX `post.addImage` / `post.addFile` /
+    /// `post.addUrlEmbed` take a `postId`): a new post is created first (`createEmptyPost`) and its id persisted, then
+    /// media is uploaded and link cards registered, then the content is saved by id.
+    var uploadsNeedPost: Bool = false
+    /// Image- and file-type posts are saved with their own body shape (`{text, images}` / `{text, files}`): they can be
+    /// updated natively but only hold image (file) blocks and plain text.
+    var mediaPostBodies: Bool = false
+    /// Client-side limits of the service's uploader (checked before anything is sent). nil = no known limits.
+    var mediaLimits: DraftMediaLimits? = nil
 
     static let full = DraftCapabilities(nativeWrites: true, uploadsMedia: true, createsLinkCards: true, createsEmbeds: true,
                                         sendsAdultFlag: true, sendsPlanID: true, sendsCommentPermission: false,
                                         updatesNonArticlePosts: true)
+    /// Demo accounts: every block natively, with FANBOX's create-first flow (uploads and link cards bound to the post).
+    static let demo = DraftCapabilities(nativeWrites: true, uploadsMedia: true, createsLinkCards: true, createsEmbeds: true,
+                                        sendsAdultFlag: true, sendsPlanID: true, sendsCommentPermission: false,
+                                        updatesNonArticlePosts: true, uploadsNeedPost: true)
     static let textOnly = DraftCapabilities(nativeWrites: true, uploadsMedia: false, createsLinkCards: false, createsEmbeds: false,
                                             sendsAdultFlag: false, sendsPlanID: false, sendsCommentPermission: true,
                                             updatesNonArticlePosts: false)
@@ -44,6 +60,51 @@ struct DraftCapabilities: Sendable, Hashable {
         case .url: return createsLinkCards
         case .embed: return createsEmbeds
         }
+    }
+
+    /// True when an existing post of this type can be updated natively without changing its type.
+    func updates(_ type: PostType) -> Bool {
+        guard nativeWrites else { return false }
+        switch type {
+        case .article, .unknown: return true
+        case .image, .file: return updatesNonArticlePosts || mediaPostBodies
+        case .text, .video, .entry: return updatesNonArticlePosts
+        }
+    }
+
+    /// Block kinds an image- / file-type post can hold when it is saved with its own body shape (nil = any kind).
+    func allowedKinds(in type: PostType) -> Set<DraftBlockKind>? {
+        guard mediaPostBodies, !updatesNonArticlePosts else { return nil }
+        switch type {
+        case .image: return [.image, .text]
+        case .file: return [.file, .text]
+        default: return nil
+        }
+    }
+}
+
+/// Upload limits of a service's own uploader, checked before a draft is sent so an oversized or unsupported file is
+/// reported in the plan instead of after a post was created.
+struct DraftMediaLimits: Sendable, Hashable {
+    var maxImageBytes: Int
+    var maxFileBytes: Int
+    /// Lower-case extensions without the dot.
+    var imageExtensions: Set<String>
+    var fileExtensions: Set<String>
+
+    /// Why the file cannot be uploaded (nil = acceptable). `fileName` is the display name, `size` in bytes when known.
+    func problem(kind: UploadKind, fileName: String, size: Int?) -> String? {
+        let ext = URL(fileURLWithPath: fileName).pathExtension.lowercased()
+        let allowed = kind == .image ? imageExtensions : fileExtensions
+        let label = kind == .image ? "画像" : "ファイル"
+        if !allowed.contains(ext) {
+            return "「\(fileName)」はアップロードできない\(label)形式です（対応: \(allowed.sorted().joined(separator: ", "))）"
+        }
+        let limit = kind == .image ? maxImageBytes : maxFileBytes
+        if let size, size > limit {
+            return "「\(fileName)」は大きすぎます（\(label)は \(limit / 1_000_000) MB まで）"
+        }
+        return nil
     }
 }
 

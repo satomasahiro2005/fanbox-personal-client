@@ -284,6 +284,54 @@ final class DraftMediaStore: Sendable {
         return result
     }
 
+    // MARK: Upload staging
+
+    /// Per-job links used while uploading (`<root>/_upload/<jobID>/<display name>`), next to the draft directories.
+    var uploadStagingDirectory: URL { rootDirectory.appendingPathComponent("_upload", isDirectory: true) }
+
+    /// The draft file under its display name, so the upload's multipart file name is the name the creator sees (FANBOX
+    /// shows an attachment's name to supporters; stored files are named `<uuid>.<ext>`). A hard link to the same protected
+    /// file (a copy when linking fails) in a per-job directory; remove it with `removeUploadStaging(jobID:)`.
+    func stageUpload(draftID: String, fileName: String, displayName: String, jobID: String) throws -> URL {
+        let fm = FileManager.default
+        let source = fileURL(draftID: draftID, fileName: fileName)
+        let dir = uploadStagingDirectory.appendingPathComponent(Self.safeComponent(jobID), isDirectory: true)
+        try? fm.removeItem(at: dir)
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.protectionKey: Self.protection])
+        var name = Self.uploadName(displayName)
+        if URL(fileURLWithPath: name).pathExtension.isEmpty, !source.pathExtension.isEmpty { name += "." + source.pathExtension }
+        let target = dir.appendingPathComponent(name, isDirectory: false)
+        do {
+            try fm.linkItem(at: source, to: target)
+        } catch {
+            try fm.copyItem(at: source, to: target)
+        }
+        return target
+    }
+
+    func removeUploadStaging(jobID: String) {
+        try? FileManager.default.removeItem(at: uploadStagingDirectory.appendingPathComponent(Self.safeComponent(jobID), isDirectory: true))
+    }
+
+    /// Drops staging links left by an interrupted upload (app killed mid-request). Called when the queue starts.
+    func removeAllUploadStaging() {
+        try? FileManager.default.removeItem(at: uploadStagingDirectory)
+    }
+
+    /// Display name usable as a single path component: keeps Unicode (Japanese names stay readable), drops separators and
+    /// control characters, no leading dot, at most 120 characters (extension kept).
+    static func uploadName(_ raw: String) -> String {
+        let scalars = raw.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) && $0 != "/" && $0 != ":" && $0 != "\\" }
+        var name = String(String.UnicodeScalarView(scalars)).trimmingCharacters(in: .whitespaces)
+        while name.hasPrefix(".") { name.removeFirst() }
+        if name.count > 120 {
+            let ext = URL(fileURLWithPath: name).pathExtension
+            let base = ext.isEmpty ? name : String(name.dropLast(ext.count + 1))
+            name = String(base.prefix(ext.isEmpty ? 120 : max(1, 119 - ext.count))) + (ext.isEmpty ? "" : "." + ext)
+        }
+        return name.isEmpty ? "file" : name
+    }
+
     // MARK: Delete
 
     func removeFile(draftID: String, fileName: String) {

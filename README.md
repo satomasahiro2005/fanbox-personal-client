@@ -59,7 +59,7 @@ The full specification (in Japanese) is in [SPEC.md](SPEC.md).
 | Low data | Automatic / Normal / Low Data / Extreme / Offline modes. A text-first scheduler sends comment posts and interactive reads before any media and pauses media transfers while they run. Offline stops every request: queued requests fail, downloads and uploads are cancelled, and no web view loads a page. |
 | Transport | FANBOX requests go through the account's `URLSession`, or through a hidden web view of the same account (same cookies and web session). `post.info` and `post.getEditable` use the web view first while the app is in the foreground; other calls switch to it only when Cloudflare stops the native request. A device-wide budget spaces `post.info`, pauses every FANBOX call after a 429 and does not repeat a block across accounts. This design follows public reports (docs/API.md §1.7–§1.11); it has not been checked against the live service. |
 | Support | Supports grouped by creator and by account, with monthly totals, this month's actual payments, next month's planned total, a locally observed support history and anomaly flags. Payment profiles (nickname, brand, last four digits, memo) can be linked to each support. Payment itself always happens in the account-aware web view. |
-| Creator mode | Dashboard, managed posts, local drafts with a block editor, a media upload queue, comments, fans and plans for accounts that own a creator page. With real accounts, native sends are text-first; see [Known limitations](#known-limitations). |
+| Creator mode | Dashboard, managed posts, local drafts with a block editor, a media upload queue, comments, fans and plans for accounts that own a creator page. With real accounts, images, files and link cards are uploaded natively into the post; new embeds are finished in the web editor. See [Known limitations](#known-limitations). |
 | Library | Local full-text search, favorites, read later, local tags and memos (never sent to FANBOX), offline saving with a size-limited media cache. |
 | Research mode | Redacted request / response / navigation logs, an API schema inspector that flags new or missing fields, account, sync, support and scheduler state, and a switch that forces the native or the web view transport. Debug builds add demo tools that simulate new notifications. |
 
@@ -87,28 +87,37 @@ API Inspector) is the tool for it. The areas below are expected to need verifica
 | Endpoint shapes | Every decoder. The API Inspector marks new and missing fields per endpoint and object path; decode failures are recorded as events | API Schema, Sync / Errors |
 | Cloudflare | Whether list and count calls pass over `URLSession` with the web view's cookies and user agent; whether `post.info` passes through the hidden web view; whether the edge-block detection matches the real block pages; whether the request budget is conservative enough. The 通信経路 (transport) switch forces "Native のみ" (native only) or "WebView のみ" (web view only) | 通信経路 section, Requests |
 | Writes | Comments, replies and comment deletion, likes, `post.create` / `post.update` (multipart form with the CSRF token in `tt`), and the CSRF refresh after a rejected write. Their response bodies are unknown (docs/API.md §23.4) | Requests, Responses |
+| Media uploads | `post.addImage`, `post.addFile` and `post.addUrlEmbed` (docs/API.md §15): whether FANBOX accepts the CSRF token in the `X-CSRF-Token` header without a `tt` field (the app never writes the token into an upload body), the response shapes (`Image` / `File` / `UrlEmbed`), and the attachment name FANBOX shows. Try it on a throwaway draft first | Requests, Responses, API Schema |
 | Web pages | The URLs marked *unverified* in docs/API.md §20: login, plan pages, supporting plans list, payment settings and history, notifications list, newsletter inbox, new-post editor | Navigation, fallback banner |
 | Derived events | 決済要確認 from `hasUnpaidPayments` / `payment.listUnpaid`, 新規支援 from the fan list, 支援状態変化 from the supporting-plan list | Support State, notification inbox |
 | Background | When iOS runs `BGAppRefreshTask`, and what the native transport can fetch in the background | Scheduler, Requests |
 
 Research Mode can also record the API calls FANBOX's own pages make inside the account web view (structure only:
-method, redacted URL, status, field names). This is how the post editor's media upload endpoint, which the research
-could not find (docs/API.md §15.1), can be read from your own session.
+method, redacted URL, status, field names). Adding an image in the web editor that way shows the media upload request
+of your own session next to the app's own `post.addImage` call, which is how the endpoints read from FANBOX's archived
+web client (docs/API.md §15) can be confirmed.
 
 ## Known limitations
 
 **Creator Mode with real FANBOX accounts.** The FANBOX write API is reconstructed from public sources and has not
 been verified against the live service (docs/API.md §14–§15).
 
-- **Native sends cover text and headings only.** Image and file uploads, new link cards, new embeds, the R-18 flag and
-  plan-specific gating (FANBOX gates by minimum fee) have no documented request shape. The editor marks these blocks
-  "Web" before you publish. Sending saves the text first as a FANBOX draft, then hands off to the account's web editor
-  with an ordered checklist and the app's resized / converted images exported for the web file picker. The demo
-  account supports every block natively, so you can try the full flow offline.
+- **Media upload is native but not yet verified live.** Images, files and link cards are stored into the post with
+  `post.addImage`, `post.addFile` and `post.addUrlEmbed`, which were read from FANBOX's own (archived) web client
+  (docs/API.md §15). For a new post the app first creates a FANBOX draft (`post.create`), stores its id, uploads, then
+  saves the content referencing everything by id. If a step fails, the draft, its FANBOX id and every completed upload
+  are kept, and the next send continues where it stopped; only failed items are sent again. Uploads of a new post start
+  when you send it, never from the upload button (so no FANBOX draft is created by surprise). The app checks FANBOX's
+  own limits before sending: images jpg / png / gif up to 50 MB, attachments up to 300 MB with FANBOX's extension list.
+- **Still in the web editor.** New embed blocks (the current web client has no add-embed call), the R-18 flag and
+  plan-specific gating (FANBOX gates by minimum fee), and the cover image. The editor marks new embeds "Web"; sending
+  saves everything else first and hands off to the account's web editor with an ordered checklist. The demo account
+  runs the same create → upload → save flow with every block kind, so you can try it offline.
 - **Post Edit round-trip.** Unchanged paragraphs are sent back as they were, including bold, links and empty spacing
   paragraphs. Media, link cards and embeds that are already on the post are kept by their ids. An edited paragraph
-  keeps the styles outside the edited text; the app asks before it sends a change that would drop any. Posts the app
-  cannot write back faithfully (non-article posts, scheduled posts, unknown block types) are edited in the web editor.
+  keeps the styles outside the edited text; the app asks before it sends a change that would drop any. Image- and
+  file-type posts keep their type (their images or files plus one text). Posts the app cannot write back faithfully
+  (text- and video-type posts, scheduled posts, unknown block types) are edited in the web editor.
   If FANBOX does not report the tags or the comment permission, the app asks before it overwrites them.
 - **No accidental unpublish or overwrite.** Updating a live post keeps it published. Taking it down to a draft needs
   explicit confirmation. Before each update the app reads the post again and stops if it changed elsewhere, for example

@@ -98,6 +98,8 @@ enum DraftPostMapping {
         var formattingLossBlockIDs: [String]
         /// Image / file blocks still to be uploaded (only with `allowPendingUploads`, i.e. when planning).
         var pendingUploadBlockIDs: [String] = []
+        /// New link cards still to be registered in the post (`DraftCapabilities.uploadsNeedPost`; only when planning).
+        var pendingLinkCardBlockIDs: [String] = []
     }
 
     /// Builds the create / update payload (legacy entry point: every block kind is sendable).
@@ -111,23 +113,46 @@ enum DraftPostMapping {
     ///   Edited paragraphs keep the styles outside the edited range; the others are reported in `formattingLossBlockIDs`.
     /// - New blocks the capabilities cannot send (uploads, new link cards / embeds) are left out and reported in
     ///   `webItemBlockIDs`; with upload capability an image / file block without `remoteMediaID` throws (upload first)
-    ///   unless `allowPendingUploads` (planning before the upload queue ran), which reports it in `pendingUploadBlockIDs`.
-    /// - Blocks that already reference FANBOX content (`remoteMediaID`) are sent back by id.
+    ///   unless `allowPendingUploads` (planning before the upload queue ran), which reports it in `pendingUploadBlockIDs`
+    ///   after checking it against `DraftCapabilities.mediaLimits`.
+    /// - With `uploadsNeedPost` a new link card is registered in the post first (its id is then sent): unregistered cards
+    ///   throw, or are reported in `pendingLinkCardBlockIDs` when planning.
+    /// - Blocks that already reference FANBOX content (`remoteMediaID`) are sent back by id, with the upload / registration
+    ///   result (`media`) when this app stored them.
+    /// - An existing image- / file-type post (`DraftCapabilities.allowedKinds(in:)`) only takes image (file) blocks and
+    ///   text; each text block is one paragraph of the post's text.
     static func payload(from draft: Draft, publish: Bool, capabilities: DraftCapabilities,
                         allowPendingUploads: Bool = false) throws -> Payload {
         let title = draft.title.trimmingCharacters(in: .whitespacesAndNewlines)
         try validateBasics(title: title, tags: draft.tags)
 
+        let postType: PostType = draft.remotePostID == nil ? .article : draft.remotePostType
+        let allowedKinds = capabilities.allowedKinds(in: postType)
         var blocks: [RemoteDraftBlock] = []
         var webItems: [String] = []
         var formattingLoss: [String] = []
         var pendingUploads: [String] = []
+        var pendingLinks: [String] = []
         var missingMedia = 0
+        var missingLinks = 0
+        var disallowed = 0
+        var problems: [String] = []
         for block in draft.orderedBlocks {
             // A locked note stands for FANBOX content that cannot be written back (the draft is then blocked anyway).
             if block.isLockedRemote && block.remoteMediaID == nil && (block.kind == .text || block.kind == .header) { continue }
+            if let allowedKinds, !allowedKinds.contains(block.kind) {
+                if hasContent(block) { disallowed += 1 }
+                continue
+            }
             switch block.kind {
             case .text, .header:
+                if allowedKinds != nil {
+                    // Image / file post: the text is plain; one block = one paragraph of it.
+                    guard !block.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+                    blocks.append(RemoteDraftBlock(kind: .text, text: block.text, mediaID: nil, url: nil, embedProvider: nil,
+                                                   embedContentID: nil, keepsLineBreaks: true))
+                    continue
+                }
                 if let imported = block.importedText, imported == block.text {
                     blocks.append(RemoteDraftBlock(kind: block.kind, text: block.text, mediaID: nil, url: nil, embedProvider: nil,
                                                    embedContentID: nil, styles: block.importedStyles, keepsLineBreaks: true))
@@ -149,10 +174,15 @@ enum DraftPostMapping {
             case .image, .file:
                 if let mediaID = block.remoteMediaID, !mediaID.isEmpty {
                     blocks.append(RemoteDraftBlock(kind: block.kind, text: "", mediaID: mediaID, url: nil, embedProvider: nil,
-                                                   embedContentID: nil))
+                                                   embedContentID: nil, media: block.remoteMedia))
                 } else if block.localFileName != nil, !capabilities.sendsNew(block.kind) {
                     webItems.append(block.id)
-                } else if block.localFileName != nil, allowPendingUploads {
+                } else if let local = block.localFileName, allowPendingUploads {
+                    if let limits = capabilities.mediaLimits,
+                       let problem = limits.problem(kind: block.kind == .image ? .image : .file, fileName: block.originalFileName ?? local,
+                                                    size: block.fileSize) {
+                        problems.append(problem)
+                    }
                     pendingUploads.append(block.id)
                 } else {
                     missingMedia += 1
@@ -161,12 +191,22 @@ enum DraftPostMapping {
                 let url = (block.url ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                 if let mediaID = block.remoteMediaID, !mediaID.isEmpty {
                     blocks.append(RemoteDraftBlock(kind: .url, text: block.text, mediaID: mediaID, url: url.isEmpty ? nil : url,
-                                                   embedProvider: nil, embedContentID: nil))
+                                                   embedProvider: nil, embedContentID: nil, media: block.remoteMedia))
                     continue
                 }
                 guard !url.isEmpty else { continue }
                 if !capabilities.sendsNew(.url) {
                     webItems.append(block.id)
+                    continue
+                }
+                if capabilities.uploadsNeedPost {
+                    if !isWebURL(url) {
+                        problems.append("リンクカードの URL が正しくありません（http / https）: \(url.prefix(60))")
+                    } else if allowPendingUploads {
+                        pendingLinks.append(block.id)
+                    } else {
+                        missingLinks += 1
+                    }
                     continue
                 }
                 blocks.append(RemoteDraftBlock(kind: .url, text: block.text, mediaID: nil, url: url, embedProvider: nil,
@@ -193,15 +233,46 @@ enum DraftPostMapping {
                                                embedProvider: provider, embedContentID: contentID))
             }
         }
+        if disallowed > 0 {
+            let media = postType == .image ? "画像" : "ファイル"
+            throw RemoteError.invalidRequest("「\(postType.creatorLabel)」形式の投稿には\(media)と本文テキストだけを保存できます。"
+                + "見出し・リンクカード・埋め込みなど（\(disallowed) 件）は削除するか、Web エディタで編集してください。")
+        }
+        if let first = problems.first {
+            throw RemoteError.invalidRequest(problems.count > 1 ? "\(first) ほか \(problems.count - 1) 件" : first)
+        }
         if missingMedia > 0 { throw RemoteError.invalidRequest("未アップロードの画像・ファイルがあります（\(missingMedia) 件）") }
+        if missingLinks > 0 { throw RemoteError.invalidRequest("FANBOX に未登録のリンクカードがあります（\(missingLinks) 件）") }
         let hasContent = blocks.contains { !($0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0.mediaID == nil && $0.url == nil
                                               && $0.embedContentID == nil) }
-        if publish && !hasContent && webItems.isEmpty && pendingUploads.isEmpty { throw RemoteError.invalidRequest("本文が空です") }
+        if publish && !hasContent && webItems.isEmpty && pendingUploads.isEmpty && pendingLinks.isEmpty {
+            throw RemoteError.invalidRequest("本文が空です")
+        }
 
         let payload = RemotePostDraft(title: title, feeRequired: max(0, draft.feeRequired), planID: draft.targetPlanID,
                                       tags: normalizedTags(draft.tags), hasAdultContent: draft.hasAdultContent, blocks: blocks,
                                       publish: publish, commentPermission: draft.commentPermission)
-        return Payload(draft: payload, webItemBlockIDs: webItems, formattingLossBlockIDs: formattingLoss, pendingUploadBlockIDs: pendingUploads)
+        return Payload(draft: payload, webItemBlockIDs: webItems, formattingLossBlockIDs: formattingLoss,
+                       pendingUploadBlockIDs: pendingUploads, pendingLinkCardBlockIDs: pendingLinks)
+    }
+
+    /// True when the block holds something the creator entered (empty new blocks are ignored).
+    static func hasContent(_ block: DraftBlock) -> Bool {
+        switch block.kind {
+        case .text, .header: return !block.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        case .image, .file: return block.remoteMediaID != nil || block.localFileName != nil
+        case .url: return block.remoteMediaID != nil || !(block.url ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        case .embed:
+            return block.remoteMediaID != nil || !(block.url ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                || !(block.embedContentID ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+    }
+
+    /// http(s) URL with a host (a link card target).
+    static func isWebURL(_ string: String) -> Bool {
+        guard let comps = URLComponents(string: string), let scheme = comps.scheme?.lowercased(),
+              scheme == "https" || scheme == "http", let host = comps.host else { return false }
+        return !host.isEmpty
     }
 
     // MARK: Styles

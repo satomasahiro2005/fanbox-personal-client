@@ -416,6 +416,51 @@ silent push (optional relay)     post title + body,                 Support / Fa
 - Queued replies are flushed at launch, on polling ticks and scene activation, and before background refresh and
   silent push work (§3.3).
 
+## Creator Mode send and upload flow
+
+`DraftService.send` and `UploadQueue` (`Core/Sync/CreatorTools.swift`) turn a local `Draft` into a FANBOX post. What a
+data source can write natively is declared up front in `DraftCapabilities` (`Core/Sync/CreatorCapabilities.swift`;
+FANBOX: `.fanbox` in `Fanbox/Adapter/FanboxUploadForm.swift`), so `DraftSendPlanner` can badge blocks, check the
+upload limits and explain the send in the confirmation before any request.
+
+FANBOX stores images, files and link cards **into an existing post** (`post.addImage` / `post.addFile` /
+`post.addUrlEmbed`, docs/API.md §15; `uploadsNeedPost`). A send runs:
+
+1. **Plan** (no request): title, tags, block kinds the post type can hold, upload limits (images jpg / png / gif ≤ 50 MB,
+   attachments ≤ 300 MB from FANBOX's extension list), http(s) link cards. Blockers and warnings stop the send here.
+2. **Existing post:** `post.getEditable` first; a newer revision or a changed status stops the send.
+3. **New post with media or link cards:** `createEmptyPost` (`post.create`, interactiveWrite) and the new id is saved to
+   `Draft.remotePostID` **before** anything is uploaded. A retry therefore updates the same post; there is never a second
+   `post.create`.
+4. **Uploads:** `UploadQueue` runs one `UploadJob` at a time in block order at `foregroundMedia`, so comment POSTs
+   (`interactiveWrite`) preempt them (SPEC §29). Each job uploads `uploadImage/uploadFile(fileURL:postID:...)` against
+   `remotePostID`, from a per-job staging link that carries the block's display name (FANBOX shows an attachment's
+   name). The result (`RemoteUploadResult`: id, URLs, size, and the post it belongs to) is written to the job and the
+   block (`remoteMediaID`, `remoteMediaJSON`). Completed jobs are never re-sent; `retryFailed` re-queues failed jobs
+   only; offline leaves jobs queued. A job of a new post that has no FANBOX id yet is paused with
+   `UploadQueue.awaitingPostMessage` (the upload button explains this) and resumed by the send after step 3.
+5. **Link cards:** each new URL block is registered with `addURLEmbed` (interactiveWrite); a registered card keeps its
+   id and is never registered again. An edited URL clears the id, so the new URL is registered on the next send.
+6. **Save:** `post.update` through `FanboxRemoteDataSource.updatePost`, which re-reads the post and accepts only ids that
+   are already on it or were stored into this very post (`RemoteDraftBlock.media.postID`). Articles get the blocks array
+   with `image` / `file` / `url_embed` blocks by id in block order; image- and file-type posts get `{text, images}` /
+   `{text, files}` with the full objects. `imageMap` / `fileMap` / `urlEmbedMap` and `coverImage` are never sent.
+
+On any failure the local draft stays intact with `lastError`, together with `remotePostID` and every completed media
+id; the next send continues from where it stopped. New embed blocks, which have no add endpoint, are left out of the
+save and handed to the account web editor (text-first send with a checklist, SPEC §40); a new post with such items is
+saved as a FANBOX draft, never published unfinished.
+
+**CSRF and temporary files (SPEC §38 / §39).** `post.update` carries the token in its `tt` field and is encoded in
+memory. The media endpoints carry it **only** in the `X-CSRF-Token` header that the transport adds for `requiresCSRF`
+endpoints: image and file bodies are streamed from a temporary file (`MultipartFormData.writeToTemporaryFile`, complete
+file protection, deleted right after the request, stale ones purged at launch), and `FanboxAPIClient.sendMultipart`
+refuses a file form that contains `tt`. A missing token is fetched first; a 400 / 403 upload is retried once after a
+token refresh with the same token-free body file.
+
+The demo data source (`.demo` capabilities) runs the same create → upload → register → save flow against `DemoWorld`,
+with every block kind native; file names and URLs containing "fail" fail so the retry path can be tried.
+
 ## Web sessions
 
 - `AccountWebSessionView` (`Core/Web/WebBridgePresenter.swift`, presented by the `WebBridgePresenter` modifier) shows
@@ -477,7 +522,7 @@ silent push (optional relay)     post title + body,                 Support / Fa
 | `Core/Payments/` | `SupportAnalyzer`, `PaymentProfileValidator`, `PaymentResync`, support stop rules and texts |
 | `Core/Security/` | `SecretRedactor`, `KeychainStore`, `AppLog` |
 | `Core/Web/` | `WebBridge` (`WebDestination`), `WebDestination+Fallback`, `WebBridgePresenter` (`AccountWebSessionView`), `AccountWebView`, `WebFetchHost` (`WebFetchHostPool`), `WebSessionStore`, `WebPageMetadata`, `WebTransportResearchSection` |
-| `Fanbox/API`, `Fanbox/DTO`, `Fanbox/Adapter` | FANBOX endpoints, multipart forms, lenient DTOs, mapping to Remote*, `post.update` form |
+| `Fanbox/API`, `Fanbox/DTO`, `Fanbox/Adapter` | FANBOX endpoints, multipart forms, lenient DTOs, mapping to Remote*, `post.update` form, media upload forms and limits (`FanboxUploadForm`) |
 | `Fanbox/Demo/` | `DemoRemoteDataSource`, `DemoWorld` and fixtures for demo accounts |
 | `Fanbox/Research/` | `ResearchRecorder`, `SchemaInspector` |
 | `Features/Home` | unified timeline, post detail, comment threads |

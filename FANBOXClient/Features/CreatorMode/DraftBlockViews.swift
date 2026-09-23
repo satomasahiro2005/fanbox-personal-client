@@ -118,10 +118,12 @@ struct DraftBlockEditorRow: View {
         .onChange(of: block.embedContentID) { referenceEdited() }
     }
 
-    /// An edited link card / embed is a NEW one: never re-send the old FANBOX id for a different target.
+    /// An edited link card / embed is a NEW one: never re-send the old FANBOX id for a different target (a link card is
+    /// registered again for the new URL when the draft is sent).
     private func referenceEdited() {
         if (block.kind == .url || block.kind == .embed), block.remoteMediaID != nil, !block.isLockedRemote {
             block.remoteMediaID = nil
+            block.remoteMediaJSON = nil
         }
         env.drafts.touch(draft)
     }
@@ -209,7 +211,7 @@ struct DraftBlockEditorRow: View {
             HStack {
                 Label("URL", systemImage: "link").font(.caption).foregroundStyle(.secondary)
                 if block.remoteMediaID != nil {
-                    Text("FANBOX 上のリンクカード").font(.caption2).foregroundStyle(.secondary)
+                    Text(block.remoteMedia != nil ? "リンクカード登録済み" : "FANBOX 上のリンクカード").font(.caption2).foregroundStyle(.secondary)
                 }
             }
             TextField("https://", text: Binding(get: { block.url ?? "" }, set: { block.url = $0 }))
@@ -266,6 +268,8 @@ struct DraftMediaUploadBadge: View {
                 .foregroundStyle(.green)
         } else if !canUpload {
             Text("縮小・変換済み（Web エディタで追加）").font(.caption2).foregroundStyle(.secondary)
+        } else if let job, job.state == .paused, job.lastError == UploadQueue.awaitingPostMessage {
+            Text("送信時にアップロード（FANBOX の下書き作成後）").font(.caption2).foregroundStyle(.secondary)
         } else if let job {
             HStack(spacing: 4) {
                 Text(CreatorFormatting.uploadStatus(state: job.state, progress: job.progress))
@@ -287,6 +291,9 @@ struct DraftUploadPanel: View {
     let jobs: [UploadJob]
     /// False when the account uploads in the web editor (text-first send + checklist instead of the queue).
     var canUpload: Bool = true
+    /// Uploads are stored into a FANBOX post that does not exist yet (new post): they start when the draft is sent, right
+    /// after the FANBOX draft is created. No manual start, so tapping "upload" never creates a FANBOX post by surprise.
+    var awaitsPost: Bool = false
     var webItemCount: Int = 0
     var showChecklist: () -> Void = {}
 
@@ -342,9 +349,17 @@ struct DraftUploadPanel: View {
                     .font(.caption)
                     .foregroundStyle(.orange)
             }
+            if awaitsPost {
+                Label("送信（下書き保存 / 公開）すると、FANBOX に下書きを作成してから順にアップロードします。",
+                      systemImage: "tray.and.arrow.up")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("draftUploadAwaitsPostNote")
+            }
             HStack {
-                if notQueued > 0 || activeJobs.contains(where: { $0.state == .queued }) {
+                if !awaitsPost && (notQueued > 0 || activeJobs.contains(where: { $0.state == .queued || $0.lastError == UploadQueue.awaitingPostMessage })) {
                     Button {
+                        env.uploads.resumeAwaitingPost(draftID: draft.id)
                         env.uploads.enqueue(draftID: draft.id)
                         env.uploads.start()
                     } label: {
@@ -372,7 +387,9 @@ struct DraftUploadPanel: View {
                 if env.uploads.isRunning { ProgressView().controlSize(.mini) }
             }
         } footer: {
-            Text("画像は長辺 4096px を超える場合に縮小し、HEIC は JPEG に変換してから送信します。完了した項目は再送しません。")
+            Text(awaitsPost
+                 ? "FANBOX では画像・ファイルを投稿に直接アップロードするため、先に FANBOX の下書きが必要です。画像は長辺 4096px を超える場合に縮小し、HEIC は JPEG に変換します。完了した項目は再送しません。"
+                 : "画像は長辺 4096px を超える場合に縮小し、HEIC は JPEG に変換してから送信します。完了した項目は再送しません。")
         }
     }
 }
@@ -399,6 +416,9 @@ struct DraftUploadJobRow: View {
                 }
                 if job.state == .failed, let reason = job.lastError {
                     Text(reason).font(.caption).foregroundStyle(.red)
+                } else if job.state == .paused, let reason = job.lastError {
+                    // Paused by the app (web editor / waiting for the FANBOX draft), not by the creator.
+                    Text(reason).font(.caption).foregroundStyle(.secondary)
                 }
             }
             switch job.state {
@@ -406,6 +426,8 @@ struct DraftUploadJobRow: View {
                 Button { env.uploads.pause(jobID: job.id) } label: { Image(systemName: "pause.circle") }
                     .buttonStyle(.borderless)
                     .accessibilityLabel("一時停止")
+            case .paused where job.lastError == UploadQueue.awaitingPostMessage:
+                EmptyView()
             case .paused:
                 Button { env.uploads.resume(jobID: job.id) } label: { Image(systemName: "play.circle") }
                     .buttonStyle(.borderless)

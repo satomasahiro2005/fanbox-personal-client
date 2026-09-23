@@ -2,10 +2,13 @@ import Foundation
 
 /// Builds the `post.update` multipart form (docs/API.md §14.4).
 ///
-/// Scope (API.md "App scope"): native publishing covers article posts made of text / header blocks. Media blocks are
-/// accepted ONLY when they reference media that already belongs to the post on FANBOX (round-trip of an edited post);
-/// anything that would need an upload or a new URL embed throws `RemoteError.unsupported` so the UI falls back to the
-/// web editor (SPEC §18 / §40). Nothing here invents fields that no source documents (planId, cover, schedule, adult flag).
+/// - Article posts: the `body` field is the blocks array. Image / file / link-card blocks reference media BY ID only
+///   (`imageMap` / `fileMap` / `urlEmbedMap` are never sent): ids already on the post (from post.getEditable) and ids
+///   this app just stored into the same post (post.addImage / post.addFile / post.addUrlEmbed, `RemoteDraftBlock.media`
+///   with that `postID`). Any other id throws `RemoteError.unsupported` (the web editor is the way forward).
+/// - Image- / file-type posts: `body` is `{text, images}` / `{text, files}` with the full objects, in block order.
+/// - The cover is never sent (omitting `coverImage` keeps it). Nothing here invents fields no source documents (planId,
+///   adult flag); see docs/API.md §14.4 / §15.
 enum FanboxPostUpdateForm {
     /// Media ids that already exist on the FANBOX post (from post.getEditable), usable in blocks.
     struct ExistingMedia: Sendable, Hashable {
@@ -13,6 +16,9 @@ enum FanboxPostUpdateForm {
         var fileIDs: Set<String> = []
         var embedIDs: Set<String> = []
         var urlEmbedIDs: Set<String> = []
+        /// Full objects of the post's images / files (image- and file-type post bodies list them whole).
+        var imageObjects: [String: FanboxImageDTO] = [:]
+        var fileObjects: [String: FanboxFileDTO] = [:]
 
         init(imageIDs: Set<String> = [], fileIDs: Set<String> = [], embedIDs: Set<String> = [], urlEmbedIDs: Set<String> = []) {
             self.imageIDs = imageIDs
@@ -30,6 +36,26 @@ enum FanboxPostUpdateForm {
             fileIDs = Set((body?.fileMap ?? [:]).keys).union((body?.files ?? []).compactMap(\.id)).union(blocks.compactMap(\.fileId))
             embedIDs = Set((body?.embedMap ?? [:]).keys).union(blocks.compactMap(\.embedId))
             urlEmbedIDs = Set((body?.urlEmbedMap ?? [:]).keys).union(blocks.compactMap(\.urlEmbedId))
+            for image in (body?.images ?? []) + Array((body?.imageMap ?? [:]).values) {
+                if let id = image.id, imageObjects[id] == nil { imageObjects[id] = image }
+            }
+            for file in (body?.files ?? []) + Array((body?.fileMap ?? [:]).values) {
+                if let id = file.id, fileObjects[id] == nil { fileObjects[id] = file }
+            }
+        }
+
+        /// Adds the ids of media / link cards this app stored into `postID` (post.addImage / addFile / addUrlEmbed). Media
+        /// uploaded into another post is never accepted.
+        mutating func addUploads(for postID: String, in blocks: [RemoteDraftBlock]) {
+            for block in blocks {
+                guard let media = block.media, media.postID == postID, let id = block.mediaID, id == media.mediaID else { continue }
+                switch block.kind {
+                case .image: imageIDs.insert(id)
+                case .file: fileIDs.insert(id)
+                case .url: urlEmbedIDs.insert(id)
+                case .text, .header, .embed: continue
+                }
+            }
         }
     }
 
@@ -54,17 +80,17 @@ enum FanboxPostUpdateForm {
                 result.append(textBlock(type: "header", text: text, styles: block.styles))
             case .image:
                 guard let id = block.mediaID, existing.imageIDs.contains(id) else {
-                    throw RemoteError.unsupported(operation: "post.update: 新しい画像のアップロード")
+                    throw RemoteError.unsupported(operation: "post.update: この投稿にアップロードされていない画像")
                 }
                 result.append(["type": "image", "imageId": .string(id)])
             case .file:
                 guard let id = block.mediaID, existing.fileIDs.contains(id) else {
-                    throw RemoteError.unsupported(operation: "post.update: 新しいファイルのアップロード")
+                    throw RemoteError.unsupported(operation: "post.update: この投稿にアップロードされていないファイル")
                 }
                 result.append(["type": "file", "fileId": .string(id)])
             case .url:
                 guard let id = block.mediaID, existing.urlEmbedIDs.contains(id) else {
-                    throw RemoteError.unsupported(operation: "post.update: 新しいリンクカード")
+                    throw RemoteError.unsupported(operation: "post.update: この投稿に登録されていないリンクカード")
                 }
                 result.append(["type": "url_embed", "urlEmbedId": .string(id)])
             case .embed:
@@ -118,11 +144,86 @@ enum FanboxPostUpdateForm {
         }
     }
 
-    static func make(postID: String, draft: RemotePostDraft, csrfToken: String, existing: ExistingMedia,
+    /// `body` of the post by type: the blocks array (article), `{text, images}` (image), `{text, files}` (file).
+    /// `existingText` is the post's current text: sent back byte-for-byte when the paragraphs did not change.
+    static func bodyJSON(_ blocks: [RemoteDraftBlock], type: PostType, existing: ExistingMedia, existingText: String? = nil) throws -> JSONValue {
+        switch type {
+        case .article, .unknown:
+            return try blocksJSON(blocks, existing: existing)
+        case .image, .file:
+            return try mediaPostBody(blocks, type: type, existing: existing, existingText: existingText)
+        case .text, .video, .entry:
+            throw RemoteError.unsupported(operation: "post.update: 「\(type.creatorLabel)」形式の投稿")
+        }
+    }
+
+    /// Image- / file-type post body: text blocks become the text (paragraphs separated by an empty line, the way
+    /// FANBOX's text is split into paragraphs on import) and image (file) blocks the list, in block order, each with the
+    /// full object FANBOX reported (post.getEditable for media already on the post, the upload answer for new media).
+    static func mediaPostBody(_ blocks: [RemoteDraftBlock], type: PostType, existing: ExistingMedia, existingText: String?) throws -> JSONValue {
+        let isImagePost = type == .image
+        var items: [JSONValue] = []
+        var paragraphs: [String] = []
+        for block in blocks {
+            switch block.kind {
+            case .text:
+                guard !block.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+                paragraphs.append(block.text)
+            case .image where isImagePost:
+                guard let id = block.mediaID, existing.imageIDs.contains(id) else {
+                    throw RemoteError.unsupported(operation: "post.update: この投稿にアップロードされていない画像")
+                }
+                items.append(imageObject(id: id, known: existing.imageObjects[id], uploaded: block.media))
+            case .file where !isImagePost:
+                guard let id = block.mediaID, existing.fileIDs.contains(id) else {
+                    throw RemoteError.unsupported(operation: "post.update: この投稿にアップロードされていないファイル")
+                }
+                items.append(fileObject(id: id, known: existing.fileObjects[id], uploaded: block.media))
+            default:
+                throw RemoteError.invalidRequest("「\(type.creatorLabel)」形式の投稿には\(isImagePost ? "画像" : "ファイル")と本文テキストだけを保存できます")
+            }
+        }
+        var text = paragraphs.joined(separator: "\n\n")
+        if let existingText, FanboxAdapter.textParagraphs(existingText).map(\.text) == paragraphs { text = existingText }
+        return .object(["text": .string(text), isImagePost ? "images" : "files": .array(items)])
+    }
+
+    /// `{id, originalUrl, thumbnailUrl, width, height, extension}`; unknown fields are left out.
+    static func imageObject(id: String, known: FanboxImageDTO?, uploaded: RemoteUploadResult?) -> JSONValue {
+        var object: [String: JSONValue] = ["id": .string(id)]
+        let original = known?.originalUrl ?? uploaded?.url
+        let thumbnail = known?.thumbnailUrl ?? uploaded?.thumbnailURL
+        let width = known?.width ?? uploaded?.width
+        let height = known?.height ?? uploaded?.height
+        let ext = known?.fileExtension ?? uploaded?.fileExtension
+        if let original { object["originalUrl"] = .string(original) }
+        if let thumbnail { object["thumbnailUrl"] = .string(thumbnail) }
+        if let width { object["width"] = .number(Double(width)) }
+        if let height { object["height"] = .number(Double(height)) }
+        if let ext { object["extension"] = .string(ext) }
+        return .object(object)
+    }
+
+    /// `{id, name, extension, size, url}`; unknown fields are left out.
+    static func fileObject(id: String, known: FanboxFileDTO?, uploaded: RemoteUploadResult?) -> JSONValue {
+        var object: [String: JSONValue] = ["id": .string(id)]
+        let name = known?.name ?? uploaded?.fileName
+        let ext = known?.fileExtension ?? uploaded?.fileExtension
+        let size = known?.size ?? uploaded?.fileSize
+        let url = known?.url ?? uploaded?.url
+        if let name { object["name"] = .string(name) }
+        if let ext { object["extension"] = .string(ext) }
+        if let size { object["size"] = .number(Double(size)) }
+        if let url { object["url"] = .string(url) }
+        return .object(object)
+    }
+
+    /// `body`: the blocks array unless a prepared body (image- / file-type post) is given.
+    static func make(postID: String, draft: RemotePostDraft, csrfToken: String, existing: ExistingMedia, body prepared: JSONValue? = nil,
                      boundary: String = "FANBOXClientBoundary-\(UUID().uuidString)") throws -> MultipartFormData {
         guard !csrfToken.isEmpty else { throw RemoteError.unauthorized }
         try validateBasics(draft)
-        let body = try blocksJSON(draft.blocks, existing: existing)
+        let body = try prepared ?? blocksJSON(draft.blocks, existing: existing)
         guard let bodyText = String(data: try body.encoded(), encoding: .utf8) else {
             throw RemoteError.invalidRequest("本文を変換できませんでした")
         }

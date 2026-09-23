@@ -35,6 +35,9 @@ final class Draft {
     var tagsUnverified: Bool = false
     /// Set after a text-first send that left media / link cards / embeds to be added in the web editor.
     var webHandoffAt: Date?
+    /// FANBOX post type of `remotePostID` (`PostType` raw value) as imported: an image- or file-type post is saved with its
+    /// own body shape, not with article blocks. nil = article (a post this app created, or imported before this field).
+    var remotePostTypeRaw: String?
 
     @Relationship(deleteRule: .cascade, inverse: \DraftBlock.draft)
     var blocks: [DraftBlock] = []
@@ -72,6 +75,11 @@ final class Draft {
     }
 
     var orderedBlocks: [DraftBlock] { blocks.sorted { $0.order < $1.order } }
+
+    /// FANBOX post type (article when unknown / new).
+    var remotePostType: PostType {
+        remotePostTypeRaw.flatMap(PostType.init(rawValue:)) ?? .article
+    }
 }
 
 @Model
@@ -102,6 +110,9 @@ final class DraftBlock {
     /// Post Edit: block that references FANBOX content the app cannot show or edit (e.g. a link card whose target is
     /// unknown). It is sent back unchanged by its `remoteMediaID`.
     var isLockedRemote: Bool = false
+    /// JSON `RemoteUploadResult` of media this app uploaded / link cards it registered (nil for imported media): the post
+    /// it was stored into and the full object image- / file-type post bodies list.
+    var remoteMediaJSON: String?
     var draft: Draft?
 
     init(id: String = UUID().uuidString, draftID: String, order: Int, kind: DraftBlockKind, text: String = "") {
@@ -115,6 +126,12 @@ final class DraftBlock {
     var kind: DraftBlockKind {
         get { DraftBlockKind(rawValue: kindRaw) ?? .text }
         set { kindRaw = newValue.rawValue }
+    }
+
+    /// Upload / registration result of this block (see `remoteMediaJSON`).
+    var remoteMedia: RemoteUploadResult? {
+        get { RemoteUploadResult(storageJSON: remoteMediaJSON) }
+        set { remoteMediaJSON = newValue?.storageJSON }
     }
 
     /// Imported text styles (empty when none / not imported).
@@ -149,6 +166,8 @@ final class UploadJob {
     var order: Int
     var remoteMediaID: String?
     var remoteURL: String?
+    /// JSON `RemoteUploadResult` of a completed upload (reused when the block write-back was lost).
+    var remoteMediaJSON: String?
     var attemptCount: Int
     var lastError: String?
     var createdAt: Date
@@ -180,6 +199,11 @@ final class UploadJob {
     var kind: UploadKind {
         get { UploadKind(rawValue: kindRaw) ?? .file }
         set { kindRaw = newValue.rawValue }
+    }
+
+    var remoteMedia: RemoteUploadResult? {
+        get { RemoteUploadResult(storageJSON: remoteMediaJSON) }
+        set { remoteMediaJSON = newValue?.storageJSON }
     }
 }
 

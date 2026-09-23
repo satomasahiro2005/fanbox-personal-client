@@ -44,6 +44,17 @@ struct MultipartFormData: Sendable {
         parts.contains { if case .file = $0 { return true } else { return false } }
     }
 
+    /// Form field FANBOX's legacy multipart helper puts the CSRF token in.
+    static let csrfFieldName = "tt"
+
+    /// Whether the form carries the CSRF token as a field (such a form must never be written to a temporary file).
+    var carriesCSRFField: Bool {
+        parts.contains { part in
+            if case .field(let name, _) = part { return name == Self.csrfFieldName }
+            return false
+        }
+    }
+
     static let temporaryFilePrefix = "fanbox-multipart-"
 
     /// Writes the body to a new temporary file (complete file protection) and returns its URL. The caller deletes it

@@ -33,8 +33,8 @@ which has not been confirmed by a request from this app.
 | API session | Per-account `URLSession` | Memory only | `AccountHTTPClient`: one ephemeral session per account, no shared cookie storage, no URL cache, no credential storage. Cookies are attached by hand and only for *.fanbox.cc (`FanboxHostPolicy`; pixiv.net cookies stay in the credential for the web store only, pximg.net gets none). Caller-supplied `Cookie` / `X-CSRF-Token` headers are dropped. `Set-Cookie` responses are merged into an EXISTING credential only. |
 | Post body, comments, newsletters, creators, supports | SwiftData | `Application Support/Store/FANBOXClient.store` (+ `-wal`, `-shm`) | `PersistenceController`: directory and files use `FileProtectionType.completeUntilFirstUserAuthentication`. See [Store recovery](#store-recovery). |
 | Thumbnails and media | File cache | Evictable: `Caches/Media/<variant>/<sha256(url)>.<ext>`. Pinned (saved offline): `Application Support/OfflineMedia/<variant>/…`, excluded from backup. One `MediaCacheEntry` row per file. | `MediaFileCache` / `MediaService`: `completeUntilFirstUserAuthentication`. Never contains text. |
-| Draft media | Files | `Application Support/Drafts/<draftID>/` | `DraftMediaStore`: `completeUntilFirstUserAuthentication`; ids and names are sanitized so they cannot leave the directory |
-| Multipart bodies with file parts | Temporary file | `tmp/fanbox-multipart-<uuid>.body` | `MultipartFormData.writeToTemporaryFile`: `FileProtectionType.complete`, deleted after the upload, leftovers deleted at launch. No FANBOX request in v1.0 uses file parts (uploads are web-only). |
+| Draft media | Files | `Application Support/Drafts/<draftID>/`; while a file is uploaded, a hard link under its display name in `Application Support/Drafts/_upload/<jobID>/` | `DraftMediaStore`: `completeUntilFirstUserAuthentication`; ids and names are sanitized so they cannot leave the directory. Upload staging links are removed after each attempt and at launch. |
+| Multipart bodies with file parts | Temporary file | `tmp/fanbox-multipart-<uuid>.body` | `MultipartFormData.writeToTemporaryFile`: `FileProtectionType.complete`, deleted right after the request, leftovers deleted at launch. Used by the media uploads (`post.addImage` / `post.addFile`); these bodies never contain the CSRF token (see [CSRF token](#csrf-token)). |
 | Card last 4 digits, brand, nickname, payment memo | SwiftData | `PaymentProfile` | Checked by `PaymentProfileValidator` before saving |
 | Card number (PAN) | **Never stored** | — | `PaymentProfileValidator` rejects any field with a card-number-like digit run; the app has no card entry form |
 | CVC / PIN / expiry / 3-D Secure credential | **Never stored** | — | `PaymentProfileValidator` rejects security-code-like values in the nickname, brand and memo; payment runs in the web view |
@@ -66,6 +66,11 @@ creator id, flags, timestamps).
 - **`post.update`.** FANBOX takes the token in the multipart field `tt`. That form has no file parts, so it is encoded
   in memory (`MultipartFormData.encodedData`) and sent like any other request. It is never written to a file. In
   Research logs a `multipart/form-data` body is summarized as `<binary N bytes, …>`, so the `tt` value is not recorded.
+- **Media uploads.** `post.addImage` / `post.addFile` bodies are streamed from a temporary file, so they carry the token
+  ONLY in the `X-CSRF-Token` header the transport adds (the web client's newer request layer does the same; its legacy
+  helper uses `tt`, docs/API.md §15.4). `FanboxAPIClient.sendMultipart` refuses a form with file parts that contains a
+  `tt` field before anything is written. `post.addUrlEmbed` has no file part and is sent from memory, also without `tt`.
+  A rejected upload is retried once after a token refresh with the same token-free body file.
 
 ## Cookie flow between the web store and the Keychain
 

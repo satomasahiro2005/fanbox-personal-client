@@ -42,6 +42,19 @@ protocol RemoteDataSource: Sendable {
                      progress: @escaping @Sendable (Double) -> Void) async throws -> RemoteUploadResult
     func uploadFile(fileURL: URL, account: AccountContext,
                     progress: @escaping @Sendable (Double) -> Void) async throws -> RemoteUploadResult
+    /// Creates an empty draft post and returns its id (FANBOX `post.create`). Used before uploads when media is stored
+    /// into a post (`DraftCapabilities.uploadsNeedPost`). Default: unsupported.
+    func createEmptyPost(account: AccountContext) async throws -> String
+    /// Uploads an image INTO the post `postID` (FANBOX `post.addImage`). The multipart file name is
+    /// `fileURL.lastPathComponent`. Default: the post-independent `uploadImage(fileURL:account:progress:)`.
+    func uploadImage(fileURL: URL, postID: String, account: AccountContext,
+                     progress: @escaping @Sendable (Double) -> Void) async throws -> RemoteUploadResult
+    /// Uploads an attachment INTO the post `postID` (FANBOX `post.addFile`). Default: `uploadFile(fileURL:account:progress:)`.
+    func uploadFile(fileURL: URL, postID: String, account: AccountContext,
+                    progress: @escaping @Sendable (Double) -> Void) async throws -> RemoteUploadResult
+    /// Registers a link card for `url` in the post `postID` (FANBOX `post.addUrlEmbed`); `mediaID` is the card id.
+    /// Default: unsupported.
+    func addURLEmbed(url: String, postID: String, account: AccountContext) async throws -> RemoteUploadResult
     func fans(account: AccountContext, cursor: String?) async throws -> RemotePage<RemoteFan>
     func creatorDashboard(account: AccountContext) async throws -> RemoteCreatorDashboard
     /// Comments on posts of the account's own creator page (newest first).
@@ -131,5 +144,28 @@ extension RemoteDataSource {
     /// Post metadata without the body (fallback when the detail endpoint is blocked). Default: unsupported.
     func postMetadata(id: String, account: AccountContext) async throws -> RemotePostSummary {
         throw RemoteError.unsupported(operation: "postMetadata")
+    }
+}
+
+// MARK: - Post-bound media (default implementations keep every conformer compiling)
+
+extension RemoteDataSource {
+    func createEmptyPost(account: AccountContext) async throws -> String {
+        throw RemoteError.unsupported(operation: "createEmptyPost")
+    }
+
+    /// Sources that do not bind uploads to a post ignore `postID`.
+    func uploadImage(fileURL: URL, postID: String, account: AccountContext,
+                     progress: @escaping @Sendable (Double) -> Void) async throws -> RemoteUploadResult {
+        try await uploadImage(fileURL: fileURL, account: account, progress: progress)
+    }
+
+    func uploadFile(fileURL: URL, postID: String, account: AccountContext,
+                    progress: @escaping @Sendable (Double) -> Void) async throws -> RemoteUploadResult {
+        try await uploadFile(fileURL: fileURL, account: account, progress: progress)
+    }
+
+    func addURLEmbed(url: String, postID: String, account: AccountContext) async throws -> RemoteUploadResult {
+        throw RemoteError.unsupported(operation: "addURLEmbed")
     }
 }

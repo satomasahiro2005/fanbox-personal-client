@@ -9,7 +9,12 @@ import SwiftUI
 /// - Jobs are processed one at a time, oldest draft first, in block order.
 /// - Uploads run with `RequestPriority.foregroundMedia`, so comment POSTs (`interactiveWrite`) preempt them (SPEC §29).
 /// - Offline (or the remote reporting `.offline`) leaves jobs `queued`; they are never failed because of connectivity.
-/// - Completion writes `remoteMediaID` / `remoteURL` back to the `DraftBlock`, so a block is never uploaded twice.
+/// - Completion writes `remoteMediaID` / `remoteURL` / the upload result back to the `DraftBlock`, so a block is never
+///   uploaded twice.
+/// - Sources that store uploads INTO a post (`DraftCapabilities.uploadsNeedPost`, FANBOX) upload against the draft's
+///   `remotePostID`. A draft without one (a new post) has its jobs paused with `awaitingPostMessage`: `DraftService.send`
+///   creates the FANBOX draft first and then resumes them.
+/// - The file is sent under the block's display name (a per-job staging link), which FANBOX shows for attachments.
 @MainActor
 @Observable
 final class UploadQueue {
@@ -31,6 +36,7 @@ final class UploadQueue {
         self.network = network
         self.mediaStore = mediaStore
         recoverInterruptedJobs()
+        mediaStore.removeAllUploadStaging()
     }
 
     /// True when uploads may start (network mode is not Offline and a path is available). Observable.
@@ -99,10 +105,12 @@ final class UploadQueue {
             for job in blockJobs { job.order = block.order }
             guard block.remoteMediaID == nil, let local = block.localFileName else { continue }
             if blockJobs.contains(where: { $0.state != .completed && $0.localFileName == local }) { continue }
-            if let done = blockJobs.first(where: { $0.state == .completed && $0.localFileName == local && $0.remoteMediaID != nil }) {
-                // Uploaded before but the write-back was lost: reuse the result instead of uploading again.
+            if let done = blockJobs.first(where: { $0.state == .completed && $0.localFileName == local && $0.remoteMediaID != nil }),
+               done.remoteMedia?.postID == nil || done.remoteMedia?.postID == draft.remotePostID {
+                // Uploaded before (into this post) but the write-back was lost: reuse the result instead of uploading again.
                 block.remoteMediaID = done.remoteMediaID
                 block.remoteURL = done.remoteURL
+                block.remoteMediaJSON = done.remoteMediaJSON
                 continue
             }
             let job = UploadJob(draftID: draftID, draftBlockID: block.id, accountID: draft.accountID,
@@ -158,6 +166,20 @@ final class UploadQueue {
         for job in paused {
             job.state = .queued
             job.progress = 0
+            job.updatedAt = .now
+        }
+        store.save()
+        if autoStart { start() }
+    }
+
+    /// Re-queues jobs that were paused only because the draft had no FANBOX post yet (never jobs the creator paused).
+    func resumeAwaitingPost(draftID: String, autoStart: Bool = false) {
+        let waiting = jobs(draftID: draftID).filter { $0.state == .paused && $0.lastError == Self.awaitingPostMessage }
+        guard !waiting.isEmpty else { return }
+        for job in waiting {
+            job.state = .queued
+            job.progress = 0
+            job.lastError = nil
             job.updatedAt = .now
         }
         store.save()
@@ -242,16 +264,33 @@ final class UploadQueue {
         }
         let context = account.context
         let source = remote.dataSource(for: context)
-        guard source.draftCapabilities.uploadsMedia else {
+        let capabilities = source.draftCapabilities
+        guard capabilities.uploadsMedia else {
             // This account uploads in the web editor (SPEC §40): never a failure, never retried here.
             pauseForWeb(draftID: job.draftID)
             return true
         }
-        let fileURL = mediaStore.fileURL(draftID: job.draftID, fileName: job.localFileName)
-        guard FileManager.default.fileExists(atPath: fileURL.path) else {
+        var postID: String?
+        if capabilities.uploadsNeedPost {
+            guard let id = store.draft(id: job.draftID)?.remotePostID else {
+                // Uploads are stored into a post that does not exist yet: the send creates it first, then resumes these.
+                pauseAwaitingPost(draftID: job.draftID)
+                return true
+            }
+            postID = id
+        }
+        guard mediaStore.fileExists(draftID: job.draftID, fileName: job.localFileName) else {
             markFailed(job, reason: "ローカルファイルが見つかりません")
             return true
         }
+        let fileURL: URL
+        do {
+            fileURL = try mediaStore.stageUpload(draftID: job.draftID, fileName: job.localFileName, displayName: job.fileName, jobID: jobID)
+        } catch {
+            markFailed(job, reason: "アップロード用の一時ファイルを作成できませんでした")
+            return true
+        }
+        defer { mediaStore.removeUploadStaging(jobID: jobID) }
 
         job.state = .uploading
         job.progress = 0
@@ -267,9 +306,15 @@ final class UploadQueue {
         }
         let task = Task.detached(priority: .utility) { () async throws -> RemoteUploadResult in
             try await RequestContext.$priority.withValue(.foregroundMedia) {
-                switch kind {
-                case .image: return try await source.uploadImage(fileURL: fileURL, account: context, progress: onProgress)
-                case .file: return try await source.uploadFile(fileURL: fileURL, account: context, progress: onProgress)
+                switch (kind, postID) {
+                case (.image, let postID?):
+                    return try await source.uploadImage(fileURL: fileURL, postID: postID, account: context, progress: onProgress)
+                case (.file, let postID?):
+                    return try await source.uploadFile(fileURL: fileURL, postID: postID, account: context, progress: onProgress)
+                case (.image, nil):
+                    return try await source.uploadImage(fileURL: fileURL, account: context, progress: onProgress)
+                case (.file, nil):
+                    return try await source.uploadFile(fileURL: fileURL, account: context, progress: onProgress)
                 }
             }
         }
@@ -286,12 +331,14 @@ final class UploadQueue {
             job.progress = 1
             job.remoteMediaID = result.mediaID
             job.remoteURL = result.url
+            job.remoteMedia = result
             job.lastError = nil
             job.updatedAt = .now
             let blockID = job.draftBlockID
             if let block = store.first(#Predicate<DraftBlock> { $0.id == blockID }), block.localFileName == job.localFileName {
                 block.remoteMediaID = result.mediaID
                 block.remoteURL = result.url
+                block.remoteMedia = result
             }
             store.save()
             return true
@@ -330,16 +377,27 @@ final class UploadQueue {
 
     /// Shown on jobs of accounts that upload in the web editor.
     static let webOnlyMessage = "Web エディタで追加してください"
+    /// Shown on jobs of a new post whose uploads need the FANBOX post first (created by the send).
+    static let awaitingPostMessage = "送信時に FANBOX の下書きを作成してからアップロードします"
 
     /// Pauses every unfinished job of the draft with `webOnlyMessage` (the account cannot upload natively).
     /// Such jobs are never counted as failed and never retried automatically.
     func pauseForWeb(draftID: String) {
+        pauseUnfinished(draftID: draftID, reason: Self.webOnlyMessage)
+    }
+
+    /// Pauses every unfinished job of a draft that has no FANBOX post yet (never a failure; the send resumes them).
+    func pauseAwaitingPost(draftID: String) {
+        pauseUnfinished(draftID: draftID, reason: Self.awaitingPostMessage)
+    }
+
+    private func pauseUnfinished(draftID: String, reason: String) {
         var changed = false
         for job in jobs(draftID: draftID) where job.state != .completed && job.id != activeJobID {
-            if job.state != .paused || job.lastError != Self.webOnlyMessage {
+            if job.state != .paused || job.lastError != reason {
                 job.state = .paused
                 job.progress = 0
-                job.lastError = Self.webOnlyMessage
+                job.lastError = reason
                 job.updatedAt = .now
                 changed = true
             }
@@ -657,6 +715,7 @@ final class DraftService {
         draft.remoteStatusRaw = editable.status.rawValue
         draft.remoteFeeRequired = editable.feeRequired
         draft.remoteUpdatedAt = editable.updatedAt
+        draft.remotePostTypeRaw = editable.postType.rawValue
         draft.commentPermission = editable.commentPermission
         if !editable.tagsKnown {
             draft.tagsUnverified = true
@@ -701,7 +760,7 @@ final class DraftService {
     /// Why a native update of this post would not be faithful (nil = it can be updated natively).
     static func nativeUpdateBlocker(editable: RemoteEditablePost, unsupportedBlocks: [String], capabilities: DraftCapabilities) -> String? {
         if editable.status == .scheduled { return DraftSendPlanner.scheduledBlocker }
-        if editable.postType != .article && !capabilities.updatesNonArticlePosts {
+        if editable.postType != .article && !capabilities.updates(editable.postType) {
             return "「\(editable.postType.creatorLabel)」形式の投稿はアプリから更新できません（本文が記事形式に変わってしまうため）。Web エディタで編集してください。"
         }
         if !unsupportedBlocks.isEmpty {
@@ -733,6 +792,11 @@ final class DraftService {
 
     /// Sends the draft: uploads pending media (when the account can), then creates or updates the FANBOX post.
     ///
+    /// - Accounts that store uploads INTO a post (`uploadsNeedPost`, FANBOX): a new post with media / link cards to send is
+    ///   created first (`createEmptyPost`) and its id persisted at once; then only the unfinished uploads run against it
+    ///   (completed ones are never re-sent, failed ones are retried), new link cards are registered (`addURLEmbed`), and
+    ///   the content is saved with `updatePost`, referencing every item by id in block order. Whatever fails, the local
+    ///   draft, its `remotePostID` and every completed media id are kept, so the next send continues on the same post.
     /// - `publish`: the creator's choice — true = publish (or keep a live post published), false = FANBOX draft.
     /// - Taking a live post down (`publish == false` on a published post) requires `allowUnpublish`; otherwise nothing is sent.
     /// - Warnings of the plan (formatting loss, unknown tags / comment permission) require `acceptWarnings`.
@@ -800,15 +864,46 @@ final class DraftService {
         }
         guard let draft = store.draft(id: draftID) else { return .failure(.notFound) }
 
-        // 2. Media uploads (only blocks without remoteMediaID; failed jobs are retried, completed ones never re-sent).
-        if capabilities.uploadsMedia {
-            if let failure = await runUploads(for: draft) { return failure }
-        } else {
-            uploads.pauseForWeb(draftID: draftID)
+        // 2. Post-bound media: a new post is created FIRST and its id stored before anything is uploaded into it, so a
+        //    retry reuses it (never a second post.create) and completed uploads stay valid.
+        var continuation: String?
+        if capabilities.uploadsNeedPost && draft.remotePostID == nil && Self.needsPostBoundWork(draft, capabilities: capabilities) {
+            draft.status = .publishing
+            store.save()
+            do {
+                let postID = try await RequestContext.$priority.withValue(.interactiveWrite) {
+                    try await source.createEmptyPost(account: context)
+                }
+                guard let draft = store.draft(id: draftID) else { return .failure(.notFound) }
+                recordCreatedPost(draft, postID: postID)
+                continuation = Self.createdDraftNote
+            } catch {
+                let remoteError = RemoteError.creatorWrapping(error)
+                AppLog.creator.error("post.create before uploads failed: \(remoteError.userMessage, privacy: .public)")
+                guard let draft = store.draft(id: draftID) else { return .failure(remoteError) }
+                return fail(draft, remoteError)
+            }
+        } else if capabilities.uploadsNeedPost && draft.remotePostID != nil {
+            continuation = Self.continueNote
         }
         guard let draft = store.draft(id: draftID) else { return .failure(.notFound) }
 
-        // 3. Payload (text-first: blocks for the web editor are left out).
+        // 3. Media uploads (only blocks without remoteMediaID; failed jobs are retried, completed ones never re-sent).
+        if capabilities.uploadsMedia {
+            if let failure = await runUploads(for: draft, note: continuation) { return failure }
+        } else {
+            uploads.pauseForWeb(draftID: draftID)
+        }
+        // 3b. New link cards registered in the post (their ids go into the url_embed blocks).
+        if capabilities.uploadsNeedPost && capabilities.createsLinkCards {
+            if let failure = await registerLinkCards(draftID: draftID, source: source, context: context, note: continuation) {
+                return failure
+            }
+        }
+        guard let draft = store.draft(id: draftID) else { return .failure(.notFound) }
+        let isMediaPost = draft.remotePostID != nil && capabilities.allowedKinds(in: draft.remotePostType) != nil
+
+        // 4. Payload (text-first: blocks for the web editor are left out).
         let payload: DraftPostMapping.Payload
         do {
             payload = try DraftPostMapping.payload(from: draft, publish: plan.sendsPublished, capabilities: capabilities)
@@ -817,7 +912,7 @@ final class DraftService {
         }
         guard uploads.isNetworkAvailable else { return fail(draft, .offline) }
 
-        // 4. Create / update with interactiveWrite priority.
+        // 5. Create / update with interactiveWrite priority.
         draft.status = .publishing
         store.save()
         let existingID = draft.remotePostID
@@ -834,9 +929,9 @@ final class DraftService {
             guard let draft = store.draft(id: draftID) else {
                 return .success(DraftSendReceipt(postID: postID, sentPublished: body.publish, webItems: []))
             }
-            commitSent(draft, postID: postID, published: body.publish, leavesWebItems: !webIDs.isEmpty)
+            commitSent(draft, postID: postID, published: body.publish, leavesWebItems: !webIDs.isEmpty, keepsTextBlocks: isMediaPost)
             let webItems = DraftSendPlanner.webItems(for: draft, blockIDs: webIDs)
-            // 5. Revision baseline for the next conflict check (best effort read).
+            // 6. Revision baseline for the next conflict check (best effort read).
             if let fresh = try? await RequestContext.$priority.withValue(.interactiveRead, operation: {
                 try await source.editablePost(id: postID, account: context)
             }), let draft = store.draft(id: draftID) {
@@ -862,8 +957,82 @@ final class DraftService {
             let remoteError = RemoteError.creatorWrapping(error)
             AppLog.creator.error("publish failed: \(remoteError.userMessage, privacy: .public)")
             guard let draft = store.draft(id: draftID) else { return .failure(remoteError) }
+            if continuation == Self.createdDraftNote {
+                return fail(draft, remoteError, message: "FANBOX に下書きを作成してメディアを送信しましたが、内容の保存に失敗しました（\(remoteError.userMessage)）。再送すると同じ下書きを更新します（送信済みのメディアは再送しません）。")
+            }
             return fail(draft, remoteError)
         }
+    }
+
+    static let createdDraftNote = "FANBOX に下書きを作成済みです。再送すると同じ下書きに続きから送信します（完了した項目は再送しません）。"
+    static let continueNote = "完了した項目は再送しません。再送すると残りだけを送信します。"
+
+    /// True when the draft has media to upload or new link cards to register (both are stored into a FANBOX post).
+    static func needsPostBoundWork(_ draft: Draft, capabilities: DraftCapabilities) -> Bool {
+        draft.blocks.contains { block in
+            guard !block.isLockedRemote, block.remoteMediaID == nil else { return false }
+            switch block.kind {
+            case .image, .file: return capabilities.uploadsMedia && block.localFileName != nil
+            case .url: return capabilities.createsLinkCards && !(block.url ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            case .text, .header, .embed: return false
+            }
+        }
+    }
+
+    /// Stores the id of the post just created for uploads (before anything is uploaded into it).
+    private func recordCreatedPost(_ draft: Draft, postID: String) {
+        draft.remotePostID = postID
+        draft.remoteStatusRaw = RemotePostStatus.draft.rawValue
+        draft.remoteFeeRequired = nil
+        draft.remoteUpdatedAt = nil
+        draft.remotePostTypeRaw = PostType.article.rawValue
+        // A post this app just created has no comment setting of the creator's to preserve.
+        if draft.commentPermission == nil { draft.commentPermission = .default(feeRequired: draft.feeRequired) }
+        store.save()
+    }
+
+    /// Registers the draft's new link cards in its post (`addURLEmbed`) and stores each card id on its block. Cards
+    /// registered by an earlier attempt keep their ids and are never registered again. Returns a failure when a card is
+    /// left unregistered (the others keep their ids).
+    private func registerLinkCards(draftID: String, source: RemoteDataSource, context: AccountContext,
+                                   note: String?) async -> Result<DraftSendReceipt, RemoteError>? {
+        guard let draft = store.draft(id: draftID), let postID = draft.remotePostID else { return nil }
+        let pending = draft.orderedBlocks.compactMap { block -> (id: String, url: String)? in
+            guard block.kind == .url, !block.isLockedRemote, block.remoteMediaID == nil else { return nil }
+            let url = (block.url ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            return url.isEmpty ? nil : (block.id, url)
+        }
+        guard !pending.isEmpty else { return nil }
+        guard uploads.isNetworkAvailable else { return fail(draft, .offline) }
+        var failures = 0
+        var lastError: RemoteError?
+        for item in pending {
+            do {
+                let result = try await RequestContext.$priority.withValue(.interactiveWrite) {
+                    try await source.addURLEmbed(url: item.url, postID: postID, account: context)
+                }
+                let blockID = item.id
+                if let block = store.first(#Predicate<DraftBlock> { $0.id == blockID }), block.remoteMediaID == nil,
+                   (block.url ?? "").trimmingCharacters(in: .whitespacesAndNewlines) == item.url {
+                    block.remoteMediaID = result.mediaID
+                    block.remoteMedia = result
+                    store.save()
+                }
+            } catch {
+                let remoteError = RemoteError.creatorWrapping(error)
+                if remoteError == .offline || remoteError == .cancelled {
+                    guard let draft = store.draft(id: draftID) else { return .failure(remoteError) }
+                    return fail(draft, remoteError)
+                }
+                AppLog.creator.error("link card registration failed: \(remoteError.userMessage, privacy: .public)")
+                failures += 1
+                lastError = remoteError
+            }
+        }
+        guard failures > 0, let lastError else { return nil }
+        guard let draft = store.draft(id: draftID) else { return .failure(lastError) }
+        let summary = "リンクカードを登録できませんでした（\(failures) 件）"
+        return fail(draft, .invalidRequest(summary), message: "\(summary): \(lastError.userMessage)" + (note.map { "\n" + $0 } ?? ""))
     }
 
     /// A plan that must not be sent as requested → the failure to return (local status untouched for confirmations).
@@ -880,8 +1049,9 @@ final class DraftService {
         return nil
     }
 
-    /// Uploads the draft's pending media and waits. Returns a failure when something is left.
-    private func runUploads(for draft: Draft) async -> Result<DraftSendReceipt, RemoteError>? {
+    /// Uploads the draft's pending media and waits. Returns a failure when something is left (`note` explains how a retry
+    /// continues on a post-bound account).
+    private func runUploads(for draft: Draft, note: String? = nil) async -> Result<DraftSendReceipt, RemoteError>? {
         let draftID = draft.id
         uploads.enqueue(draftID: draftID)
         uploads.retryFailed(draftID: draftID, autoStart: false)
@@ -900,7 +1070,8 @@ final class DraftService {
         let unfinished = uploads.unfinishedJobs(draftID: draftID)
         let failedCount = unfinished.filter { $0.state == .failed }.count
         if failedCount > 0 {
-            return fail(draft, .invalidRequest("アップロードに失敗した項目があります（\(failedCount) 件）"))
+            let summary = "アップロードに失敗した項目があります（\(failedCount) 件）"
+            return fail(draft, .invalidRequest(summary), message: note.map { summary + "\n" + $0 })
         }
         if !unfinished.isEmpty {
             return fail(draft, uploads.isNetworkAvailable ? .invalidRequest("アップロードが完了していません") : .offline)
@@ -910,7 +1081,8 @@ final class DraftService {
 
     /// Records a successful send: FANBOX status / fee, and the sent text as the new baseline of every paragraph
     /// (a multi-line text block becomes one block per paragraph, exactly like the post on FANBOX).
-    private func commitSent(_ draft: Draft, postID: String, published: Bool, leavesWebItems: Bool) {
+    /// `keepsTextBlocks`: image- / file-type post, whose text blocks are paragraphs of one plain text (never split by line).
+    private func commitSent(_ draft: Draft, postID: String, published: Bool, leavesWebItems: Bool, keepsTextBlocks: Bool = false) {
         // A new post got the default comment permission (or the one sent): later updates keep it without asking.
         if draft.remotePostID == nil && draft.commentPermission == nil {
             draft.commentPermission = .default(feeRequired: draft.feeRequired)
@@ -932,8 +1104,8 @@ final class DraftService {
             guard block.kind == .text || block.kind == .header, !block.isLockedRemote else { continue }
             if let imported = block.importedText, imported == block.text { continue }
             guard !block.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
-            let styles = DraftPostMapping.sentStyles(of: block).styles
-            guard block.kind == .text else {
+            let styles = keepsTextBlocks ? [] : DraftPostMapping.sentStyles(of: block).styles
+            guard block.kind == .text, !keepsTextBlocks else {
                 block.importedText = block.text
                 block.importedStyles = styles
                 continue

@@ -523,11 +523,16 @@ enum FanboxAdapter {
             .sorted { (max($0.updatedAt, $0.publishedAt), $0.id) > (max($1.updatedAt, $1.publishedAt), $1.id) }
     }
 
+    /// Type of an editable post: the reported `type`, else article when the body has blocks; unknown resolves to article.
+    static func editablePostType(_ dto: FanboxManagedPostDTO) -> PostType {
+        let type = postType(dto.type ?? (dto.body?.blocks != nil ? "article" : nil))
+        return type == .unknown ? .article : type
+    }
+
     static func editablePost(_ dto: FanboxManagedPostDTO) -> RemoteEditablePost? {
         guard let id = dto.id else { return nil }
         // Editable bodies are article-shaped; embed / url_embed ids are kept in mediaID so updatePost can round-trip them.
-        let type = postType(dto.type ?? (dto.body?.blocks != nil ? "article" : nil))
-        let resolvedType: PostType = type == .unknown ? .article : type
+        let resolvedType = editablePostType(dto)
         let blocks = contentBlocks(body: dto.body, type: resolvedType, includeReferenceIDs: true)
         let status = postStatus(dto.status)
         return RemoteEditablePost(id: id, title: dto.title ?? "", feeRequired: max(0, dto.feeRequired ?? 0), planID: nil, status: status,

@@ -119,6 +119,9 @@ struct DemoRemoteDataSource: RemoteDataSource {
 
     // MARK: Creator Mode
 
+    /// Every block natively, with FANBOX's create-first flow: uploads and link cards are stored into the post.
+    var draftCapabilities: DraftCapabilities { .demo }
+
     func managedPosts(account: AccountContext, cursor: String?) async throws -> RemotePage<RemotePostSummary> {
         try await gate(.managedPosts)
         return try await world.managedPosts(account: account, cursor: cursor)
@@ -140,11 +143,31 @@ struct DemoRemoteDataSource: RemoteDataSource {
     }
 
     func uploadImage(fileURL: URL, account: AccountContext, progress: @escaping @Sendable (Double) -> Void) async throws -> RemoteUploadResult {
-        try await upload(fileURL: fileURL, kind: .image, account: account, progress: progress)
+        try await upload(fileURL: fileURL, kind: .image, postID: nil, account: account, progress: progress)
     }
 
     func uploadFile(fileURL: URL, account: AccountContext, progress: @escaping @Sendable (Double) -> Void) async throws -> RemoteUploadResult {
-        try await upload(fileURL: fileURL, kind: .file, account: account, progress: progress)
+        try await upload(fileURL: fileURL, kind: .file, postID: nil, account: account, progress: progress)
+    }
+
+    func createEmptyPost(account: AccountContext) async throws -> String {
+        try await gate(.writePost)
+        return try await world.createEmptyPost(account: account)
+    }
+
+    func uploadImage(fileURL: URL, postID: String, account: AccountContext,
+                     progress: @escaping @Sendable (Double) -> Void) async throws -> RemoteUploadResult {
+        try await upload(fileURL: fileURL, kind: .image, postID: postID, account: account, progress: progress)
+    }
+
+    func uploadFile(fileURL: URL, postID: String, account: AccountContext,
+                    progress: @escaping @Sendable (Double) -> Void) async throws -> RemoteUploadResult {
+        try await upload(fileURL: fileURL, kind: .file, postID: postID, account: account, progress: progress)
+    }
+
+    func addURLEmbed(url: String, postID: String, account: AccountContext) async throws -> RemoteUploadResult {
+        try await gate(.writePost)
+        return try await world.addURLEmbed(url: url, postID: postID, account: account)
     }
 
     func fans(account: AccountContext, cursor: String?) async throws -> RemotePage<RemoteFan> {
@@ -165,11 +188,13 @@ struct DemoRemoteDataSource: RemoteDataSource {
     // MARK: - Simulation
 
     /// Simulated upload: ~1 s in 0.1 progress steps. Names containing "fail" always fail (at 40 %) so the Upload Queue's
-    /// failed-job retry can be exercised; names containing "flaky" fail on the first attempt only.
-    private func upload(fileURL: URL, kind: UploadKind, account: AccountContext,
+    /// failed-job retry can be exercised; names containing "flaky" fail on the first attempt only. With a `postID` the
+    /// post must be one of the self creator's (uploads are stored into it, as on FANBOX).
+    private func upload(fileURL: URL, kind: UploadKind, postID: String?, account: AccountContext,
                         progress: @escaping @Sendable (Double) -> Void) async throws -> RemoteUploadResult {
         try ensureOnline()
         guard await world.profile(for: account) == .creator else { throw RemoteError.forbidden }
+        if let postID { try await world.requireOwnPost(postID, account: account) }
         let shouldFail = await world.registerUploadAttempt(fileName: fileURL.lastPathComponent)
         for step in 1...10 {
             try await pause(milliseconds: DemoCall.uploadStep.latencyMilliseconds)
@@ -179,7 +204,7 @@ struct DemoRemoteDataSource: RemoteDataSource {
             }
             progress(Double(step) / 10)
         }
-        return await world.completeUpload(fileURL: fileURL, kind: kind)
+        return await world.completeUpload(fileURL: fileURL, kind: kind, postID: postID)
     }
 
     private func gate(_ call: DemoCall) async throws {

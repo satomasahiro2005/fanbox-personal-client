@@ -78,41 +78,98 @@ final class FanboxAPIClient: Sendable {
         return json["body"]
     }
 
-    /// Sends a multipart form and returns the raw response. Used by post.update and any future media upload endpoint.
+    /// Sends a multipart form and returns the raw response. Used by post.update and the media endpoints
+    /// (post.addImage / post.addFile / post.addUrlEmbed).
     ///
-    /// A form of plain fields (post.update: title, text, and the CSRF token in `tt`) is encoded IN MEMORY and sent with
-    /// `send`: the token never touches the disk (SPEC §39 "CSRF Token: Keychain または Memory"). Only forms with file
-    /// parts are streamed from a temporary file, created with complete file protection and removed afterwards (stale
-    /// ones are purged at launch, `MultipartFormData.removeStaleTemporaryFiles`).
+    /// - A form of plain fields (post.update: title, text, and the CSRF token in `tt`; post.addUrlEmbed) is encoded IN
+    ///   MEMORY and sent with `send`: the token never touches the disk (SPEC §39 "CSRF Token: Keychain または Memory").
+    /// - Forms with file parts (image / file uploads) are streamed from a temporary file, created with complete file
+    ///   protection and removed right after the request (stale ones are purged at launch,
+    ///   `MultipartFormData.removeStaleTemporaryFiles`). Such a form must not carry the token: it travels only in the
+    ///   `X-CSRF-Token` header the transport adds for `requiresCSRF` endpoints. A file form with a `tt` field is refused
+    ///   before anything is written.
+    /// - A missing token is fetched first. A form without a `tt` field that is rejected as if the token were stale is
+    ///   sent once more after a token refresh (same body: it holds no token). A `tt` form is never re-sent.
     func sendMultipart(_ endpoint: FanboxEndpoint, form: MultipartFormData, accountID: String?,
                        progress: (@Sendable (Double) -> Void)? = nil) async throws -> HTTPResponse {
-        var request = try makeRequest(endpoint)
-        request.headers["Content-Type"] = form.contentType
-        request.timeout = Self.uploadTimeout
-        let response: HTTPResponse
-        if !form.hasFileParts {
-            request.body = try form.encodedData()
-            do {
-                response = try await http.send(request, accountID: accountID)
-            } catch {
-                throw Self.normalize(error)
-            }
-            progress?(1)
-        } else {
-            let fileURL = try form.writeToTemporaryFile()
-            defer { try? FileManager.default.removeItem(at: fileURL) }
-            request.body = nil
-            do {
-                response = try await http.upload(request, bodyFileURL: fileURL, accountID: accountID, progress: progress)
-            } catch {
-                throw Self.normalize(error)
-            }
-        }
-        try validate(response, endpoint: endpoint)
+        let response = try await transmitMultipart(endpoint, form: form, accountID: accountID, progress: progress)
         if let json = try? JSONValue.parse(response.data), json["body"] != nil {
             observe(endpoint.key, data: response.data, known: [:])
         }
         return response
+    }
+
+    /// `sendMultipart` returning a decoded body DTO (media endpoints). A 2xx answer the DTO cannot use is recorded as a
+    /// research event, like `send(_:as:accountID:)`.
+    func sendMultipart<Body: FanboxResponseBody>(_ endpoint: FanboxEndpoint, form: MultipartFormData, as type: Body.Type,
+                                                 accountID: String?, progress: (@Sendable (Double) -> Void)? = nil) async throws -> Body {
+        let response = try await transmitMultipart(endpoint, form: form, accountID: accountID, progress: progress)
+        do {
+            return try decode(response, endpoint: endpoint, as: Body.self)
+        } catch {
+            inspector.recordFailure(endpointKey: endpoint.key, accountID: accountID, statusCode: response.statusCode, error: error)
+            throw error
+        }
+    }
+
+    private func transmitMultipart(_ endpoint: FanboxEndpoint, form: MultipartFormData, accountID: String?,
+                                   progress: (@Sendable (Double) -> Void)?) async throws -> HTTPResponse {
+        if form.hasFileParts && form.carriesCSRFField {
+            // Never reached by the app's own forms; guards SPEC §39 against a future form built the web client's way.
+            throw RemoteError.invalidRequest("CSRF トークンを含むフォームはファイル経由で送信できません")
+        }
+        await fetchMissingCSRFToken(endpoint, accountID: accountID)
+        var request = try makeRequest(endpoint)
+        request.headers["Content-Type"] = form.contentType
+        request.timeout = Self.uploadTimeout
+        let mayRetry = !form.carriesCSRFField
+        if !form.hasFileParts {
+            request.body = try form.encodedData()
+            let sendable = request
+            let response = try await deliver(endpoint, accountID: accountID, allowCSRFRetry: mayRetry) {
+                try await self.http.send(sendable, accountID: accountID)
+            }
+            progress?(1)
+            return response
+        }
+        let fileURL = try form.writeToTemporaryFile()
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        request.body = nil
+        let sendable = request
+        return try await deliver(endpoint, accountID: accountID, allowCSRFRetry: mayRetry) {
+            try await self.http.upload(sendable, bodyFileURL: fileURL, accountID: accountID, progress: progress)
+        }
+    }
+
+    /// Runs `operation`, validates the answer and, when allowed, repeats it once after a CSRF refresh (see `execute`).
+    private func deliver(_ endpoint: FanboxEndpoint, accountID: String?, allowCSRFRetry: Bool,
+                         _ operation: () async throws -> HTTPResponse) async throws -> HTTPResponse {
+        func attempt() async throws -> HTTPResponse {
+            let response: HTTPResponse
+            do {
+                response = try await operation()
+            } catch {
+                throw Self.normalize(error)
+            }
+            try validate(response, endpoint: endpoint)
+            return response
+        }
+        do {
+            return try await attempt()
+        } catch let error as RemoteError {
+            guard allowCSRFRetry, endpoint.requiresCSRF, let accountID, let credentials, Self.mayBeStaleCSRF(error) else { throw error }
+            let previous = await credentials.credential(for: accountID)?.csrfToken
+            guard let fresh = try? await refreshCSRFToken(accountID: accountID), fresh != previous else { throw error }
+            AppLog.network.info("retrying \(endpoint.key, privacy: .public) once after CSRF refresh")
+            return try await attempt()
+        }
+    }
+
+    /// Token never captured: fetch it before a CSRF-protected write (the write would be rejected otherwise).
+    private func fetchMissingCSRFToken(_ endpoint: FanboxEndpoint, accountID: String?) async {
+        guard endpoint.requiresCSRF, let accountID, let credentials,
+              let credential = await credentials.credential(for: accountID), (credential.csrfToken ?? "").isEmpty else { return }
+        _ = try? await refreshCSRFToken(accountID: accountID)
     }
 
     // MARK: - Session metadata / CSRF (www.fanbox.cc)

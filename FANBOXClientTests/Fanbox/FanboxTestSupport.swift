@@ -21,10 +21,20 @@ final class FanboxFakeHTTPClient: HTTPClient, @unchecked Sendable {
     private var stubs: [String: [Stub]] = [:]
     private var _requests: [HTTPRequest] = []
     private var _uploadBodies: [Data] = []
+    private var _uploadRecords: [UploadRecord] = []
     private var _accountIDs: [String?] = []
+
+    /// One `upload` call: the endpoint, the body read from the file, and the body file's URL (to check it was removed).
+    struct UploadRecord {
+        var endpointKey: String
+        var body: Data
+        var fileURL: URL
+    }
 
     var requests: [HTTPRequest] { lock.withLock { _requests } }
     var uploadBodies: [Data] { lock.withLock { _uploadBodies } }
+    var uploadRecords: [UploadRecord] { lock.withLock { _uploadRecords } }
+    func uploadRecords(for key: String) -> [UploadRecord] { uploadRecords.filter { $0.endpointKey == key } }
     var accountIDs: [String?] { lock.withLock { _accountIDs } }
 
     func requests(for key: String) -> [HTTPRequest] { requests.filter { $0.endpointKey == key } }
@@ -73,6 +83,7 @@ final class FanboxFakeHTTPClient: HTTPClient, @unchecked Sendable {
     func upload(_ request: HTTPRequest, bodyFileURL: URL, accountID: String?,
                 progress: (@Sendable (Double) -> Void)?) async throws -> HTTPResponse {
         let body = (try? Data(contentsOf: bodyFileURL)) ?? Data()
+        lock.withLock { _uploadRecords.append(UploadRecord(endpointKey: request.endpointKey, body: body, fileURL: bodyFileURL)) }
         progress?(1)
         return respond(to: request, accountID: accountID, uploadBody: body)
     }

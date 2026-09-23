@@ -45,11 +45,12 @@ final class FixCreatorFanboxHarness {
 
     var http: FanboxFakeHTTPClient { fanbox.http }
 
-    /// Text of every multipart body sent (post.update forms). Forms without file parts are sent from memory through
-    /// `send` (the CSRF token never touches disk), forms with files through `upload`.
+    /// Text of every post.update multipart body. post.update forms have no file parts, so they are sent from memory
+    /// through `send` (the CSRF token never touches disk). Updated for native uploads: media uploads (post.addImage /
+    /// post.addFile) are the only bodies sent from a file, and they are not post.update bodies.
     var updateBodies: [String] {
         let inMemory = http.requests(for: "post.update").compactMap(\.body)
-        return (inMemory + http.uploadBodies).map { String(data: $0, encoding: .utf8) ?? "" }
+        return (inMemory + http.uploadRecords(for: "post.update").map(\.body)).map { String(data: $0, encoding: .utf8) ?? "" }
     }
 
     func cleanUp() { try? FileManager.default.removeItem(at: root) }
@@ -466,14 +467,23 @@ final class FixCreatorTests: XCTestCase {
         XCTAssertTrue(CreatorWebReconcile.needsManagedPostsResync(WebSessionRequest(accountID: "a", destination: .managePosts, purpose: .browse)))
         XCTAssertFalse(CreatorWebReconcile.needsManagedPostsResync(WebSessionRequest(accountID: "a", destination: .home, purpose: .browse)))
 
+        // Updated for native uploads: FANBOX accounts upload images / files and register link cards natively (into the
+        // post, created first); new embeds, the R-18 flag and plan ids stay web-only.
         let fanbox = FanboxTestHarness().source
-        XCTAssertEqual(fanbox.draftCapabilities, .textOnly)
-        XCTAssertFalse(fanbox.draftCapabilities.sendsNew(.image))
-        XCTAssertFalse(fanbox.draftCapabilities.sendsNew(.url))
+        XCTAssertEqual(fanbox.draftCapabilities, .fanbox)
+        XCTAssertTrue(fanbox.draftCapabilities.sendsNew(.image))
+        XCTAssertTrue(fanbox.draftCapabilities.sendsNew(.file))
+        XCTAssertTrue(fanbox.draftCapabilities.sendsNew(.url))
+        XCTAssertFalse(fanbox.draftCapabilities.sendsNew(.embed))
         XCTAssertTrue(fanbox.draftCapabilities.sendsNew(.header))
         XCTAssertFalse(fanbox.draftCapabilities.sendsAdultFlag)
+        XCTAssertFalse(fanbox.draftCapabilities.sendsPlanID)
+        XCTAssertTrue(fanbox.draftCapabilities.uploadsNeedPost)
+        // Updated: the demo runs the same create-first flow (uploads bound to the post) with every block kind.
         let demo: RemoteDataSource = DemoRemoteDataSource()
-        XCTAssertEqual(demo.draftCapabilities, .full)
+        XCTAssertEqual(demo.draftCapabilities, .demo)
+        XCTAssertTrue(demo.draftCapabilities.uploadsNeedPost)
+        XCTAssertTrue(demo.draftCapabilities.sendsNew(.embed))
     }
 
     func testImportKeepsUnsupportedContentVisibleAndBlocksNativeUpdate() {
@@ -491,6 +501,11 @@ final class FixCreatorTests: XCTestCase {
                                           hasAdultContent: false, publishedAt: nil, updatedAt: nil, postType: .image)
         XCTAssertNotNil(DraftService.nativeUpdateBlocker(editable: editable, unsupportedBlocks: [], capabilities: .textOnly))
         XCTAssertNil(DraftService.nativeUpdateBlocker(editable: editable, unsupportedBlocks: [], capabilities: .full))
+        XCTAssertNil(DraftService.nativeUpdateBlocker(editable: editable, unsupportedBlocks: [], capabilities: .fanbox),
+                     "FANBOX image posts are saved with their own {text, images} body")
+        var video = editable
+        video.postType = .video
+        XCTAssertNotNil(DraftService.nativeUpdateBlocker(editable: video, unsupportedBlocks: [], capabilities: .fanbox))
         var scheduled = editable
         scheduled.postType = .article
         scheduled.status = .scheduled
@@ -589,9 +604,15 @@ final class FixCreatorFanboxRoundTripTests: XCTestCase {
         guard case .failure(.unsupported) = result else { return XCTFail("\(result)") }
         XCTAssertTrue(h.http.requests(for: "post.update").isEmpty)
 
+        // Updated for native uploads: image-type posts are now updated natively with their own {text, images} body
+        // (NativeUploadTests.testImportedImagePostKeepsItsTypeAndListsImages); video-type posts still go to the web editor.
         h.http.stub("post.getEditable", json: FanboxFixtures.envelope(FixCreatorFixtures.editable(id: "p4", status: "published", type: "image")))
         let imagePost = try await h.drafts.importRemotePost(postID: "p4", accountID: h.account.id)
-        XCTAssertNotNil(imagePost.nativeUpdateBlocker, "a block body would turn an image post into an article")
+        XCTAssertNil(imagePost.nativeUpdateBlocker)
+        XCTAssertEqual(imagePost.remotePostType, .image)
+        h.http.stub("post.getEditable", json: FanboxFixtures.envelope(FixCreatorFixtures.editable(id: "p5", status: "published", type: "video")))
+        let videoPost = try await h.drafts.importRemotePost(postID: "p5", accountID: h.account.id)
+        XCTAssertNotNil(videoPost.nativeUpdateBlocker, "a block body would turn a video post into an article")
     }
 
     func testFailedUpdateAfterCreateNeverCreatesTwice() async throws {
@@ -635,7 +656,10 @@ final class FixCreatorFanboxRoundTripTests: XCTestCase {
     }
 
     func testTextFirstCreateThroughTheFanboxForm() async throws {
+        // Updated for native uploads: the image is uploaded into the post (created first) and only the embed, which has
+        // no add endpoint, is left for the web editor. The post is still saved as a draft, never published unfinished.
         h.http.stub("post.create", json: #"{"body":{"postId":"9002"}}"#)
+        h.http.stub("post.addImage", json: #"{"body":{"id":"im-new","extension":"jpg","width":10,"height":10,"originalUrl":"https://downloads.fanbox.cc/images/post/9002/im-new.jpg","thumbnailUrl":"https://downloads.fanbox.cc/images/post/9002/w/1200/im-new.jpeg"}}"#)
         h.http.stub("post.update", json: #"{"body":{"id":"9002"}}"#)
         h.http.stub("post.getEditable", json: FanboxFixtures.envelope(FixCreatorFixtures.editable(id: "9002")))
         let draft = h.drafts.createDraft(accountID: h.account.id)
@@ -650,12 +674,14 @@ final class FixCreatorFanboxRoundTripTests: XCTestCase {
         embed.url = "https://youtu.be/abc123"
 
         let receipt = try await h.drafts.send(draftID: draft.id, publish: true).get()
-        XCTAssertEqual(receipt.webItems.map(\.kind), [.image, .embed])
+        XCTAssertEqual(receipt.webItems.map(\.kind), [.embed])
+        XCTAssertEqual(image.remoteMediaID, "im-new")
         let body = try XCTUnwrap(h.updateBodies.last)
-        XCTAssertTrue(body.contains(#"[{"text":"本文","type":"p"}]"#), body)
+        XCTAssertTrue(body.contains(#"[{"text":"本文","type":"p"},{"imageId":"im-new","type":"image"}]"#), body)
         XCTAssertTrue(body.contains("name=\"status\"\r\n\r\ndraft\r\n"), "never published unfinished")
         XCTAssertEqual(draft.remotePostID, "9002")
-        XCTAssertTrue(h.uploads.jobs(draftID: draft.id).allSatisfy { $0.state != .failed })
+        XCTAssertEqual(h.http.requests.map(\.endpointKey).filter { $0 != "www.metadata" }.prefix(2), ["post.create", "post.addImage"])
+        XCTAssertTrue(h.uploads.jobs(draftID: draft.id).allSatisfy { $0.state == .completed })
     }
 }
 

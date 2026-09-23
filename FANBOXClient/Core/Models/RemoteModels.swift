@@ -329,6 +329,10 @@ struct RemoteDraftBlock: Sendable, Hashable {
     var styles: [RemoteTextStyle] = []
     /// Send a text block as ONE paragraph even when it contains line breaks (an unchanged imported paragraph).
     var keepsLineBreaks: Bool = false
+    /// What the service returned when this app uploaded / registered the block's media (`mediaID` is its id). nil for
+    /// media that was already on the post (imported) and for text blocks. Carries the post the media was stored into and
+    /// the full image / file object an image- or file-type post body lists.
+    var media: RemoteUploadResult? = nil
 }
 
 /// Payload to create / update a post on FANBOX.
@@ -345,10 +349,50 @@ struct RemotePostDraft: Sendable, Hashable {
     var commentPermission: CommentPermission? = nil
 }
 
-struct RemoteUploadResult: Sendable, Hashable {
-    /// FANBOX imageId / fileId.
+/// Result of an upload (image / file) or of a link-card registration. Only `mediaID` is required; the other fields are
+/// what the service reported (FANBOX `Image` / `File` / `UrlEmbed`, docs/API.md §15) and are kept so a later save can
+/// list the full object (image- and file-type post bodies) without uploading again. Persisted as JSON on the draft block.
+struct RemoteUploadResult: Sendable, Hashable, Codable {
+    /// FANBOX imageId / fileId / urlEmbedId.
     var mediaID: String
+    /// Original image URL, file URL, or the link card's target URL.
     var url: String?
+    /// Post the media was stored into (FANBOX binds uploads to a post). nil = not bound to a post (demo legacy, fakes).
+    var postID: String? = nil
+    /// Image: `thumbnailUrl`.
+    var thumbnailURL: String? = nil
+    var width: Int? = nil
+    var height: Int? = nil
+    /// Image / file extension without the dot, as the service reported it.
+    var fileExtension: String? = nil
+    /// File: `name` (FANBOX reports it without the extension).
+    var fileName: String? = nil
+    /// File: size in bytes.
+    var fileSize: Int? = nil
+
+    /// JSON stored on `DraftBlock.remoteMediaJSON` / `UploadJob.remoteMediaJSON`.
+    var storageJSON: String? {
+        (try? JSONEncoder().encode(self)).flatMap { String(data: $0, encoding: .utf8) }
+    }
+
+    init(mediaID: String, url: String?, postID: String? = nil, thumbnailURL: String? = nil, width: Int? = nil, height: Int? = nil,
+         fileExtension: String? = nil, fileName: String? = nil, fileSize: Int? = nil) {
+        self.mediaID = mediaID
+        self.url = url
+        self.postID = postID
+        self.thumbnailURL = thumbnailURL
+        self.width = width
+        self.height = height
+        self.fileExtension = fileExtension
+        self.fileName = fileName
+        self.fileSize = fileSize
+    }
+
+    init?(storageJSON: String?) {
+        guard let storageJSON, let data = storageJSON.data(using: .utf8),
+              let decoded = try? JSONDecoder().decode(RemoteUploadResult.self, from: data) else { return nil }
+        self = decoded
+    }
 }
 
 /// Errors surfaced by remote data sources. Feature code shows cached data + a banner; it never deletes local cache on error.

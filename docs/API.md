@@ -39,6 +39,7 @@
 
 - This file records **interoperability facts**: endpoint paths, HTTP methods, parameter names, response field names and types, status codes, and the behaviour other people reported, with dates.
 - These facts come from **reading** public OSS repositories on GitHub (source files, test fixtures, commit messages and diffs, issues, READMEs) and the pixivFANBOX Help Center. The Help Center was read through its public Zendesk help-center JSON API.
+- §15 (uploads) comes from **reading FANBOX's own web front-end bundles as archived by the Internet Archive** (`web.archive.org/web/<timestamp>id_/https://s.pximg.net/www/js/fanbox/...`, 2020-01 to 2026-09 captures). Only endpoint names, form field names, response field names and enum strings were recorded; no code was copied and nothing was executed. The bundles were fetched from web.archive.org only, never from pximg.net or fanbox.cc.
 - **No request was sent** to `fanbox.cc`, `api.fanbox.cc`, `www.fanbox.cc`, `downloads.fanbox.cc` or `pixiv.net` during this research.
 - **No code was copied.** That covers source code, test fixtures, captured payload files and documentation prose from any project. Every JSON skeleton here is a hand-written summary in this document's own notation (§0.3). None of them is a copied payload, and none contains personal data.
 - **The Swift implementation is independent** (SPEC §3.6). Kotlin, TypeScript, Python, Go, Rust and C# code from these projects is not translated into Swift. Where this file says "project X does Y", that is a fact about observed behaviour, and our implementation makes its own decision.
@@ -95,6 +96,7 @@ Short names in the "Sources" lines below refer to this table. A "pushed" date is
 | RSSHub | github.com/DIYgod/RSSHub | Issues #21699 (2026-04-11), #19430 (2025-06), #19724 (2025-07) |
 | FanboxEnumerator | github.com/kiyo4act/FanboxEnumerator | DOM-based, no API calls |
 | nantas | github.com/nantas/chrome-agent sites/strategies/fanbox.cc/strategy.md | **Low reliability** |
+| web-bundles | web.archive.org captures of s.pximg.net/www/js/fanbox/ `commons.*.js` and `fanbox.*.js` | FANBOX's own web client, read for names only (§15). Captures: commons.3bfcccc41ac24080429a.js and fanbox.e25be7effec42f3f3c8c.js (2026-09-17), commons.2bca6e46395ce2aaed22.js (2025-06-02), commons.89fe38bcc506ac10155e.js (2024-06-03), fanbox.fb0b3966e81b04645826.js (2022-01-11), fanbox.02146021663938c7af64.js (2020-01-06). Full URLs in §15.6 |
 | Help | fanbox.pixiv.help (Zendesk help-center API) | Articles 360000664842, 360003723693, 54418828998297, 4514696329625, 360018253253, 360018102654, 900003410886, 360003723653, 360005115293, 360003698754, 360013697473, 360004254334, 4442218789529, 360003698854, 360003698974, 360008991393, 7324997407513, 360005115233, 360003723633, 360003723533, 360000230381, 4442406551705, 4442380315545, 54418814564505, 26030583672217, 360011057793, 26439413791257, 900001773206, 360004253894, 360005114953, 360013904933, 48515034524313, 360005063874 |
 
 Carried over from earlier research and not re-verified in this pass: EndlessMISAKA/AtelierMisaka, and search-snippet text from the Help Center.
@@ -679,7 +681,7 @@ FilterOption = {
 | 40 | Creator mgmt | `post.create` | POST | yes | yes | medium |
 | 41 | Creator mgmt | `post.update` | POST (multipart) | yes | yes (`tt`) | high |
 | 42 | Creator mgmt | `post.delete` | POST | yes | yes | medium |
-| 43 | Uploads | (unknown upload endpoint) | ? | yes | yes? | **low** |
+| 43 | Uploads | `post.addImage` / `post.addFile` / `post.addUrlEmbed` | POST (multipart) | yes | yes | high (unverified live) |
 | 44 | Fans | `relationship.listFans` | GET | yes | no | high |
 | 45 | Fans | `relationship.listFilterOptions` | GET | yes | no | high |
 | 46 | Fans | `relationship.getFan` | GET | yes | no | **low** |
@@ -1506,7 +1508,7 @@ HTTP 400 { "error": "general_error" }
 
 - **Fields not seen in any source:** `planId`, cover image, scheduled publish time (the web UI has scheduled posting), a per-post adult flag, `imageMap` or `fileMap` on write, `excerpt`, content for non-article types, a visibility field. **Do not invent them.** Leave those features to the web editor at `/manage/posts/{postId}`.
 - **Offsets:** fanboxsync counts style offset and length in **Unicode code points** (Go runes), while fankt and Pixiv-Shaft document **UTF-16 code units**. The two only differ for characters outside the BMP, such as emoji. Until this is verified, the native editor either blocks bold styles on text containing non-BMP characters, or falls back to the web editor for it (our policy).
-- **App scope (proposal):** native publishing covers article posts built from `p` and `header` blocks. Posts with images or files go through the web editor, because the upload API is unknown (§15).
+- **App scope:** native publishing covers article posts built from `p`, `header`, `image`, `file` and `url_embed` blocks, and image- / file-type posts (`{text, images}` / `{text, files}` bodies). Images, files and link cards are first stored into the post with the §15 endpoints and then referenced by id. New `embed` blocks, the R-18 flag and a plan id stay in the web editor.
 - **Sources:** defaultcf spec (`/post.update` security, `requestBodies.Update`, 00a8df23), fanbox-go (oas_request_encoders_gen.go), fanboxsync (fanbox.go `PushPost`, `convertJson`; entry.go `ConvertFanbox`; config.go `csrf_token`), cromachina @21ef099 (`post_update`, `convert_post`) and issue #3, Pixiv-Shaft (link offset note).
 
 ### 14.5 `post.delete`
@@ -1529,20 +1531,124 @@ HTTP 400 { "error": "general_error" }
 
 ## 15. Uploads
 
-### 15.1 Post image / file / cover upload — **UNKNOWN (low)**
+All three endpoints store an asset **into an existing post**: a new post is created first (`post.create`, §14.3), the
+assets are added with its `postId`, and the content is then saved with `post.update` (§14.4), which references each
+asset **by id only**. There is no separate cover upload: the cover is the `coverImage` field of `post.update` (§15.5).
 
-- **Method / URL:** unknown. Names such as `post.uploadImage` or `post.uploadFile` are **guesses**, not observations.
-- **Auth:** required. **CSRF:** presumably yes. **Confidence:** low.
-- **Searched on 2026-09-24:** GitHub code search for uploadImage, listManaged, getEditable and post.create combined with "fanbox", plus a repository search. No client that uploads to FANBOX was found; the only hit (an S3 helper in HakataArchiver) is unrelated.
-- **What is known, from the read side:**
-  - The image map entry is `{ id, extension, width, height, originalUrl, thumbnailUrl }`, and the file map entry is `{ id, name, extension, size, url }`.
-  - Stored post images live under `downloads.fanbox.cc/images/post/{postId}/{hash}.{ext}`, and covers under `pixiv.pximg.net/fanbox/public/images/post/{postId}/cover/{hash}.{ext}`. Uploads are therefore probably tied to an existing `postId` (inference).
-- **Limits (Help 360011057793, updated 2026-09-17):**
-  - Images: jpg, jpeg, png, gif. Audio: mp3, wav, flac. Video: mp4, mov, avi. Other: zip, pdf, txt, psd, clip.
-  - Up to **300 MB** per file. Post covers and creator-page covers up to **30 MB**.
-- **App policy:** the Upload Queue (SPEC §20) prepares media locally (resize and convert). The actual upload runs in the WebView editor at `/manage/posts/{postId}` until the endpoint has been captured from the user's **own** browser session in Research Mode.
-- **How to capture it:** turn on Research Mode, open the post editor through the app (Creator → Web で投稿管理, or a draft's "Web エディタで開く"), and add an image. `WebPageRequestCapture` (Core/Web/WebPageRequestCapture.swift) records every `fetch` / `XMLHttpRequest` the FANBOX page makes: method, redacted URL, status, content type, form field **names**, file part type and size, and the top-level key names of a JSON answer. No values or bodies are recorded. The entries appear under Research Mode → Requests with `# transport: web-page`.
-- **Sources:** danbooru (url/fanbox.rb, storage paths), Pixiv-Shaft (FanboxImage and FanboxFile fields), Help 360011057793.
+**Confidence: high** for names, fields and the save flow: the same names appear in every archived FANBOX web bundle
+from 2020-01 to 2026-09 (`post.addUrlEmbed` from 2022-01), and two independent readings plus a verification pass agree.
+**Not verified against the live service**: no request has been sent to FANBOX, and the response bodies are inferred from
+how the web client uses them. Confirm them once from your own session (Research Mode → Requests / API Schema) on a
+throwaway draft.
+
+### 15.1 `post.addImage`
+
+- **Method / URL:** `POST https://api.fanbox.cc/post.addImage`, **`multipart/form-data`**, with cookies.
+- **Auth:** required. **CSRF:** yes (see §15.4).
+
+| Field | In | Type | Req | Notes |
+|---|---|---|---|---|
+| `postId` | multipart | string | **yes** | The post the image belongs to |
+| `image` | multipart | file | **yes** | jpeg, png or gif. The part's file name and type come from the file |
+
+```jsonc
+{ "body": Image }   // Image = { id, extension, width, height, originalUrl, thumbnailUrl } (§2.5); inferred from use
+```
+
+- **Client-side checks in the web editor:** MIME `image/jpeg`, `image/png` or `image/gif`; at most **50,000,000 bytes**
+  (SI) in the article editor. The image-type post uploader has no size check. These are the web client's checks, not
+  verified server limits.
+- **Web client behaviour (not required):** a JPEG whose EXIF orientation is 2 or more is redrawn upright and sent as
+  PNG; other files are sent as they are. Several images are started about 20 ms apart and upload in parallel. The legacy
+  helper uses a 20-minute timeout and reports upload progress.
+- **Saving:** article → block `{type: "image", imageId}`. Image-type post → `body.images[]` lists the full `Image`
+  objects in display order. `imageMap` is never sent.
+
+### 15.2 `post.addFile`
+
+- **Method / URL:** `POST https://api.fanbox.cc/post.addFile`, `multipart/form-data`.
+- **Auth:** required. **CSRF:** yes (§15.4).
+
+| Field | In | Type | Req | Notes |
+|---|---|---|---|---|
+| `postId` | multipart | string | **yes** | |
+| `file` | multipart | file | **yes** | The original file; its multipart file name is the name supporters see (that the server takes `name` / `extension` from it is an inference) |
+
+```jsonc
+{ "body": File }   // File = { id, name, extension, size, url } (§2.5; `name` has no extension); inferred from use
+```
+
+- **Client-side checks:** at most **300,000,000 bytes**; extensions `txt psd pdf zip jpg jpeg png gif wav mp3 flac mp4
+  mov avi clip`. Matches the Help Center limits (Help 360011057793: up to 300 MB per file).
+- **Saving:** article → block `{type: "file", fileId}`. File-type post → `body.files[]` with the full `File` objects in
+  display order. `fileMap` is never sent.
+
+### 15.3 `post.addUrlEmbed`
+
+- **Method / URL:** `POST https://api.fanbox.cc/post.addUrlEmbed`, `multipart/form-data` (fields only).
+- **Auth:** required. **CSRF:** yes (§15.4). Present from the 2022-01 bundle on; the 2020-01 bundle had `post.addEmbed`
+  instead, which is gone from the 2024+ clients.
+
+| Field | In | Type | Req |
+|---|---|---|---|
+| `postId` | multipart | string | **yes** |
+| `url` | multipart | string | **yes** |
+
+```jsonc
+{ "body": UrlEmbed }   // UrlEmbed = { id, type, ... } as in urlEmbedMap (§2.7): type is
+                       // "fanbox.post" (postInfo), "fanbox.creator" (profile), "html" / "html.card" (html),
+                       // or "default" (url, host); inferred from the renderer
+```
+
+- **Saving:** block `{type: "url_embed", urlEmbedId}`. `urlEmbedMap` is never sent.
+- **Service embeds:** the current web client has no add-embed call; `{type: "embed", embedId}` blocks only round-trip
+  embeds that already exist. Whether a video URL registered with `post.addUrlEmbed` becomes an `html` card is not known.
+
+### 15.4 CSRF on these endpoints
+
+The web editor calls all three through its legacy multipart helper, which adds the CSRF token as the form field `tt`
+and sends **no** `X-CSRF-Token` header. The same 2026 bundle also defines request-layer variants (`post_addImage`, …)
+that send the **`X-CSRF-Token` header and no `tt`**; the editor does not call them, but the only multipart call of that
+layer the UI does make (an unrelated upload) sends the header only. That the server accepts either form is an
+**inference (medium)**.
+
+**App decision (SPEC §38 / §39):** the app sends the token **only as the `X-CSRF-Token` header** (the transport adds it
+for `requiresCSRF` endpoints) and never puts `tt` into these forms, because image and file bodies are streamed from a
+temporary file and the token must never be written to disk. A missing token is fetched before the upload; a 400 / 403
+answer is retried once after a token refresh with the same (token-free) body file. If live traffic shows that these
+endpoints require `tt`, uploads fail visibly (the job is marked failed, the draft and its post id are kept) and the web
+editor remains the fallback.
+
+### 15.5 The save call and the cover
+
+`post.update` (§14.4) is the save call. For uploaded assets it carries ids only: article blocks `imageId`, `fileId`,
+`urlEmbedId` (`embedId` for legacy embeds); image- / file-type posts list the full objects in `body.images` /
+`body.files` next to `body.text`. The cover image is sent **inline** in `post.update` as `coverImage`: a PNG blob (the
+web cropper outputs PNG at aspect 1200:630) sets it, the string `"delete"` removes it, and omitting the field keeps it.
+The app never sends `coverImage`, so the cover stays as it is.
+
+Flow used by the app for a new post: `post.create {type: "article"}` → the id is stored locally at once →
+`post.addImage` / `post.addFile` (one at a time, media priority) → `post.addUrlEmbed` → `post.update` with the ids in
+block order. A failed step leaves the created draft, its id and every completed asset in place; the next send continues
+on the same post and never re-uploads a completed asset (docs/ARCHITECTURE.md, "Creator Mode send and upload flow").
+
+### 15.6 Sources
+
+- web-bundles, commons 2026-09-17: https://web.archive.org/web/20260917071104id_/https://s.pximg.net/www/js/fanbox/commons.3bfcccc41ac24080429a.js
+  (API facade `post.addImage` / `post.addFile` / `post.addUrlEmbed` / `post.update` / `post.create`; multipart helper
+  with `tt`; request-layer variants with the header; image-post and file-post uploaders; `body.images` / `body.files`
+  builders; size constants 5e7 / 3e8; extension list)
+- web-bundles, fanbox 2026-09-17: https://web.archive.org/web/20260917071102id_/https://s.pximg.net/www/js/fanbox/fanbox.e25be7effec42f3f3c8c.js
+  (article editor: image / file / URL-embed insertion with `{postId, image}`, `{file, postId}`, `{postId, url}`; MIME and
+  size checks; cover cropper)
+- web-bundles, commons 2025-06-02: https://web.archive.org/web/20250602022645id_/https://s.pximg.net/www/js/fanbox/commons.2bca6e46395ce2aaed22.js
+- web-bundles, commons 2024-06-03: https://web.archive.org/web/20240603020738id_/https://s.pximg.net/www/js/fanbox/commons.89fe38bcc506ac10155e.js
+- web-bundles, fanbox 2022-01-11: https://web.archive.org/web/20220111033543id_/https://s.pximg.net/www/js/fanbox/fanbox.fb0b3966e81b04645826.js
+  (first bundle with `post.addUrlEmbed`)
+- web-bundles, fanbox 2020-01-06: https://web.archive.org/web/20200106112526id_/https://s.pximg.net/www/js/fanbox/fanbox.02146021663938c7af64.js
+  (`post.addImage` / `post.addFile` with `tt` already present; `post.addEmbed`)
+- Help 360011057793 (formats and the 300 MB limit). Read-side shapes: §2.5, §2.7.
+- No third-party client that uploads to FANBOX was found (GitHub code search for the three names, 2026-09-24).
 
 ---
 
@@ -1992,7 +2098,7 @@ After a payment session the supports are synced at once. For plan, creator and s
 again 1, 5 and 15 minutes later while it is alive, and stops at the first check that observes a change (activation can
 lag, §18.10).
 
-These are **WebView-only**, because no API exists in any source: starting, stopping, upgrading or downgrading support; changing the payment method or card; plan management; profile editing; sending newsletters; payout requests; media upload (§15).
+These are **WebView-only**, because no API exists in any source: starting, stopping, upgrading or downgrading support; changing the payment method or card; plan management; profile editing; sending newsletters; payout requests. (Media upload is native since §15 was found; new service embeds stay in the web editor.)
 
 ---
 
@@ -2054,7 +2160,7 @@ Verify each of these in Research Mode before building features that depend on it
 30. When exactly did `creator.listFollowing`, `listPixiv` and `listRecommended` move to `body.creators`?
 
 **Creator side**
-31. Media upload: what are the endpoint names, method, fields, whether a `postId` is needed, and the response?
+31. Media upload (§15): names, fields and the `postId` binding are known from the web client. Still open: the exact response bodies of `post.addImage` / `post.addFile` / `post.addUrlEmbed`, and whether they accept the `X-CSRF-Token` header without `tt`.
 32. `post.update`: scheduled publish, cover image, adult flag, `planId`, non-article content, and whether maps must be sent with the blocks. Is the encoding multipart with repeated `tags`, or urlencoded with a JSON string? Is `commentingPermissionScope` mandatory? Is an `X-CSRF-Token` header needed in addition to `tt`? Does omitting `tags` keep or clear them?
 33. `post.listManaged`: pagination, caps, status filters, or a paginate-style variant?
 34. `relationship.listFans`: are large fan counts capped? Is there a total-months field? Is there any way to edit `note`? Which `status` values exist beyond `supporter`?
@@ -2086,10 +2192,10 @@ Verify each of these in Research Mode before building features that depend on it
 | Payments | 2 | 1 | 1 | 0 |
 | Follow | 2 | 2 | 0 | 0 |
 | Creator-side management | 5 | 2 | 3 | 0 |
-| Uploads | 1 | 0 | 0 | 1 |
+| Uploads | 1 | 1 | 0 | 0 |
 | Fans | 4 | 2 | 1 | 1 |
 | Dashboard | 2 | 0 | 2 | 0 |
-| **Total** | **49** | **28** | **17** | **4** |
+| **Total** | **49** | **29** | **17** | **3** |
 
 Also documented: two media host families (§1.9, high). The five appendix endpoints in §21 are low and not counted above.
 
@@ -2099,7 +2205,6 @@ Also documented: two media host families (§1.9, high). The five appendix endpoi
 |---|---|
 | `creator.getStartComments` | One 2023 source; purpose unknown |
 | `newsletter.markAsReadAll` | One source, never run with a token |
-| Post media upload (§15) | Not found in any OSS; the endpoint is unknown |
 | `relationship.getFan` | Only in an unmerged 2024 spec branch; no client calls it |
 | Appendix (§21): `creator.listRelated`, `creator.listTwitter`, `post.getPromotion`, `user.update`, `user.getTwitterAccountInfo` | 2023 sources only |
 
@@ -2119,5 +2224,9 @@ Also documented: two media host families (§1.9, high). The five appendix endpoi
 - **`legacy/manage/pledge/monthly`, `legacy/payout_request`:** response shapes are from 2023.
 
 ### 23.4 Items rated high whose bodies are still shape-unknown
+
+`post.addImage`, `post.addFile` and `post.addUrlEmbed` (§15) are high-confidence as requests; their response bodies are
+inferred from how the web client uses them (the app decodes them leniently and records a research event if the id is
+missing).
 
 `post.likePost`, `post.addComment`, `post.deleteComment`, `post.likeComment`, `follow.create` and `follow.delete` are high-confidence as *requests*. No client reads their response body, so the app must treat any 2xx as success and then re-read the state.
