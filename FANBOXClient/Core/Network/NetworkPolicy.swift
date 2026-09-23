@@ -82,17 +82,44 @@ struct NetworkPolicySnapshot: Sendable, Equatable {
 }
 
 /// Thread-safe holder of the current policy, shared by the main-actor controller and background actors.
+/// Observers (e.g. the scheduler failing queued requests when the mode becomes Offline) are called outside the lock,
+/// on the thread that performed the update, only when the snapshot actually changed.
 final class NetworkPolicyStore: @unchecked Sendable {
-    private let lock = OSAllocatedUnfairLock(initialState: NetworkPolicySnapshot.default)
+    typealias Observer = @Sendable (NetworkPolicySnapshot) -> Void
 
-    init(_ initial: NetworkPolicySnapshot = .default) {
-        lock.withLock { $0 = initial }
+    private struct State {
+        var snapshot: NetworkPolicySnapshot
+        var observers: [UUID: Observer] = [:]
     }
 
-    var current: NetworkPolicySnapshot { lock.withLock { $0 } }
+    private let lock = OSAllocatedUnfairLock(initialState: State(snapshot: NetworkPolicySnapshot.default))
+
+    init(_ initial: NetworkPolicySnapshot = .default) {
+        lock.withLock { $0.snapshot = initial }
+    }
+
+    var current: NetworkPolicySnapshot { lock.withLock { $0.snapshot } }
 
     func update(_ transform: (inout NetworkPolicySnapshot) -> Void) {
-        lock.withLock { transform(&$0) }
+        let (changed, snapshot, observers) = lock.withLock { state -> (Bool, NetworkPolicySnapshot, [Observer]) in
+            let before = state.snapshot
+            transform(&state.snapshot)
+            return (before != state.snapshot, state.snapshot, Array(state.observers.values))
+        }
+        guard changed else { return }
+        for observer in observers { observer(snapshot) }
+    }
+
+    /// Registers a change observer; keep the token to remove it.
+    @discardableResult
+    func addObserver(_ observer: @escaping Observer) -> UUID {
+        let id = UUID()
+        lock.withLock { $0.observers[id] = observer }
+        return id
+    }
+
+    func removeObserver(_ id: UUID) {
+        lock.withLock { _ = $0.observers.removeValue(forKey: id) }
     }
 }
 
