@@ -67,6 +67,11 @@ extension LocalStore {
         }
     }
 
+    /// Post metadata without a body (post.get fallback): updates title / excerpt / counts, never touches a cached body.
+    func upsertPostMetadata(_ summary: RemotePostSummary, account: AccountContext) {
+        upsertSummariesCore([summary], account: account, source: nil)
+    }
+
     // MARK: - Creators
 
     func upsertCreator(_ creator: RemoteCreator, account: AccountContext?) {
@@ -109,21 +114,36 @@ extension LocalStore {
 
     // MARK: - Supports (SPEC §10 / §11 / §13 / §15)
 
+    /// Observed-fact-only reason for supports FANBOX lists as unpaid (docs/API.md §12.2). Never asserts a payment failure.
+    static let paymentAttentionReason = "決済状態を確認できません（FANBOX で未払いの項目が表示されています）"
+    /// Sub-scope of the supports SyncState that remembers a pending "everything disappeared at once" observation.
+    static let massDisappearanceScope = "massDisappearance"
+    /// A mass disappearance must be seen again within this window to be recorded (two-strike rule).
+    static let massDisappearanceConfirmWindow: TimeInterval = 3 * 24 * 60 * 60
+
     /// Applies the account's current supporting plans, records SupportHistory and flags anomalies.
     @discardableResult
-    func applySupports(_ supports: [RemoteSupport], account: AccountContext, source: ObservedSource) -> SupportDiff {
-        applySupportsDetailed(supports, account: account, source: source).diff
+    func applySupports(_ supports: [RemoteSupport], account: AccountContext, source: ObservedSource,
+                       isBaseline: Bool = false, listingIsComplete: Bool = true) -> SupportDiff {
+        applySupportsDetailed(supports, account: account, source: source, isBaseline: isBaseline, listingIsComplete: listingIsComplete).diff
     }
 
     /// Same as `applySupports` but also returns the SupportHistory rows created by this call.
-    func applySupportsDetailed(_ supports: [RemoteSupport], account: AccountContext,
-                               source: ObservedSource) -> (diff: SupportDiff, history: [SupportHistory]) {
+    /// - `isBaseline`: the account's first successful supports sync. Supports found then are imported without a
+    ///   "支援開始" history row (their real start date is unknown; SPEC §11 records observed changes only).
+    /// - `listingIsComplete == false`: the listing could not be read completely (shape drift). Listed supports are
+    ///   upserted, but nothing is marked as disappeared.
+    /// - When every previously active support (2 or more) vanishes at once, the disappearance is recorded only if the
+    ///   next sync observes it again (a single suspicious empty listing is not an observed fact).
+    func applySupportsDetailed(_ supports: [RemoteSupport], account: AccountContext, source: ObservedSource,
+                               isBaseline: Bool = false, listingIsComplete: Bool = true) -> (diff: SupportDiff, history: [SupportHistory]) {
         let accountID = account.accountID
         let now = Date.now
         var diff = SupportDiff()
         var history: [SupportHistory] = []
         var existing: [String: Support] = [:]
         for s in self.supports(accountID: accountID) { existing[s.creatorID] = s }
+        let previouslyActive = Set(existing.filter { $0.value.status == .active }.map(\.key))
 
         var remoteByCreator: [String: RemoteSupport] = [:]
         var order: [String] = []
@@ -141,30 +161,53 @@ extension LocalStore {
             history.append(h)
         }
 
+        /// Creators whose user-verified payment assignment is contradicted by this observation (SPEC §13).
+        var contradicted: Set<String> = []
+
         for creatorID in order {
             guard let r = remoteByCreator[creatorID] else { continue }
             let planID: String? = r.planID.isEmpty ? nil : r.planID
             if let s = existing[creatorID] {
+                let previousMethod = s.reportedPaymentMethod
                 switch s.status {
                 case .active:
                     if s.planID != planID || s.amount != r.fee {
                         record(.planChanged, creatorID: creatorID, creatorName: r.creatorName, oldPlanID: s.planID, newPlanID: planID,
                                oldPlan: s.planTitle, newPlan: r.planTitle, oldAmount: s.amount, newAmount: r.fee)
                         diff.changed.append(creatorID)
+                        if s.planID != planID { contradicted.insert(creatorID) }
                     }
                 case .missing:
                     record(.restored, creatorID: creatorID, creatorName: r.creatorName, oldPlanID: s.planID, newPlanID: planID,
                            oldPlan: s.planTitle, newPlan: r.planTitle, oldAmount: s.amount, newAmount: r.fee)
                     diff.restored.append(creatorID)
+                    contradicted.insert(creatorID)
                 case .ended, .unknown:
-                    record(.started, creatorID: creatorID, creatorName: r.creatorName, oldPlanID: s.planID, newPlanID: planID,
-                           oldPlan: s.planTitle, newPlan: r.planTitle, oldAmount: s.amount, newAmount: r.fee)
+                    if !isBaseline {
+                        record(.started, creatorID: creatorID, creatorName: r.creatorName, oldPlanID: s.planID, newPlanID: planID,
+                               oldPlan: s.planTitle, newPlan: r.planTitle, oldAmount: s.amount, newAmount: r.fee)
+                    }
                     diff.started.append(creatorID)
+                    contradicted.insert(creatorID)
+                }
+                if let method = r.paymentMethod, let previousMethod,
+                   method.caseInsensitiveCompare(previousMethod) != .orderedSame {
+                    contradicted.insert(creatorID)
+                }
+                if s.status != .active {
+                    // A restored / restarted support starts clean: a later disappearance is a NEW anomaly for 要確認.
+                    s.missingSince = nil
+                    if s.attentionReason != Self.paymentAttentionReason {
+                        s.needsAttention = false
+                        s.attentionReason = nil
+                        s.acknowledgedAt = nil
+                    }
+                } else if s.needsAttention, s.attentionReason == Self.supportMissingReason {
+                    s.needsAttention = false
+                    s.attentionReason = nil
+                    s.acknowledgedAt = nil
                 }
                 s.status = .active
-                s.missingSince = nil
-                s.needsAttention = false
-                s.attentionReason = nil
                 s.creatorName = r.creatorName.isEmpty ? s.creatorName : r.creatorName
                 s.creatorIconURL = r.creatorIconURL ?? s.creatorIconURL
                 s.planID = planID
@@ -179,8 +222,10 @@ extension LocalStore {
                 s.reportedPaymentMethod = r.paymentMethod
                 context.insert(s)
                 existing[creatorID] = s
-                record(.started, creatorID: creatorID, creatorName: r.creatorName, oldPlanID: nil, newPlanID: planID,
-                       oldPlan: nil, newPlan: r.planTitle, oldAmount: nil, newAmount: r.fee)
+                if !isBaseline {
+                    record(.started, creatorID: creatorID, creatorName: r.creatorName, oldPlanID: nil, newPlanID: planID,
+                           oldPlan: nil, newPlan: r.planTitle, oldAmount: nil, newAmount: r.fee)
+                }
                 diff.started.append(creatorID)
             }
 
@@ -194,6 +239,7 @@ extension LocalStore {
             let assignmentKey = Support.key(accountID: accountID, creatorID: creatorID)
             if let a = first(#Predicate<SupportPaymentAssignment> { $0.key == assignmentKey }) {
                 if a.planID != planID { a.planID = planID; a.updatedAt = now }
+                if contradicted.contains(creatorID) { downgradeVerification(a, now: now) }
             } else {
                 context.insert(SupportPaymentAssignment(accountID: accountID, creatorID: creatorID, planID: planID, paymentProfileID: nil,
                                                         verificationState: .unknown, updatedAt: now))
@@ -203,14 +249,25 @@ extension LocalStore {
         }
 
         // Previously active supports that are no longer returned: observed fact only, never an asserted cause.
-        for (creatorID, s) in existing where remoteByCreator[creatorID] == nil && s.status == .active {
-            s.status = .missing
-            s.missingSince = now
-            s.needsAttention = true
-            s.attentionReason = Self.supportMissingReason
-            record(.disappeared, creatorID: creatorID, creatorName: s.creatorName, oldPlanID: s.planID, newPlanID: nil,
-                   oldPlan: s.planTitle, newPlan: nil, oldAmount: s.amount, newAmount: nil)
-            diff.disappeared.append(creatorID)
+        let disappearing = previouslyActive.filter { remoteByCreator[$0] == nil }.sorted()
+        if listingIsComplete, !disappearing.isEmpty, confirmDisappearance(disappearing, previouslyActive: previouslyActive,
+                                                                            accountID: accountID, now: now) {
+            for creatorID in disappearing {
+                guard let s = existing[creatorID] else { continue }
+                s.status = .missing
+                s.missingSince = now
+                s.needsAttention = true
+                s.attentionReason = Self.supportMissingReason
+                // A new disappearance is a new anomaly even if an earlier one was acknowledged (SPEC §15).
+                s.acknowledgedAt = nil
+                record(.disappeared, creatorID: creatorID, creatorName: s.creatorName, oldPlanID: s.planID, newPlanID: nil,
+                       oldPlan: s.planTitle, newPlan: nil, oldAmount: s.amount, newAmount: nil)
+                diff.disappeared.append(creatorID)
+                let assignmentKey = Support.key(accountID: accountID, creatorID: creatorID)
+                if let a = first(#Predicate<SupportPaymentAssignment> { $0.key == assignmentKey }) { downgradeVerification(a, now: now) }
+            }
+        } else if listingIsComplete, disappearing.isEmpty {
+            clearMassDisappearanceStrike(accountID: accountID)
         }
 
         // Denormalize supportedByAccountIDs / isSupported on Creator and the per-account plan fee on PostAccess.
@@ -236,6 +293,101 @@ extension LocalStore {
         return (diff, history)
     }
 
+    /// Two-strike rule for "every active support (2+) vanished at once": the first observation is remembered, and only a
+    /// second consecutive observation of the same set within `massDisappearanceConfirmWindow` is recorded.
+    private func confirmDisappearance(_ disappearing: [String], previouslyActive: Set<String>, accountID: String, now: Date) -> Bool {
+        guard disappearing.count >= 2, disappearing.count == previouslyActive.count else {
+            clearMassDisappearanceStrike(accountID: accountID)
+            return true
+        }
+        let strike = syncState(accountID: accountID, resource: .supports, scope: Self.massDisappearanceScope)
+        let marker = disappearing.joined(separator: ",")
+        if strike.lastKnownItemID == marker, let first = strike.lastAttemptAt,
+           now.timeIntervalSince(first) <= Self.massDisappearanceConfirmWindow {
+            strike.lastKnownItemID = nil
+            strike.lastAttemptAt = nil
+            strike.error = nil
+            return true
+        }
+        strike.lastKnownItemID = marker
+        strike.lastAttemptAt = now
+        strike.error = "全ての支援が一覧から消えました（次回の同期で再確認します）"
+        AppLog.sync.notice("supports: every active support missing in one listing; waiting for a second observation")
+        return false
+    }
+
+    private func clearMassDisappearanceStrike(accountID: String) {
+        let key = SyncState.key(accountID: accountID, resource: .supports, scope: Self.massDisappearanceScope)
+        if let strike = first(#Predicate<SyncState> { $0.key == key }), strike.lastKnownItemID != nil {
+            strike.lastKnownItemID = nil
+            strike.lastAttemptAt = nil
+            strike.error = nil
+        }
+    }
+
+    /// A user verification is no longer trusted once FANBOX shows a different plan / payment method, or the support
+    /// disappeared or restarted: it drops back to "manual" (the chosen profile is kept, the verified date is cleared).
+    private func downgradeVerification(_ a: SupportPaymentAssignment, now: Date) {
+        guard a.verificationState == .verified else { return }
+        a.verificationState = .manual
+        a.lastVerifiedAt = nil
+        a.updatedAt = now
+    }
+
+    /// Result of applying observed payment signals.
+    struct PaymentStatusChange: Equatable {
+        /// The account flag switched from "not unpaid" (observed false) to "unpaid".
+        var becameUnpaid = false
+        /// No earlier observation existed (baseline: flags are stored, nothing is announced).
+        var firstObservation = false
+        /// Supports newly flagged by this call (creator ids, sorted).
+        var newlyFlaggedCreatorIDs: [String] = []
+    }
+
+    /// Applies observed payment signals (docs/API.md §2.14 / §12.2) to the account and its supports.
+    /// Supports of creators listed as unpaid get `paymentAttentionReason` (observed fact only, SPEC §15); the flag is lifted
+    /// again once FANBOX no longer lists them.
+    @discardableResult
+    func applyPaymentStatus(_ status: RemotePaymentStatus, account: AccountContext, now: Date = .now) -> PaymentStatusChange {
+        var change = PaymentStatusChange()
+        guard let row = self.account(id: account.accountID) else { return change }
+        let previous = row.hasUnpaidPayments
+        let indicates = status.indicatesUnpaid
+        change.firstObservation = previous == nil
+        change.becameUnpaid = previous == false && indicates == true
+        if let indicates { row.hasUnpaidPayments = indicates }
+        row.unpaidPaymentsCheckedAt = now
+
+        if let records = status.unpaidRecords {
+            let unpaidCreators = Set(records.compactMap(\.creatorID).filter { !$0.isEmpty })
+            for s in supports(accountID: account.accountID) {
+                let flagged = s.needsAttention && s.attentionReason == Self.paymentAttentionReason
+                if unpaidCreators.contains(s.creatorID) {
+                    if !flagged {
+                        // Keep a disappearance reason if one is pending: it is the stronger observed fact.
+                        if !(s.needsAttention && s.attentionReason == Self.supportMissingReason) {
+                            s.needsAttention = true
+                            s.attentionReason = Self.paymentAttentionReason
+                            s.acknowledgedAt = nil
+                        }
+                        change.newlyFlaggedCreatorIDs.append(s.creatorID)
+                    }
+                } else if s.attentionReason == Self.paymentAttentionReason {
+                    s.needsAttention = false
+                    s.attentionReason = nil
+                }
+            }
+        } else if indicates == false {
+            for s in supports(accountID: account.accountID) where s.attentionReason == Self.paymentAttentionReason {
+                s.needsAttention = false
+                s.attentionReason = nil
+            }
+        }
+        change.newlyFlaggedCreatorIDs.sort()
+        save()
+        return change
+    }
+
     func upsertPlans(_ plans: [RemotePlan], creatorID: String) {
         for (index, p) in plans.enumerated() {
             upsertPlanRow(planID: p.planID, creatorID: p.creatorID.isEmpty ? creatorID : p.creatorID, title: p.title, fee: p.fee,
@@ -254,18 +406,21 @@ extension LocalStore {
     // MARK: - Comments
 
     func upsertComments(_ comments: [RemoteComment], postID: String, account: AccountContext) {
-        upsertCommentsCore(comments, postID: postID, account: account, forceOwnPostCreatorID: nil, forceOwn: false)
+        upsertCommentsCore(comments, postID: postID, account: account, forceOwnPostCreatorID: nil, forceOwn: false, readCutoff: nil)
     }
 
     /// Upserts and returns the ids of comments that were not known before.
+    /// `readCutoff`: comments by others on my own posts created at or before this date are imported as read (history
+    /// discovered late is not "未読"), unless an unread notification points at them. nil = every new one is unread.
     @discardableResult
-    func upsertCommentsReturningNew(_ comments: [RemoteComment], postID: String, account: AccountContext) -> [String] {
-        upsertCommentsCore(comments, postID: postID, account: account, forceOwnPostCreatorID: nil, forceOwn: false)
+    func upsertCommentsReturningNew(_ comments: [RemoteComment], postID: String, account: AccountContext,
+                                    readCutoff: Date? = nil) -> [String] {
+        upsertCommentsCore(comments, postID: postID, account: account, forceOwnPostCreatorID: nil, forceOwn: false, readCutoff: readCutoff)
     }
 
-    /// Comments on my own creator posts (Creator Mode listing). Groups by post.
+    /// Comments on my own creator posts (Creator Mode listing). Groups by post. See `upsertCommentsReturningNew` for `readCutoff`.
     @discardableResult
-    func upsertCreatorComments(_ comments: [RemoteComment], account: AccountContext) -> [String] {
+    func upsertCreatorComments(_ comments: [RemoteComment], account: AccountContext, readCutoff: Date? = nil) -> [String] {
         var byPost: [String: [RemoteComment]] = [:]
         var order: [String] = []
         for c in comments {
@@ -275,14 +430,15 @@ extension LocalStore {
         var inserted: [String] = []
         for postID in order {
             inserted += upsertCommentsCore(byPost[postID] ?? [], postID: postID, account: account,
-                                           forceOwnPostCreatorID: account.creatorID, forceOwn: false)
+                                           forceOwnPostCreatorID: account.creatorID, forceOwn: false, readCutoff: readCutoff)
         }
         return inserted
     }
 
     /// A comment my account just posted (reply queue): visible locally immediately, marked own + read.
     func upsertOwnComment(_ comment: RemoteComment, account: AccountContext) {
-        let inserted = upsertCommentsCore([comment], postID: comment.postID, account: account, forceOwnPostCreatorID: nil, forceOwn: true)
+        let inserted = upsertCommentsCore([comment], postID: comment.postID, account: account, forceOwnPostCreatorID: nil, forceOwn: true,
+                                          readCutoff: nil)
         if !inserted.isEmpty, let post = post(id: comment.postID) {
             post.commentCount += 1
             save()
@@ -301,9 +457,15 @@ extension LocalStore {
 
     // MARK: - Notifications / おたより
 
+    /// Events older than this are not kept in the inbox (see `maintenancePruneNotificationEvents`); unknown remote items
+    /// older than this are not (re)imported, so a pruned event never comes back as "new".
+    static let notificationRetention: TimeInterval = 90 * 24 * 60 * 60
+    /// Two comment notifications from different accounts within this interval (same post, text and author) are one event.
+    static let commentEventMergeWindow: TimeInterval = 120
+
     /// Returns ids of NotificationEvents that are new (not previously known).
     @discardableResult
-    func upsertNotifications(_ items: [RemoteNotification], account: AccountContext) -> [String] {
+    func upsertNotifications(_ items: [RemoteNotification], account: AccountContext, now: Date = .now) -> [String] {
         let accountID = account.accountID
         let keyed: [(String, RemoteNotification)] = items.map { n in
             (NotificationEvent.dedupeKey(type: n.type, creatorID: n.creatorID, postID: n.postID, commentID: n.commentID,
@@ -314,10 +476,12 @@ extension LocalStore {
         if !ids.isEmpty {
             for e in fetch(FetchDescriptor<NotificationEvent>(predicate: #Predicate { ids.contains($0.id) })) { known[e.id] = e }
         }
+        let horizon = now.addingTimeInterval(-Self.notificationRetention)
         var newIDs: [String] = []
         for (key, n) in keyed {
             let remoteRef = "\(accountID):\(n.remoteID)"
-            if let e = known[key] {
+            if let e = known[key] ?? sameCommentEvent(as: n, from: accountID) {
+                known[key] = e
                 if !e.accountIDs.contains(accountID) { e.accountIDs.append(accountID) }
                 if !e.remoteIDs.contains(remoteRef) { e.remoteIDs.append(remoteRef) }
                 if e.creatorID == nil { e.creatorID = n.creatorID }
@@ -330,6 +494,8 @@ extension LocalStore {
                 if e.title.isEmpty && !n.title.isEmpty { e.title = n.title }
                 continue
             }
+            // Older than the inbox retention: pruned locally on purpose, never re-imported as new.
+            if n.createdAt < horizon && n.createdAt > .distantPast { continue }
             let e = NotificationEvent(id: key, type: n.type, accountIDs: [accountID], title: n.title, message: n.message,
                                       timestamp: n.createdAt, creatorID: n.creatorID, postID: n.postID, commentID: n.commentID,
                                       newsletterID: n.newsletterID)
@@ -349,6 +515,25 @@ extension LocalStore {
         }
         save()
         return newIDs
+    }
+
+    /// FANBOX comment bells carry no comment id (docs/API.md §2.11), so their keys contain the per-account bell id.
+    /// The same comment notified to another local account is recognized by post + text + author + time instead (SPEC §27).
+    private func sameCommentEvent(as n: RemoteNotification, from accountID: String) -> NotificationEvent? {
+        guard n.type == .comment || n.type == .commentReply, n.commentID == nil, let postID = n.postID else { return nil }
+        let candidates = fetch(FetchDescriptor<NotificationEvent>(predicate: #Predicate { $0.postID == postID }))
+        // A bell merged into another account's event earlier is recognized by its remote reference.
+        let remoteRef = "\(accountID):\(n.remoteID)"
+        if let merged = candidates.first(where: { $0.remoteIDs.contains(remoteRef) }) { return merged }
+        let body = n.message.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !body.isEmpty else { return nil }
+        return candidates.first { e in
+            (e.type == .comment || e.type == .commentReply)
+                && !e.accountIDs.contains(accountID)
+                && e.message.trimmingCharacters(in: .whitespacesAndNewlines) == body
+                && e.actorName == n.actorName
+                && abs(e.timestamp.timeIntervalSince(n.createdAt)) <= Self.commentEventMergeWindow
+        }
     }
 
     /// Returns ids of newsletters that are new.
@@ -444,6 +629,105 @@ extension LocalStore {
         return created
     }
 
+    /// Why a `.paymentAttention` event was created. Each reason is announced at most once per account / creator / month.
+    enum PaymentAttentionTrigger: String, Sendable {
+        /// Page metadata `hasUnpaidPayments` switched to true.
+        case unpaidFlag
+        /// payment.listUnpaid lists the creator.
+        case unpaidRecord
+        /// A supported plan disappeared during the 1st–5th of the month (docs/API.md §18.8 B).
+        case disappearedEarlyInMonth
+    }
+
+    /// Creates `.paymentAttention` events (SPEC §24.1 決済要確認, Critical). Observed facts only: the text never states that a
+    /// payment failed (SPEC §15). `creatorIDs` empty = one account-level event. Returns the created event ids.
+    @discardableResult
+    func recordPaymentAttentionEvents(_ trigger: PaymentAttentionTrigger, creatorIDs: [String], account: AccountContext,
+                                      accountName: String, now: Date = .now) -> [String] {
+        let month = Self.monthKey(now)
+        var created: [String] = []
+        let targets: [String?] = creatorIDs.isEmpty ? [nil] : creatorIDs.map(Optional.some)
+        for creatorID in targets {
+            let fallback = "local:\(account.accountID):\(month):\(trigger.rawValue):\(creatorID ?? "account")"
+            let key = NotificationEvent.dedupeKey(type: .paymentAttention, creatorID: creatorID, postID: nil, commentID: nil,
+                                                  newsletterID: nil, fallbackRemoteID: fallback)
+            guard notificationEvent(id: key) == nil else { continue }
+            let creatorName = creatorID.flatMap { cid in supports(accountID: account.accountID).first { $0.creatorID == cid }?.creatorName }
+                ?? creatorID.flatMap { creator(id: $0)?.name }
+            let title = creatorName.map { "\($0)（\(accountName)）" } ?? "決済要確認（\(accountName)）"
+            let message: String
+            switch trigger {
+            case .unpaidFlag:
+                message = "FANBOX で未払いの項目があると表示されています。決済状態を確認できません（原因はアプリでは確認できません）"
+            case .unpaidRecord:
+                message = Self.paymentAttentionReason
+            case .disappearedEarlyInMonth:
+                message = "月初（1〜5日）に支援中一覧から消えました。決済状態を確認できません（原因は確認できません）"
+            }
+            let e = NotificationEvent(id: key, type: .paymentAttention, accountIDs: [account.accountID], title: title, message: message,
+                                      timestamp: now, creatorID: creatorID)
+            e.prefetchState = .textReady
+            context.insert(e)
+            created.append(key)
+        }
+        if !created.isEmpty { save() }
+        return created
+    }
+
+    /// Creates `.newSupporter` events (SPEC §24.1 Creator 側の新規支援) for supporters newly observed in the fan list.
+    @discardableResult
+    func recordNewSupporterEvents(userIDs: [String], account: AccountContext, accountName: String, now: Date = .now) -> [String] {
+        guard !userIDs.isEmpty else { return [] }
+        let accountID = account.accountID
+        let keys = userIDs.map { "\(accountID)|\($0)" }
+        var fans: [String: Fan] = [:]
+        for f in fetch(FetchDescriptor<Fan>(predicate: #Predicate { keys.contains($0.key) })) { fans[f.userID] = f }
+        var created: [String] = []
+        for userID in userIDs {
+            guard let fan = fans[userID] else { continue }
+            let started = fan.supportStartedAt.map { String(Int($0.timeIntervalSince1970)) } ?? Self.dayKey(now)
+            let key = NotificationEvent.dedupeKey(type: .newSupporter, creatorID: account.creatorID, postID: nil, commentID: nil,
+                                                  newsletterID: nil, fallbackRemoteID: "local:\(accountID):\(userID):\(started)")
+            guard notificationEvent(id: key) == nil else { continue }
+            var detail = ""
+            if let plan = fan.planTitle, !plan.isEmpty { detail = "「\(plan)」" }
+            if let fee = fan.fee { detail += (detail.isEmpty ? "" : " ") + Self.yenText(fee) }
+            let message = detail.isEmpty ? "\(fan.name) さんが支援者一覧に加わりました"
+                : "\(fan.name) さんが支援者一覧に加わりました（\(detail)）"
+            let e = NotificationEvent(id: key, type: .newSupporter, accountIDs: [accountID], title: "新規支援（\(accountName)）",
+                                      message: message, timestamp: fan.supportStartedAt.map { min($0, now) } ?? now,
+                                      creatorID: account.creatorID)
+            e.actorName = fan.name
+            e.actorIconURL = fan.iconURL
+            e.prefetchState = .textReady
+            context.insert(e)
+            created.append(key)
+        }
+        if !created.isEmpty { save() }
+        return created
+    }
+
+    static func monthKey(_ date: Date) -> String {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "Asia/Tokyo") ?? .current
+        let c = calendar.dateComponents([.year, .month], from: date)
+        return String(format: "%04d-%02d", c.year ?? 0, c.month ?? 0)
+    }
+
+    static func dayKey(_ date: Date) -> String {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "Asia/Tokyo") ?? .current
+        let c = calendar.dateComponents([.year, .month, .day], from: date)
+        return String(format: "%04d-%02d-%02d", c.year ?? 0, c.month ?? 0, c.day ?? 0)
+    }
+
+    /// Day of month in Japan time (FANBOX bills on the 1st; docs/API.md §18.8 B uses the 1st–5th window).
+    static func dayOfMonthJST(_ date: Date) -> Int {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "Asia/Tokyo") ?? .current
+        return calendar.component(.day, from: date)
+    }
+
     // MARK: - Payments / Creator Mode
 
     func upsertPayments(_ items: [RemotePayment], account: AccountContext) {
@@ -473,8 +757,12 @@ extension LocalStore {
         save()
     }
 
-    func upsertFans(_ fans: [RemoteFan], account: AccountContext) {
+    /// Upserts fans and returns the user ids that are newly observed as supporters (no row before, or a row that was not
+    /// `.supporting`).
+    @discardableResult
+    func upsertFans(_ fans: [RemoteFan], account: AccountContext) -> [String] {
         let accountID = account.accountID
+        var newSupporters: [String] = []
         let keys = fans.map { "\(accountID)|\($0.userID)" }
         var known: [String: Fan] = [:]
         if !keys.isEmpty {
@@ -486,10 +774,12 @@ extension LocalStore {
             let f: Fan
             if let existing = known[key] {
                 f = existing
+                if r.state == .supporting && existing.state != .supporting { newSupporters.append(r.userID) }
             } else {
                 f = Fan(accountID: accountID, userID: r.userID, name: r.name, state: r.state, updatedAt: now)
                 context.insert(f)
                 known[key] = f
+                if r.state == .supporting { newSupporters.append(r.userID) }
             }
             if !r.name.isEmpty { f.name = r.name }
             f.iconURL = r.iconURL ?? f.iconURL
@@ -503,6 +793,7 @@ extension LocalStore {
             // `note` is local-only and never touched here.
         }
         save()
+        return newSupporters
     }
 
     /// After a COMPLETE fan listing: supporters that are no longer listed are marked `.ended` (observed fact).
@@ -630,7 +921,9 @@ extension LocalStore {
             let viewers = list.filter(\.canView).map(\.accountID).sorted()
             if post.accessAccountIDs.sorted() != viewers { post.accessAccountIDs = viewers }
 
-            if source != nil, !post.seenByAccountIDs.contains(accountID) { post.seenByAccountIDs.append(accountID) }
+            // Seen = listed in a feed of this account. Posts embedded in notifications are not a listing (differential feed
+            // paging stops at known ids, so marking them seen would skip the feed pages around them).
+            if let source, source != .notification, !post.seenByAccountIDs.contains(accountID) { post.seenByAccountIDs.append(accountID) }
 
             // Feed-origin flags. Upserts only raise them; applySupports / applyFollowing lower them when the relation ends.
             if source == .supporting || creator.isSupported || activeFee[item.creatorID] != nil {
@@ -753,7 +1046,7 @@ extension LocalStore {
 
     @discardableResult
     fileprivate func upsertCommentsCore(_ comments: [RemoteComment], postID: String, account: AccountContext,
-                                        forceOwnPostCreatorID: String?, forceOwn: Bool) -> [String] {
+                                        forceOwnPostCreatorID: String?, forceOwn: Bool, readCutoff: Date?) -> [String] {
         // Flatten nested replies, filling parent / root ids that the listing leaves implicit.
         var flat: [RemoteComment] = []
         func walk(_ c: RemoteComment, parent: String?, root: String?) {
@@ -776,7 +1069,16 @@ extension LocalStore {
         var known: [String: Comment] = [:]
         for c in fetch(FetchDescriptor<Comment>(predicate: #Predicate { ids.contains($0.commentID) })) { known[c.commentID] = c }
 
+        // Comments that an unread notification points at stay unread even when imported as history.
+        var unreadNotified: Set<String> = []
+        if readCutoff != nil, onOwnPost {
+            let eventPostIDs = Set(flat.map(\.postID))
+            let events = fetch(FetchDescriptor<NotificationEvent>(predicate: #Predicate { !$0.isRead }))
+            unreadNotified = Set(events.filter { $0.postID.map(eventPostIDs.contains) == true }.compactMap(\.commentID))
+        }
+
         var inserted: [String] = []
+        var insertedOwn: [RemoteComment] = []
         let now = Date.now
         for r in flat {
             let isOwn = forceOwn || r.isOwn || localUserIDs.contains(r.authorUserID)
@@ -788,10 +1090,13 @@ extension LocalStore {
                             authorName: r.authorName, body: r.body, createdAt: r.createdAt, parentCommentID: r.parentCommentID,
                             rootCommentID: r.rootCommentID, fetchedAt: now)
                 // New comments from others on my own posts start unread (Creator Mode 未読). Existing isRead is kept.
-                c.isRead = isOwn || !onOwnPost
+                // History discovered late (at or before `readCutoff`) is imported as read so a first import does not flood 未読.
+                let historical = readCutoff.map { r.createdAt <= $0 } ?? false
+                c.isRead = isOwn || !onOwnPost || (historical && !unreadNotified.contains(r.id))
                 context.insert(c)
                 known[r.id] = c
                 inserted.append(r.id)
+                if isOwn && !Self.isProvisionalCommentID(r.id) { insertedOwn.append(r) }
             }
             c.postID = r.postID
             c.creatorID = postCreatorID ?? c.creatorID
@@ -809,8 +1114,34 @@ extension LocalStore {
             c.fetchedAt = now
             if forceOwn { c.isRead = true }
         }
+        if !insertedOwn.isEmpty { reconcileProvisionalComments(with: insertedOwn) }
         save()
         return inserted
+    }
+
+    /// Ids FANBOX never issued: the reply queue's placeholder for a sent comment whose real id is not known yet.
+    static func isProvisionalCommentID(_ id: String) -> Bool { id.hasPrefix("pending:") }
+
+    /// A real own comment arrived: drop provisional "pending:" copies of it (same post, parent and text) and point
+    /// matching sent queue items at the real id, so the reply shows once and deletes use a real id.
+    fileprivate func reconcileProvisionalComments(with own: [RemoteComment]) {
+        let postIDs = Array(Set(own.map(\.postID)))
+        let provisional = fetch(FetchDescriptor<Comment>(predicate: #Predicate { postIDs.contains($0.postID) }))
+            .filter { Self.isProvisionalCommentID($0.commentID) }
+        let sentRaw = ReplyState.sent.rawValue
+        let outgoing = fetch(FetchDescriptor<OutgoingComment>(predicate: #Predicate { postIDs.contains($0.postID) && $0.stateRaw == sentRaw }))
+        func normalized(_ text: String) -> String { text.trimmingCharacters(in: .whitespacesAndNewlines) }
+        for r in own {
+            let body = normalized(r.body)
+            for p in provisional where p.postID == r.postID && normalized(p.body) == body && p.parentCommentID == r.parentCommentID {
+                if let post = post(id: p.postID), post.commentCount > 0 { post.commentCount -= 1 }
+                context.delete(p)
+            }
+            for o in outgoing where o.postID == r.postID && normalized(o.body) == body
+                && (o.parentCommentID ?? o.rootCommentID) == (r.parentCommentID ?? r.rootCommentID) {
+                if o.sentCommentID == nil || Self.isProvisionalCommentID(o.sentCommentID ?? "") { o.sentCommentID = r.id }
+            }
+        }
     }
 
     @discardableResult

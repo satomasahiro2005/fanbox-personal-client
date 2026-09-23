@@ -77,6 +77,15 @@ final class AppEnvironment {
             self?.offline.syncFinished(outcome, reason: reason)
             self?.prefetcher.syncFinished(outcome, reason: reason)
         }
+        // Notification pipeline ↔ reply queue / coordinator / media (sync-notify).
+        replies.onAttentionNeeded = { [weak self] itemID in
+            await self?.notifications.handleReplyAttention(itemID: itemID)
+        }
+        coordinator.notifications = notifications
+        notifications.mediaPrefetcher = { [weak self] request in
+            guard let media = self?.media else { return }
+            Task { _ = try? await media.load(request) }
+        }
         networkMode.onConnectivityRestored = { [weak self] in
             self?.replies.handleConnectivityRestored()
             self?.uploads.start()

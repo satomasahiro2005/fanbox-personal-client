@@ -82,13 +82,14 @@ final class SyncReplyQueueTests: XCTestCase {
         XCTAssertEqual(item.state, .failed)
         XCTAssertEqual(h.replies.attentionCount, 1)
 
-        // A transient error on the last allowed automatic attempt ends in .failed.
+        // A transient error on the last allowed automatic attempt stops automatic sending. A 5xx does not prove the comment
+        // was rejected (it may have been stored), so the item asks the user instead of claiming failure (docs/API.md §9.2).
         h.mock.update { $0.addCommentResults = [.server(status: 503)] }
         item.state = .queued
         item.attemptCount = ReplyQueue.maxAttempts - 1
         h.store.save()
         await h.replies.flush()
-        XCTAssertEqual(item.state, .failed, "gives up after \(ReplyQueue.maxAttempts) attempts")
+        XCTAssertEqual(item.state, .needsConfirmation, "gives up after \(ReplyQueue.maxAttempts) attempts")
         XCTAssertEqual(item.attemptCount, ReplyQueue.maxAttempts)
 
         // A transient error before the limit keeps it queued.

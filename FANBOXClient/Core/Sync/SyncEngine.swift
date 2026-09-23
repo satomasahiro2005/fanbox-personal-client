@@ -47,9 +47,42 @@ final class SyncEngine {
     static let maxFanPages = 20
     static let maxCommentPages = 3
 
+    /// bell.list is fetched at least this often even when bell.countUnread reports no change (docs/API.md §10.2).
+    static let notificationFullRefreshInterval: TimeInterval = 15 * 60
+    /// newsletter.list during automatic polling at most this often.
+    static let newsletterPollInterval: TimeInterval = 10 * 60
+    /// payment.listPaid / payment status: user-initiated refreshes within this window reuse the previous answer
+    /// (the Support screen asks for supports and payments back to back).
+    static let userRefreshDedupeInterval: TimeInterval = 2 * 60
+    /// Automatic payment.listPaid refresh interval (docs/API.md §19.2: low frequency) and the tighter one early in the month.
+    static let paymentsAutomaticInterval: TimeInterval = 24 * 60 * 60
+    static let paymentsEarlyMonthInterval: TimeInterval = 6 * 60 * 60
+    /// Automatic unpaid-payment check interval (page metadata + payment.listUnpaid) and the tighter one on the 1st–5th.
+    static let paymentStatusInterval: TimeInterval = 6 * 60 * 60
+    static let paymentStatusEarlyMonthInterval: TimeInterval = 60 * 60
+    /// Automatic fan-list refresh interval (docs/API.md §1.8: pull the fan list about daily at most).
+    static let fansAutomaticInterval: TimeInterval = 6 * 60 * 60
+    /// Screens that open with `.onDemand` reuse a fan list fetched within this window.
+    static let fansOnDemandInterval: TimeInterval = 10 * 60
+    /// After a 403 from the post detail endpoint, automatic (non-interactive) detail fetches pause
+    /// (docs/API.md §1.7: post.info can be edge-blocked for non-browser clients; repeated calls risk the session).
+    static let postDetailBlockCooldown: TimeInterval = 15 * 60
+    /// Sub-scope of the notifications SyncState that stores the last unread count and the last full listing.
+    static let unreadCountScope = "unreadCount"
+    /// Sub-scope of the payments SyncState that tracks the unpaid-payment check.
+    static let paymentStatusScope = "status"
+
+    /// Time source (tests pin it to exercise day-of-month rules).
+    @ObservationIgnored var clock: @MainActor () -> Date = { Date.now }
+
     @ObservationIgnored private var inFlight: [String: Task<SyncOutcome, Never>] = [:]
     @ObservationIgnored private var inFlightOps: [String: Task<RemoteError?, Never>] = [:]
     @ObservationIgnored private var syncAllTask: Task<Void, Never>?
+    /// Priority of the running `syncAll` batch, and a raised floor when a more urgent caller joined it (SPEC §29).
+    @ObservationIgnored private var syncAllPriority: RequestPriority?
+    @ObservationIgnored private(set) var batchPriorityFloor: RequestPriority?
+    /// Device-wide: an edge block follows the device / IP, not the account (docs/API.md §1.7 / §1.8).
+    @ObservationIgnored private var postDetailBlockedUntil: Date?
     @ObservationIgnored private var activeCount = 0
 
     init(store: LocalStore, remote: RemoteDataSourceProvider, settings: AppSettings, network: NetworkModeController) {
@@ -73,6 +106,10 @@ final class SyncEngine {
             return .failed(resource, accountID: accountID, scope: scope, error: .invalidRequest("アカウントが見つかりません"))
         }
         guard account.enabled else { return .skipped(resource, accountID: accountID, scope: scope) }
+        // Automatic polling never hammers an account whose session is known to be expired (it needs a re-login first).
+        if account.sessionState == .expired, reason == .foregroundPolling || reason == .backgroundRefresh {
+            return .skipped(resource, accountID: accountID, scope: scope)
+        }
         guard canReachNetwork else {
             // Offline: return immediately; local data stays exactly as it is.
             return .failed(resource, accountID: accountID, scope: scope, error: .offline)
@@ -109,11 +146,19 @@ final class SyncEngine {
 
     /// Full lightweight refresh of all enabled accounts (launch / pull-to-refresh).
     func syncAll(reason: SyncReason) async {
-        if let running = syncAllTask { await running.value; return }
+        let wanted = max(RequestContext.priority, Self.priority(for: .timeline, reason: reason))
+        if let running = syncAllTask {
+            // Joining a running batch (e.g. pull-to-refresh right after the launch refresh): the batch's remaining
+            // requests are raised to the caller's priority instead of the user waiting behind backgroundSync (SPEC §29).
+            if wanted > (batchPriorityFloor ?? syncAllPriority ?? .backgroundSync) { batchPriorityFloor = wanted }
+            await running.value
+            return
+        }
         guard canReachNetwork else {
             lastError = .offline
             return
         }
+        syncAllPriority = wanted
         let task = Task { @MainActor [weak self] in
             guard let self else { return }
             let outcomes = await self.runForAllAccounts(reason: reason) { account in
@@ -123,6 +168,8 @@ final class SyncEngine {
             }
             self.finishBatch(outcomes)
             self.syncAllTask = nil
+            self.syncAllPriority = nil
+            self.batchPriorityFloor = nil
         }
         syncAllTask = task
         await task.value
@@ -140,7 +187,10 @@ final class SyncEngine {
             lastError = .offline
             return []
         }
-        let outcomes = await runForAllAccounts(reason: reason) { _ in [.notifications, .supports, .timeline] }
+        // Creator accounts also check the fan list (throttled to `fansAutomaticInterval`) so 新規支援 is detected.
+        let outcomes = await runForAllAccounts(reason: reason) { account in
+            account.creatorID == nil ? [.notifications, .supports, .timeline] : [.notifications, .supports, .timeline, .fans]
+        }
         finishBatch(outcomes)
         return outcomes
     }
@@ -152,6 +202,16 @@ final class SyncEngine {
     func refreshPost(postID: String, accountID: String? = nil, priority: RequestPriority = .interactiveRead) async -> RemoteError? {
         guard canReachNetwork else { return .offline }
         let key = "post|\(accountID ?? "*")|\(postID)"
+        if inFlightOps[key] == nil {
+            // Another fetch of the same post is running with a different account choice (notification prefetch vs. the
+            // post screen): wait for it instead of issuing a second GET, and only fetch again when it did not yield a body.
+            let others = inFlightOps.filter { $0.key.hasPrefix("post|") && $0.key.hasSuffix("|\(postID)") }.map(\.value)
+            if !others.isEmpty {
+                var result: RemoteError?
+                for other in others { result = await other.value }
+                if result == nil, store.post(id: postID)?.hasCachedBody == true { return nil }
+            }
+        }
         return await coalescedOperation(key) { [weak self] in
             guard let self else { return .cancelled }
             return await RequestContext.$priority.withValue(max(priority, RequestContext.priority)) {
@@ -164,6 +224,18 @@ final class SyncEngine {
     func refreshComments(postID: String, accountID: String? = nil, priority: RequestPriority = .interactiveRead) async -> RemoteError? {
         guard canReachNetwork else { return .offline }
         guard let account = accountID ?? commentAccount(postID: postID) else { return .invalidRequest("アカウントがありません") }
+        let key = Self.key(accountID: account, resource: .comments, scope: postID)
+        if inFlight[key] == nil {
+            // The same thread is already being fetched through another account: share that result.
+            let others = inFlight.filter { $0.key.hasSuffix("|\(SyncResource.comments.rawValue)|\(postID)") }.map(\.value)
+            if !others.isEmpty {
+                var succeeded = false
+                for other in others {
+                    if await other.value.error == nil { succeeded = true }
+                }
+                if succeeded { return nil }
+            }
+        }
         let outcome = await RequestContext.$priority.withValue(max(priority, RequestContext.priority)) {
             await self.sync(.comments, accountID: account, scope: postID, reason: .onDemand)
         }
@@ -210,7 +282,7 @@ final class SyncEngine {
             guard let self else { return .cancelled }
             let state = self.store.syncState(accountID: account, resource: .creatorPosts, scope: creatorID)
             if state.cursor == Self.endOfListCursor { return nil }
-            state.lastAttemptAt = .now
+            state.lastAttemptAt = clock()
             do {
                 let page = try await RequestContext.$priority.withValue(max(.interactiveRead, RequestContext.priority)) {
                     try await self.remote.dataSource(for: context).creatorPosts(creatorID: creatorID, account: context, cursor: state.cursor)
@@ -346,7 +418,11 @@ final class SyncEngine {
         let accountID = context.accountID
         let state = store.syncState(accountID: accountID, resource: resource, scope: scope)
         let isFirstSync = state.lastSuccessfulSync == nil
-        state.lastAttemptAt = .now
+        // Low-frequency resources answer from the local DB while their last refresh is recent enough (no request).
+        if isThrottled(resource, state: state, reason: reason) {
+            return (.skipped(resource, accountID: accountID, scope: scope), [])
+        }
+        state.lastAttemptAt = clock()
         let ds = remote.dataSource(for: context)
         var deliver: [String] = []
         do {
@@ -364,17 +440,37 @@ final class SyncEngine {
                 store.applyFollowing(creators, account: context)
 
             case .supports:
-                let supports = try await ds.supportingPlans(account: context)
+                let listing = try await ds.supportingPlanListing(account: context)
                 let observed: ObservedSource = context.kind == .demo ? .demo
                     : (reason == .backgroundRefresh ? .backgroundSync : (reason == .notification ? .notification : .sync))
-                let (diff, history) = store.applySupportsDetailed(supports, account: context, source: observed)
+                let (diff, history) = store.applySupportsDetailed(listing.supports, account: context, source: observed,
+                                                                  isBaseline: isFirstSync, listingIsComplete: listing.isComplete)
                 newIDs = diff.started + diff.changed + diff.restored + diff.disappeared
-                if !isFirstSync, !history.isEmpty {
-                    let name = store.account(id: accountID)?.displayName ?? ""
-                    deliver += store.recordSupportChangeEvents(history, account: context, accountName: name)
+                let name = store.account(id: accountID)?.displayName ?? ""
+                if !isFirstSync {
+                    // A plan that disappears on the 1st–5th is a payment-attention signal (docs/API.md §18.8 B): announce it
+                    // once as 決済要確認 (Critical) instead of a second 支援状態変化 banner for the same observation.
+                    let earlyInMonth = LocalStore.dayOfMonthJST(clock()) <= 5
+                    let changes = earlyInMonth ? history.filter { $0.kind != .disappeared } : history
+                    if !changes.isEmpty {
+                        deliver += store.recordSupportChangeEvents(changes, account: context, accountName: name)
+                    }
+                    if earlyInMonth, !diff.disappeared.isEmpty {
+                        deliver += store.recordPaymentAttentionEvents(.disappearedEarlyInMonth, creatorIDs: diff.disappeared,
+                                                                      account: context, accountName: name, now: clock())
+                    }
                 }
-                // Paid records are best effort: their failure never marks the supports sync as failed.
-                await syncPayments(ds: ds, context: context)
+                // Paid records and the unpaid check are best effort and low frequency: their failure never fails supports.
+                if isPaymentsRefreshDue(accountID: accountID, reason: reason) {
+                    await syncPayments(ds: ds, context: context)
+                }
+                if isPaymentStatusCheckDue(accountID: accountID, reason: reason) {
+                    deliver += await syncPaymentStatus(ds: ds, context: context, accountName: name)
+                }
+                if let problem = listing.problem {
+                    // Recorded as a failure so it shows up in sync state / Research Mode; nothing was marked missing.
+                    throw RemoteError.decoding(endpoint: "plan.listSupporting", detail: problem)
+                }
 
             case .plans:
                 guard !scope.isEmpty else { throw RemoteError.invalidRequest("creatorID が必要です") }
@@ -382,11 +478,22 @@ final class SyncEngine {
                 store.upsertPlans(plans, creatorID: scope)
 
             case .notifications:
-                let page = try await ds.notifications(account: context, cursor: nil)
-                var created = store.upsertNotifications(page.items, account: context)
-                state.lastKnownItemID = page.items.first?.remoteID ?? state.lastKnownItemID
+                var created: [String] = []
+                let probe = try await probeUnreadNotifications(ds: ds, context: context, state: state, reason: reason)
+                if !probe.unchanged {
+                    let batch = try await ds.notificationBatch(account: context, cursor: nil)
+                    // Posts embedded in new-post notifications: the title / excerpt / cover are local before any tap.
+                    if !batch.posts.isEmpty { store.upsertPostSummaries(batch.posts, account: context, source: .notification) }
+                    created = store.upsertNotifications(batch.page.items, account: context)
+                    state.lastKnownItemID = batch.page.items.first?.remoteID ?? state.lastKnownItemID
+                    // The count is remembered only once the listing that goes with it succeeded (a failed listing is
+                    // retried on the next tick instead of being hidden behind an "unchanged" count).
+                    let countState = store.syncState(accountID: accountID, resource: .notifications, scope: Self.unreadCountScope)
+                    countState.lastSuccessfulSync = clock()
+                    if let count = probe.count { countState.lastKnownItemID = String(count) }
+                }
                 // おたより are part of notification detection; failures here don't fail notifications.
-                if let letters = try? await ds.newsletters(account: context) {
+                if isNewsletterPollDue(accountID: accountID, reason: reason), let letters = try? await ds.newsletters(account: context) {
                     let newLetters = store.upsertNewsletters(letters, account: context)
                     created += store.ensureNewsletterEvents(newsletterIDs: newLetters, account: context)
                     markSubResourceSuccess(.newsletters, accountID: accountID)
@@ -421,7 +528,12 @@ final class SyncEngine {
                 newIDs = try await syncCreatorComments(ds: ds, context: context, state: state, isFirstSync: isFirstSync)
 
             case .fans:
-                try await syncFans(ds: ds, context: context, state: state)
+                let newSupporters = try await syncFans(ds: ds, context: context, state: state)
+                newIDs = newSupporters
+                if !isFirstSync, !newSupporters.isEmpty {
+                    let name = store.account(id: accountID)?.displayName ?? ""
+                    deliver += store.recordNewSupporterEvents(userIDs: newSupporters, account: context, accountName: name, now: clock())
+                }
 
             case .payments:
                 let payments = try await ds.paidRecords(account: context)
@@ -435,6 +547,92 @@ final class SyncEngine {
             AppLog.sync.error("sync \(resource.rawValue, privacy: .public) failed: \(mapped.userMessage, privacy: .public)")
             return (SyncOutcome(resource: resource, accountID: accountID, scope: scope, newItemIDs: [], error: mapped), deliver)
         }
+    }
+
+    // MARK: - Frequency rules
+
+    /// User-initiated reasons (and a notification that points at the resource) always refresh.
+    static func isUserInitiated(_ reason: SyncReason) -> Bool {
+        switch reason {
+        case .userRefresh, .onDemand, .afterWrite, .notification: return true
+        case .appLaunch, .foregroundPolling, .backgroundRefresh: return false
+        }
+    }
+
+    /// Low Data / Extreme: automatic low-priority refreshes are skipped once the data exists locally.
+    private var isConstrainedMode: Bool {
+        let mode = network.policy.mode
+        return mode == .lowData || mode == .extreme
+    }
+
+    /// Resources refreshed at low frequency. A throttled sync makes no request and leaves the state untouched.
+    private func isThrottled(_ resource: SyncResource, state: SyncState, reason: SyncReason) -> Bool {
+        guard let last = state.lastSuccessfulSync else { return false }
+        let age = clock().timeIntervalSince(last)
+        switch resource {
+        case .payments:
+            // The Support screen syncs supports (which refreshes payments when due) and then payments explicitly.
+            return Self.isUserInitiated(reason) ? age < Self.userRefreshDedupeInterval : !isPaymentsRefreshDue(age: age)
+        case .fans:
+            // Automatic: about daily at most. Opening a screen (.onDemand) reuses a recent list; pull-to-refresh always reads.
+            if reason == .onDemand { return age < Self.fansOnDemandInterval }
+            return !Self.isUserInitiated(reason) && age < Self.fansAutomaticInterval
+        default:
+            return false
+        }
+    }
+
+    private func isPaymentsRefreshDue(accountID: String, reason: SyncReason) -> Bool {
+        guard let last = store.syncState(accountID: accountID, resource: .payments).lastSuccessfulSync else {
+            return !(network.policy.mode == .extreme && !Self.isUserInitiated(reason))
+        }
+        let age = clock().timeIntervalSince(last)
+        return Self.isUserInitiated(reason) ? age >= Self.userRefreshDedupeInterval : isPaymentsRefreshDue(age: age)
+    }
+
+    /// Automatic cadence for payment.listPaid: about daily, every few hours during the first week of the month
+    /// (docs/API.md §19.2), never in Low Data / Extreme.
+    private func isPaymentsRefreshDue(age: TimeInterval) -> Bool {
+        guard !isConstrainedMode else { return false }
+        let interval = LocalStore.dayOfMonthJST(clock()) <= 7 ? Self.paymentsEarlyMonthInterval : Self.paymentsAutomaticInterval
+        return age >= interval
+    }
+
+    private func isPaymentStatusCheckDue(accountID: String, reason: SyncReason) -> Bool {
+        let state = store.syncState(accountID: accountID, resource: .payments, scope: Self.paymentStatusScope)
+        guard let last = state.lastAttemptAt else { return true }
+        let age = clock().timeIntervalSince(last)
+        if Self.isUserInitiated(reason) { return age >= Self.userRefreshDedupeInterval }
+        let interval = LocalStore.dayOfMonthJST(clock()) <= 5 ? Self.paymentStatusEarlyMonthInterval : Self.paymentStatusInterval
+        return age >= interval
+    }
+
+    private func isNewsletterPollDue(accountID: String, reason: SyncReason) -> Bool {
+        guard reason == .foregroundPolling || reason == .backgroundRefresh else { return true }
+        guard let last = store.syncState(accountID: accountID, resource: .newsletters).lastSuccessfulSync else { return true }
+        return clock().timeIntervalSince(last) >= Self.newsletterPollInterval
+    }
+
+    /// Cheap gate for automatic polling (docs/API.md §10.2 / §19.2): bell.countUnread first; bell.list only when the
+    /// count changed or `notificationFullRefreshInterval` passed. `unchanged == true` means the listing can be skipped.
+    /// A probe that is unavailable or fails never blocks the listing.
+    private func probeUnreadNotifications(ds: RemoteDataSource, context: AccountContext, state: SyncState,
+                                          reason: SyncReason) async throws -> (unchanged: Bool, count: Int?) {
+        guard reason == .foregroundPolling || reason == .backgroundRefresh, state.lastSuccessfulSync != nil else { return (false, nil) }
+        let countState = store.syncState(accountID: context.accountID, resource: .notifications, scope: Self.unreadCountScope)
+        let count: Int?
+        do {
+            count = try await ds.unreadNotificationCount(account: context)
+        } catch let error as RemoteError where error == .unauthorized || error == .offline || error == .cancelled {
+            throw error
+        } catch {
+            count = nil
+        }
+        guard let count else { return (false, nil) }
+        countState.lastAttemptAt = clock()
+        let previous = countState.lastKnownItemID.flatMap { Int($0) }
+        guard previous == count, let lastFull = countState.lastSuccessfulSync else { return (false, count) }
+        return (clock().timeIntervalSince(lastFull) < Self.notificationFullRefreshInterval, count)
     }
 
     /// Newest → oldest; STOP at the first page containing a post this account already knows (SPEC §3.7).
@@ -511,11 +709,12 @@ final class SyncEngine {
     private func syncComments(postID: String, ds: RemoteDataSource, context: AccountContext, state: SyncState) async throws -> [String] {
         var cursor: String?
         var inserted: [String] = []
+        let cutoff = commentReadCutoff(postID: postID)
         for pageIndex in 0..<Self.maxCommentPages {
             let page = try await ds.comments(postID: postID, account: context, cursor: cursor)
             let before = inserted.count
             let flatCount = page.items.reduce(0) { $0 + $1.flattened.count }
-            inserted += store.upsertCommentsReturningNew(page.items, postID: postID, account: context)
+            inserted += store.upsertCommentsReturningNew(page.items, postID: postID, account: context, readCutoff: cutoff)
             if pageIndex == 0, let newest = page.items.first?.id { state.lastKnownItemID = newest }
             // Stop once a page contained anything already known.
             if inserted.count - before < flatCount { break }
@@ -528,13 +727,16 @@ final class SyncEngine {
     private func syncCreatorComments(ds: RemoteDataSource, context: AccountContext, state: SyncState,
                                      isFirstSync: Bool) async throws -> [String] {
         let pageLimit = isFirstSync ? 1 : Self.maxCommentPages
+        // First import: every existing comment is history (read). Later: comments older than the previous successful
+        // listing were simply not listed before (e.g. a post entered the first page) and are history too.
+        let cutoff = state.lastSuccessfulSync ?? .distantFuture
         var cursor: String?
         var inserted: [String] = []
         for pageIndex in 0..<pageLimit {
             let page = try await ds.creatorComments(account: context, cursor: cursor)
             let before = inserted.count
             let flatCount = page.items.reduce(0) { $0 + $1.flattened.count }
-            inserted += store.upsertCreatorComments(page.items, account: context)
+            inserted += store.upsertCreatorComments(page.items, account: context, readCutoff: cutoff)
             if pageIndex == 0, let newest = page.items.first?.id { state.lastKnownItemID = newest }
             if inserted.count - before < flatCount { break }
             guard let next = page.nextCursor, !page.items.isEmpty else { break }
@@ -544,28 +746,31 @@ final class SyncEngine {
     }
 
     /// Own supporters list (bounded). Missing supporters are marked ended only after a complete listing.
-    private func syncFans(ds: RemoteDataSource, context: AccountContext, state: SyncState) async throws {
+    /// Returns the user ids newly observed as supporters.
+    private func syncFans(ds: RemoteDataSource, context: AccountContext, state: SyncState) async throws -> [String] {
         var cursor: String?
         var seen: Set<String> = []
         var complete = false
+        var newSupporters: [String] = []
         for _ in 0..<Self.maxFanPages {
             let page = try await ds.fans(account: context, cursor: cursor)
-            store.upsertFans(page.items, account: context)
+            newSupporters += store.upsertFans(page.items, account: context)
             seen.formUnion(page.items.map(\.userID))
             guard let next = page.nextCursor, !page.items.isEmpty else { complete = true; break }
             cursor = next
         }
         if complete { store.markMissingFansEnded(presentUserIDs: seen, account: context) }
         state.cursor = complete ? nil : cursor
+        return newSupporters
     }
 
     private func syncPayments(ds: RemoteDataSource, context: AccountContext) async {
         let state = store.syncState(accountID: context.accountID, resource: .payments)
-        state.lastAttemptAt = .now
+        state.lastAttemptAt = clock()
         do {
             let payments = try await ds.paidRecords(account: context)
             store.upsertPayments(payments, account: context)
-            state.lastSuccessfulSync = .now
+            state.lastSuccessfulSync = clock()
             state.error = nil
             state.consecutiveFailures = 0
         } catch {
@@ -573,6 +778,35 @@ final class SyncEngine {
             if case .unsupported = mapped { state.error = nil } else { markFailure(state: state, error: mapped) }
         }
         store.save()
+    }
+
+    /// Unpaid-payment signals (docs/API.md §18.8 B): stored on the account and its supports, announced as 決済要確認 when
+    /// the flag switches to unpaid or a creator is newly listed as unpaid. The first observation is a silent baseline.
+    private func syncPaymentStatus(ds: RemoteDataSource, context: AccountContext, accountName: String) async -> [String] {
+        let state = store.syncState(accountID: context.accountID, resource: .payments, scope: Self.paymentStatusScope)
+        state.lastAttemptAt = clock()
+        let status: RemotePaymentStatus?
+        do {
+            status = try await ds.paymentStatus(account: context)
+        } catch {
+            let mapped = Self.map(error)
+            if case .unsupported = mapped { state.error = nil } else { markFailure(state: state, error: mapped) }
+            return []
+        }
+        guard let status else { return [] }
+        state.lastSuccessfulSync = clock()
+        state.error = nil
+        state.consecutiveFailures = 0
+        let change = store.applyPaymentStatus(status, account: context, now: clock())
+        guard !change.firstObservation else { return [] }
+        var created: [String] = []
+        if !change.newlyFlaggedCreatorIDs.isEmpty {
+            created += store.recordPaymentAttentionEvents(.unpaidRecord, creatorIDs: change.newlyFlaggedCreatorIDs, account: context,
+                                                          accountName: accountName, now: clock())
+        } else if change.becameUnpaid {
+            created += store.recordPaymentAttentionEvents(.unpaidFlag, creatorIDs: [], account: context, accountName: accountName, now: clock())
+        }
+        return created
     }
 
     private func applyCurrentUser(_ user: RemoteUser, accountID: String) {
@@ -598,41 +832,77 @@ final class SyncEngine {
             let others = candidates.filter { $0.accountID != best && $0.canView != false }.sorted(by: AccountSelector.isPreferred)
             ordered = [best] + others.map(\.accountID)
         }
+        let interactive = RequestContext.priority >= .interactiveRead
         var lastError: RemoteError?
         for (index, accountID) in ordered.enumerated() {
             guard let row = store.account(id: accountID) else { continue }
             let context = row.context
+            if !interactive, let until = postDetailBlockedUntil, until > clock() {
+                // The detail endpoint was refused recently: automatic work makes no detail request. Metadata is fetched only
+                // when nothing is stored yet (a notification normally brought the summary already).
+                if store.post(id: postID) == nil { await refreshPostMetadata(postID: postID, context: context) }
+                return .forbidden
+            }
             do {
                 let detail = try await remote.dataSource(for: context).post(id: postID, account: context)
                 store.upsertPostDetail(detail, account: context)
+                postDetailBlockedUntil = nil
                 if !detail.summary.isRestricted { return nil }
                 lastError = nil     // restricted is a valid answer, not an error
             } catch {
                 let mapped = handleFailure(error, accountID: accountID)
                 store.recordPostAccessError(postID: postID, accountID: accountID, message: mapped.userMessage)
                 lastError = mapped
-                // Only session / permission problems make another account worth trying; network errors would repeat.
-                let tryNext: Bool
                 switch mapped {
-                case .unauthorized, .forbidden, .notFound: tryNext = true
-                default: tryNext = false
+                case .unauthorized, .notFound:
+                    // Session / visibility problems of this account: another account may still read the post.
+                    break
+                case .forbidden:
+                    // FANBOX answers "not entitled" with a 200 + isRestricted; a 403 on the detail endpoint is most likely an
+                    // edge block for native clients (docs/API.md §1.6 / §1.7). Every account would get the same answer and
+                    // repeated blocked calls risk the session, so stop here and keep the summary current via post.get.
+                    postDetailBlockedUntil = clock().addingTimeInterval(Self.postDetailBlockCooldown)
+                    await refreshPostMetadata(postID: postID, context: context)
+                    return mapped
+                default:
+                    return mapped
                 }
-                if !tryNext { return mapped }
             }
             if explicitAccountID != nil || index == ordered.count - 1 { break }
         }
         return lastError
     }
 
+    /// post.get fallback (metadata only; the cached body is never touched). Best effort.
+    private func refreshPostMetadata(postID: String, context: AccountContext) async {
+        do {
+            let summary = try await remote.dataSource(for: context).postMetadata(id: postID, account: context)
+            store.upsertPostMetadata(summary, account: context)
+        } catch {
+            AppLog.sync.info("post metadata fallback unavailable: \(SyncEngine.map(error).userMessage, privacy: .public)")
+        }
+    }
+
     // MARK: - Account choice helpers
 
-    /// Account for comment listings: the owner (creator account) if the post is mine, else AccountSelector's choice.
-    private func commentAccount(postID: String) -> String? {
-        if let post = store.post(id: postID), let owner = store.ownedCreatorAccountMap()[post.creatorID],
-           store.account(id: owner)?.enabled == true {
+    /// Account for comment listings: the owner (creator account) if the post is mine, else one of `preferring` (e.g. the
+    /// accounts that received a notification), else AccountSelector's choice. Shared by the post screen and the
+    /// notification prefetch so both produce the same sync key (coalescing, SPEC §34).
+    func commentAccount(postID: String, preferring: [String] = []) -> String? {
+        let enabled = Set(store.accounts().map(\.id))
+        if let post = store.post(id: postID), let owner = store.ownedCreatorAccountMap()[post.creatorID], enabled.contains(owner) {
             return owner
         }
+        if let hinted = preferring.first(where: { enabled.contains($0) }) { return hinted }
         return AccountSelector.bestAccount(postID: postID, store: store) ?? store.mainAccount()?.id
+    }
+
+    /// Read cutoff for comments on my own posts: comments at or before the owner's last creator-comment listing are
+    /// history (imported as read); nil when the post is not mine.
+    private func commentReadCutoff(postID: String) -> Date? {
+        guard let post = store.post(id: postID), let owner = store.ownedCreatorAccountMap()[post.creatorID] else { return nil }
+        let key = SyncState.key(accountID: owner, resource: .creatorComments)
+        return store.first(#Predicate<SyncState> { $0.key == key })?.lastSuccessfulSync ?? .distantFuture
     }
 
     /// Account for creator pages: my own account if it owns the page, else the account with the highest active support,
@@ -661,7 +931,11 @@ final class SyncEngine {
                     guard let self else { return [] }
                     var outcomes: [SyncOutcome] = []
                     for resource in resources {
-                        let outcome = await self.sync(resource, accountID: accountID, reason: reason)
+                        // A more urgent caller that joined this batch raises the remaining requests (see `syncAll`).
+                        let floor = max(RequestContext.priority, self.batchPriorityFloor ?? RequestContext.priority)
+                        let outcome = await RequestContext.$priority.withValue(floor) {
+                            await self.sync(resource, accountID: accountID, reason: reason)
+                        }
                         outcomes.append(outcome)
                         if outcome.error == .unauthorized || outcome.error == .offline { break }
                     }
@@ -687,7 +961,7 @@ final class SyncEngine {
     }
 
     private func markSuccess(state: SyncState, accountID: String) {
-        let now = Date.now
+        let now = clock()
         state.lastSuccessfulSync = now
         state.error = nil
         state.consecutiveFailures = 0
@@ -704,8 +978,8 @@ final class SyncEngine {
 
     private func markSubResourceSuccess(_ resource: SyncResource, accountID: String) {
         let state = store.syncState(accountID: accountID, resource: resource)
-        state.lastAttemptAt = .now
-        state.lastSuccessfulSync = .now
+        state.lastAttemptAt = clock()
+        state.lastSuccessfulSync = clock()
         state.error = nil
         state.consecutiveFailures = 0
     }

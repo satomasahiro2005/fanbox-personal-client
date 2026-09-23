@@ -4,6 +4,8 @@ import SwiftUI
 struct RootView: View {
     @Environment(AppEnvironment.self) private var env
     @Environment(AppRouter.self) private var router
+    /// 送信キュー sheet, opened from the reply-attention banner (SPEC §22).
+    @State private var isReplyQueuePresented = false
 
     var body: some View {
         @Bindable var router = router
@@ -30,7 +32,65 @@ struct RootView: View {
         .sheet(isPresented: $router.isNotificationInboxPresented) {
             NavigationStack { NotificationInboxView() }
         }
+        .sheet(isPresented: $isReplyQueuePresented) {
+            NavigationStack {
+                ReplyQueueView()
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("閉じる") { isReplyQueuePresented = false }
+                        }
+                    }
+            }
+        }
+        .environment(\.openReplyQueue, OpenReplyQueueAction { isReplyQueuePresented = true })
         .modifier(WebBridgePresenter())
+    }
+}
+
+/// Opens the 送信キュー sheet owned by `RootView`.
+struct OpenReplyQueueAction {
+    let action: () -> Void
+    func callAsFunction() { action() }
+}
+
+private struct OpenReplyQueueKey: EnvironmentKey {
+    static let defaultValue: OpenReplyQueueAction? = nil
+}
+
+extension EnvironmentValues {
+    var openReplyQueue: OpenReplyQueueAction? {
+        get { self[OpenReplyQueueKey.self] }
+        set { self[OpenReplyQueueKey.self] = newValue }
+    }
+}
+
+/// App-level banner on every tab root while replies need a decision (failed / needsConfirmation, SPEC §22).
+struct ReplyAttentionBanner: View {
+    @Environment(AppEnvironment.self) private var env
+    @Environment(\.openReplyQueue) private var openReplyQueue
+
+    var body: some View {
+        let count = env.replies.attentionCount
+        if count > 0 {
+            Button {
+                openReplyQueue?()
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.bubble.fill")
+                    Text("確認が必要な返信が \(count) 件あります")
+                        .font(.footnote.weight(.semibold))
+                    Spacer(minLength: 4)
+                    Text("確認").font(.footnote)
+                    Image(systemName: "chevron.right").imageScale(.small)
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .background(Color.orange)
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("replyAttentionBanner")
+        }
     }
 }
 
@@ -47,6 +107,7 @@ struct TabStack<Content: View>: View {
                     AppRouteDestination(route: route)
                 }
                 .toolbar { GlobalToolbar() }
+                .safeAreaInset(edge: .top, spacing: 0) { ReplyAttentionBanner() }
         }
     }
 }

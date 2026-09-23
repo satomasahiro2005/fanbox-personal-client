@@ -49,6 +49,8 @@ final class RemoteRelay {
             lastResult = .failed
             return .failed
         }
+        // Queued replies first (SPEC §3.3), then detection; a second flush picks up anything queued meanwhile.
+        await environment.replies.flush()
         let outcomes = await environment.sync.syncLightweightOutcomes(reason: .notification)
         await environment.replies.flush()
         let result = Self.fetchResult(for: outcomes)
