@@ -20,6 +20,8 @@ final class NetworkModeController {
     private(set) var isExpensive: Bool = false
     /// Last time the path state changed (diagnostics / Research Mode).
     private(set) var lastPathChangeAt: Date?
+    /// False between `start()` and the monitor's first report (prefetch treats that as "not Wi-Fi").
+    private(set) var pathReported: Bool = true
 
     @ObservationIgnored let policyStore: NetworkPolicyStore
     @ObservationIgnored let settings: AppSettings
@@ -42,10 +44,14 @@ final class NetworkModeController {
     /// Whether the controller is monitoring (idempotent `start()`).
     var isStarted: Bool { monitor != nil }
 
-    /// Starts path monitoring and settings observation. Safe to call more than once.
+    /// Starts path monitoring and settings observation. Safe to call more than once and cheap (no network traffic), so
+    /// it is called as soon as the environment exists — also for background launches (BGAppRefresh / silent push) that
+    /// never connect a scene (SPEC §30 / §35).
     func start() {
         observeSettings()
         guard monitor == nil else { return }
+        pathReported = false
+        recompute()
         let monitor = NWPathMonitor()
         monitor.pathUpdateHandler = { @Sendable [weak self] path in
             let satisfied = path.status == .satisfied
@@ -68,6 +74,7 @@ final class NetworkModeController {
 
     /// Applies a path state (called from the monitor; internal for tests).
     func updatePath(satisfied: Bool, onWiFi: Bool, constrained: Bool, expensive: Bool) {
+        pathReported = true
         let changed = satisfied != pathSatisfied || onWiFi != isOnWiFi || constrained != isConstrained || expensive != isExpensive
         if changed {
             pathSatisfied = satisfied
@@ -88,7 +95,7 @@ final class NetworkModeController {
         let snapshot = NetworkPolicySnapshot(mode: effectiveMode, pathSatisfied: pathSatisfied, isOnWiFi: isOnWiFi,
                                              isConstrained: isConstrained, isExpensive: isExpensive,
                                              mediaPrefetchWiFiOnly: settings.mediaPrefetchWiFiOnly,
-                                             extremeShowsThumbnails: settings.extremeShowsThumbnails)
+                                             extremeShowsThumbnails: settings.extremeShowsThumbnails, pathKnown: pathReported)
         policyStore.update { $0 = snapshot }
 
         let online = isOnline

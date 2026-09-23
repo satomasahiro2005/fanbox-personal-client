@@ -15,15 +15,16 @@ final class FanboxAPIClient: Sendable {
     let inspector: SchemaInspector
     /// When available, the client stores the CSRF token obtained from www.fanbox.cc metadata, fetches a missing token
     /// before a CSRF-protected write, and refreshes a stale token once when such a write is rejected.
-    /// Defaults to the credential store of an `AccountHTTPClient` transport (the same store the transport reads
-    /// `X-CSRF-Token` from), so `AppEnvironment` needs no extra wiring.
+    /// Defaults to the credential store of a `CredentialBackedHTTPClient` transport (`AccountHTTPClient` or the
+    /// `RoutingHTTPClient` wrapping it — the store the transport reads `X-CSRF-Token` from). `AppEnvironment` passes it
+    /// explicitly anyway, so wrapping the transport can never silently disable CSRF handling.
     let credentials: CredentialStoring?
     let schemaObserver: FanboxSchemaObserver?
 
     init(http: HTTPClient, inspector: SchemaInspector, credentials: CredentialStoring? = nil, schemaObserver: FanboxSchemaObserver? = nil) {
         self.http = http
         self.inspector = inspector
-        self.credentials = credentials ?? (http as? AccountHTTPClient)?.credentials
+        self.credentials = credentials ?? (http as? CredentialBackedHTTPClient)?.credentials
         self.schemaObserver = schemaObserver
     }
 
@@ -71,21 +72,35 @@ final class FanboxAPIClient: Sendable {
         return json["body"]
     }
 
-    /// Uploads a multipart form (built into a temporary file) and returns the raw response. Used by post.update and any
-    /// future media upload endpoint. The temporary body file is removed afterwards.
+    /// Sends a multipart form and returns the raw response. Used by post.update and any future media upload endpoint.
+    ///
+    /// A form of plain fields (post.update: title, text, and the CSRF token in `tt`) is encoded IN MEMORY and sent with
+    /// `send`: the token never touches the disk (SPEC §39 "CSRF Token: Keychain または Memory"). Only forms with file
+    /// parts are streamed from a temporary file, created with complete file protection and removed afterwards (stale
+    /// ones are purged at launch, `MultipartFormData.removeStaleTemporaryFiles`).
     func sendMultipart(_ endpoint: FanboxEndpoint, form: MultipartFormData, accountID: String?,
                        progress: (@Sendable (Double) -> Void)? = nil) async throws -> HTTPResponse {
-        let fileURL = try form.writeToTemporaryFile()
-        defer { try? FileManager.default.removeItem(at: fileURL) }
         var request = try makeRequest(endpoint)
-        request.body = nil
         request.headers["Content-Type"] = form.contentType
         request.timeout = Self.uploadTimeout
         let response: HTTPResponse
-        do {
-            response = try await http.upload(request, bodyFileURL: fileURL, accountID: accountID, progress: progress)
-        } catch {
-            throw Self.normalize(error)
+        if !form.hasFileParts {
+            request.body = try form.encodedData()
+            do {
+                response = try await http.send(request, accountID: accountID)
+            } catch {
+                throw Self.normalize(error)
+            }
+            progress?(1)
+        } else {
+            let fileURL = try form.writeToTemporaryFile()
+            defer { try? FileManager.default.removeItem(at: fileURL) }
+            request.body = nil
+            do {
+                response = try await http.upload(request, bodyFileURL: fileURL, accountID: accountID, progress: progress)
+            } catch {
+                throw Self.normalize(error)
+            }
         }
         try validate(response, endpoint: endpoint)
         if let json = try? JSONValue.parse(response.data), json["body"] != nil {
@@ -169,14 +184,17 @@ final class FanboxAPIClient: Sendable {
         }
     }
 
-    /// Throws the mapped `RemoteError` for non-2xx responses.
+    /// Throws the mapped `RemoteError` for non-2xx responses: a CDN edge block (`.edgeBlocked`) is told apart from a
+    /// FANBOX JSON refusal before the status is mapped (docs/API.md §1.6).
     func validate(_ response: HTTPResponse, endpoint: FanboxEndpoint) throws {
         guard !(200..<300).contains(response.statusCode) else { return }
         var errorCode: String?
         if let json = try? JSONValue.parse(response.data) { errorCode = json["error"]?.stringValue }
-        let error = FanboxResponseHandling.map(statusCode: response.statusCode, headers: response.headers, errorCode: errorCode)
-        let cloudflare = FanboxResponseHandling.isCloudflareBlock(statusCode: response.statusCode, headers: response.headers)
-        AppLog.network.notice("\(endpoint.key, privacy: .public) failed: HTTP \(response.statusCode)\(cloudflare ? " (edge block)" : "", privacy: .public)")
+        let error = FanboxResponseHandling.map(statusCode: response.statusCode, headers: response.headers, errorCode: errorCode,
+                                               body: response.data)
+        var edge = false
+        if case .edgeBlocked = error { edge = true }
+        AppLog.network.notice("\(endpoint.key, privacy: .public) failed: HTTP \(response.statusCode)\(edge ? " (edge block)" : "", privacy: .public)")
         throw error
     }
 

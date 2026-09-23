@@ -99,6 +99,8 @@ struct ResearchModeView: View {
                 .accessibilityIdentifier("researchSchedulerLink")
             }
 
+            WebTransportResearchSection()
+
             Section {
                 Button {
                     prepareExport()

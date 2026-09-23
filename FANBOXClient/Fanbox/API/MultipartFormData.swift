@@ -39,10 +39,19 @@ struct MultipartFormData: Sendable {
         return out
     }
 
-    /// Writes the body to a new temporary file and returns its URL. The caller deletes it after the upload.
+    /// Whether any part streams a file from disk (only such forms need a temporary body file).
+    var hasFileParts: Bool {
+        parts.contains { if case .file = $0 { return true } else { return false } }
+    }
+
+    static let temporaryFilePrefix = "fanbox-multipart-"
+
+    /// Writes the body to a new temporary file (complete file protection) and returns its URL. The caller deletes it
+    /// after the upload.
     func writeToTemporaryFile(directory: URL = FileManager.default.temporaryDirectory) throws -> URL {
-        let url = directory.appendingPathComponent("fanbox-multipart-\(UUID().uuidString).body")
-        guard FileManager.default.createFile(atPath: url.path, contents: nil) else {
+        let url = directory.appendingPathComponent("\(Self.temporaryFilePrefix)\(UUID().uuidString).body")
+        guard FileManager.default.createFile(atPath: url.path, contents: nil,
+                                             attributes: [.protectionKey: FileProtectionType.complete]) else {
             throw RemoteError.invalidRequest("一時ファイルを作成できませんでした")
         }
         let handle = try FileHandle(forWritingTo: url)
@@ -55,6 +64,23 @@ struct MultipartFormData: Sendable {
             throw error
         }
         return url
+    }
+
+    /// Deletes multipart body files left behind by an interrupted upload (app killed mid-request). Called at launch.
+    /// Returns the number of files removed.
+    @discardableResult
+    static func removeStaleTemporaryFiles(in directory: URL = FileManager.default.temporaryDirectory,
+                                          olderThan age: TimeInterval = 0, now: Date = .now) -> Int {
+        let fm = FileManager.default
+        guard let names = try? fm.contentsOfDirectory(atPath: directory.path) else { return 0 }
+        var removed = 0
+        for name in names where name.hasPrefix(temporaryFilePrefix) && name.hasSuffix(".body") {
+            let url = directory.appendingPathComponent(name)
+            if age > 0, let modified = (try? fm.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date,
+               now.timeIntervalSince(modified) < age { continue }
+            if (try? fm.removeItem(at: url)) != nil { removed += 1 }
+        }
+        return removed
     }
 
     /// Total body size in bytes (for progress reporting); file parts are measured on disk.

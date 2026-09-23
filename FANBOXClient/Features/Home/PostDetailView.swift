@@ -159,6 +159,12 @@ struct PostDetailView: View {
                     Text("本文はありません").font(.subheadline).foregroundStyle(.secondary)
                 } else {
                     Text("本文はまだ取得されていません").font(.subheadline).foregroundStyle(.secondary)
+                    if SessionEdgeBlockNotice.applies(to: refreshError), let account = browserAccountID {
+                        // post.info blocked at the edge (docs/API.md §1.7): the account-aware WebView still works.
+                        SessionEdgeBlockNotice {
+                            env.web.openWeb(account: account, destination: .post(creatorID: post.creatorID, postID: postID))
+                        }
+                    }
                     Button("本文を取得") { Task { await refresh(force: true) } }
                         .buttonStyle(.bordered)
                         .accessibilityIdentifier("postFetchBodyButton")

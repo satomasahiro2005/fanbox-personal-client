@@ -441,7 +441,7 @@ enum FanboxAdapter {
             creatorName: nonEmpty(post?.user?.name), postID: postID, postTitle: postTitle,
             // The bell id is NOT verified to be the comment id (docs/API.md §2.11), so commentID stays nil.
             commentID: nil, newsletterID: nil, actorName: actorName, actorIconURL: actorIcon, title: title, message: message,
-            isUnread: dto.isUnread)
+            isUnread: dto.isUnread, isRestricted: post?.isRestricted)
     }
 
     static func synthesizedBellID(type: String, postID: String?, date: Date?) -> String? {

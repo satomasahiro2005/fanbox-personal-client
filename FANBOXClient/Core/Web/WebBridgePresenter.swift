@@ -105,6 +105,8 @@ struct AccountWebSessionView: View {
     @State private var loginState: WebLoginState = .waiting
     @State private var alert: WebSessionAlert?
     @State private var lastMetadata: WebPageMetadata?
+    /// Who the pages of this session are logged in as, compared with the account (SPEC §3.2 / §7.1).
+    @State private var identity: WebSessionIdentity = .unverified
 
     init(request: WebSessionRequest, onClose: (() -> Void)? = nil) {
         self.request = request
@@ -115,11 +117,15 @@ struct AccountWebSessionView: View {
 
     private var account: Account? { accounts.first }
     private var isLogin: Bool { request.purpose == .login }
+    private var isOffline: Bool { env.networkMode.effectiveMode == .offline }
 
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                AccountWebSessionBanner(account: account, isLoginPurpose: isLogin)
+                AccountWebSessionBanner(account: account, isLoginPurpose: isLogin, identity: identity)
+                if case .mismatch(let pageUserID) = identity {
+                    WebIdentityMismatchBanner(accountName: account?.displayName ?? "このアカウント", pageUserID: pageUserID)
+                }
                 purposeBanner
                 progressBar
                 ZStack {
@@ -149,6 +155,10 @@ struct AccountWebSessionView: View {
         }
         .interactiveDismissDisabled()
         .task { await prepare() }
+        .onChange(of: isOffline) { _, offline in
+            // SPEC §30: switching to Offline stops the page immediately (the web view is replaced by the offline state).
+            if offline { controller.stopLoading() }
+        }
         .onDisappear {
             let webSessions = env.webSessions
             Task {
@@ -164,9 +174,14 @@ struct AccountWebSessionView: View {
     @ViewBuilder
     private var content: some View {
         if let account {
-            if isPrepared {
+            if isOffline {
+                offlineState
+            } else if case .mismatch = identity {
+                identityMismatchState
+            } else if isPrepared {
                 AccountWebView(accountID: account.id, webProfileID: account.webProfileID, initialURL: request.destination.url,
-                               controller: controller, webSessions: env.webSessions, research: env.research)
+                               controller: controller, webSessions: env.webSessions, research: env.research,
+                               policy: env.policyStore, fallbackURLs: request.destination.fallbacks.map(\.url))
             } else {
                 ProgressView()
             }
@@ -176,13 +191,40 @@ struct AccountWebSessionView: View {
         }
     }
 
+    /// SPEC §30 Offline: no page of the account web view is loaded at all.
+    private var offlineState: some View {
+        VStack(spacing: 12) {
+            EmptyStateView(title: "オフラインモードです", systemImage: "wifi.slash",
+                           message: env.settings.networkModePreference == .offline
+                               ? "通信モードが「Offline」のため Web ページを読み込みません。"
+                               : "ネットワークに接続されていないため Web ページを読み込めません。")
+            if env.settings.networkModePreference == .offline {
+                Button("通信モードを Automatic に戻す") { env.settings.networkModePreference = .automatic }
+                    .buttonStyle(.borderedProminent)
+                    .accessibilityIdentifier("webOfflineRestoreButton")
+            }
+        }
+        .accessibilityIdentifier("webOfflineState")
+    }
+
+    /// The page showed another pixiv user: the web store was reset and nothing is shown until the user reloads.
+    private var identityMismatchState: some View {
+        VStack(spacing: 12) {
+            EmptyStateView(title: "別の pixiv アカウントのページでした", systemImage: "person.crop.circle.badge.exclamationmark",
+                           message: "「\(account?.displayName ?? "このアカウント")」以外の pixiv アカウントでログインした状態を検出したため、"
+                               + "この Web セッションを停止し、アカウントのセッションを元に戻しました。")
+            Button("このアカウントとして開き直す") {
+                identity = .unverified
+                controller.load(request.destination.url)
+            }
+            .buttonStyle(.borderedProminent)
+            .accessibilityIdentifier("webIdentityReloadButton")
+        }
+        .accessibilityIdentifier("webIdentityMismatch")
+    }
+
     @ViewBuilder
     private var purposeBanner: some View {
-        if env.networkMode.effectiveMode == .offline {
-            WebNoticeBanner(systemImage: "wifi.slash", tint: .gray,
-                            text: "オフラインモードです。Web ページは表示できない場合があります。")
-                .accessibilityIdentifier("webOfflineBanner")
-        }
         switch request.purpose {
         case .payment:
             WebNoticeBanner(systemImage: "lock.shield", tint: .blue,
@@ -194,6 +236,10 @@ struct AccountWebSessionView: View {
                                 text: loginState == .completed
                                     ? "ログインを確認しました"
                                     : "pixiv の画面でログインしてください。ログインが確認できると自動で閉じます。パスワードはこのアプリに保存されません。")
+                if loginState != .completed {
+                    WebNoticeBanner(systemImage: "exclamationmark.bubble", tint: .orange, text: Self.googleLoginHint)
+                        .accessibilityIdentifier("webGoogleLoginHint")
+                }
                 if loginState != .completed {
                     Button {
                         Task { await attemptLogin(metadata: nil, manual: true) }
@@ -284,7 +330,7 @@ struct AccountWebSessionView: View {
     private func popupSheet(_ popup: AccountWebPopup) -> some View {
         NavigationStack {
             VStack(spacing: 0) {
-                AccountWebSessionBanner(account: account, isLoginPurpose: isLogin)
+                AccountWebSessionBanner(account: account, isLoginPurpose: isLogin, identity: identity)
                 AccountWebPopupView(webView: popup.webView)
             }
             .navigationTitle(popup.webView.title ?? "")
@@ -320,11 +366,27 @@ struct AccountWebSessionView: View {
         if let metadata { lastMetadata = metadata }
         if isLogin && loginState != .completed && loginState != .verifying {
             await attemptLogin(metadata: metadata, manual: false)
-        } else if !env.accounts.isPlaceholder(accountID: request.accountID) {
-            await env.accounts.refreshCredentialFromWeb(accountID: request.accountID, userAgent: metadata?.userAgent,
-                                                        csrfToken: metadata?.csrfToken)
+            return
+        }
+        guard !env.accounts.isPlaceholder(accountID: request.accountID) else { return }
+        let pageUserID = metadata?.isLoggedIn == false ? nil : metadata?.user?.pixivUserID
+        let result = await env.accounts.refreshCredentialFromWeb(accountID: request.accountID, userAgent: metadata?.userAgent,
+                                                                 csrfToken: metadata?.csrfToken, pageUserID: pageUserID)
+        switch result {
+        case .identityMismatch(let other):
+            // Never keep operating (or paying) as another user: stop the page and any popup (PayPal / 3-D Secure);
+            // the web store was already reset.
+            controller.stopLoading()
+            controller.closePopup()
+            identity = .mismatch(pageUserID: other)
+        case .updated, .unchanged, .rejected:
+            if let pageUserID, pageUserID == account?.pixivUserID { identity = .verified }
         }
     }
+
+    /// Google-only pixiv accounts cannot sign in inside an embedded WKWebView (Google refuses OAuth there).
+    static let googleLoginHint = "Google アカウントでのログインはアプリ内の画面では使えません。Google 連携のみの pixiv アカウントは、"
+        + "先に pixiv でパスワードを設定してから、pixiv ID / メールアドレスとパスワードでログインしてください。"
 
     /// Login is complete when the account's store has a FANBOXSESSID cookie and the page shows a logged-in user
     /// (or, for the manual check, when the API confirms the session).
@@ -336,7 +398,15 @@ struct AccountWebSessionView: View {
             lastMetadata = fresh
         }
         metadata = metadata ?? lastMetadata
-        let hasSession = await env.webSessions.hasSessionCookie(webProfileID: account.webProfileID)
+        var hasSession = await env.webSessions.hasSessionCookie(webProfileID: account.webProfileID)
+        if !hasSession && metadata?.user != nil {
+            // The page says logged in but the cookie may not be visible in the store yet: re-check a few times.
+            for delay in [0.5, 1.0, 2.0] {
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                hasSession = await env.webSessions.hasSessionCookie(webProfileID: account.webProfileID)
+                if hasSession { break }
+            }
+        }
         guard hasSession else {
             if manual {
                 alert = WebSessionAlert(title: "まだログインしていません", message: "pixiv の画面でログインを完了してから、もう一度確認してください。")
@@ -346,8 +416,10 @@ struct AccountWebSessionView: View {
         if !manual && (metadata?.isLoggedIn == false || metadata?.user == nil) { return }
 
         loginState = .verifying
+        var userAgent = metadata?.userAgent
+        if userAgent == nil { userAgent = await controller.userAgent() }
         do {
-            try await env.accounts.completeLogin(accountID: request.accountID, userAgent: metadata?.userAgent,
+            try await env.accounts.completeLogin(accountID: request.accountID, userAgent: userAgent,
                                                  csrfToken: metadata?.csrfToken, metadata: metadata?.user)
             loginState = .completed
             let accountID = request.accountID
@@ -365,7 +437,10 @@ struct AccountWebSessionView: View {
                 loginState = .failed
                 alert = WebSessionAlert(title: "アカウントを追加できません", message: error.userMessage, closesSession: true)
             case .accountMismatch:
+                // The web store was reset to this account's own session; the page must be reloaded before retrying.
+                controller.stopLoading()
                 alert = WebSessionAlert(title: "別のアカウントです", message: error.userMessage)
+                controller.load(request.destination.url)
             case .noSessionCookie, .profileUnavailable, .credentialStorage:
                 if manual || metadata?.user != nil {
                     alert = WebSessionAlert(title: "ログインを確認できませんでした", message: error.userMessage)
@@ -398,6 +473,39 @@ enum WebLoginState: Equatable {
     case waiting, verifying, completed, failed
 }
 
+/// Whether the pages of a web session are logged in as the session's account.
+enum WebSessionIdentity: Equatable {
+    /// No FANBOX page with a logged-in user has been seen yet.
+    case unverified
+    /// A FANBOX page confirmed the account's own pixiv user.
+    case verified
+    /// A FANBOX page showed another pixiv user: the session is stopped and its web store reset.
+    case mismatch(pageUserID: String)
+}
+
+/// Red warning under the account banner when a page belonged to another pixiv user.
+struct WebIdentityMismatchBanner: View {
+    let accountName: String
+    let pageUserID: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "exclamationmark.octagon.fill").foregroundStyle(.white)
+            Text("この Web セッションは「\(accountName)」ではない pixiv アカウント（pixiv ID: \(pageUserID)）でした。"
+                 + "操作・決済を止め、セッションを元に戻しました。")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.white)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 8)
+        .background(Color.red)
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("webIdentityMismatchBanner")
+    }
+}
+
 struct WebSessionAlert: Identifiable {
     let id = UUID()
     var title: String
@@ -405,10 +513,12 @@ struct WebSessionAlert: Identifiable {
     var closesSession = false
 }
 
-/// Prominent "<Account> として表示中" bar in the account's color (SPEC §7.1 / §14 / §40).
+/// Prominent "<Account> として表示中" bar in the account's color (SPEC §7.1 / §14 / §40). Shows whether the pages were
+/// verified to be logged in as this account.
 struct AccountWebSessionBanner: View {
     let account: Account?
     var isLoginPurpose = false
+    var identity: WebSessionIdentity = .unverified
 
     var body: some View {
         let color = Color(hex: account?.colorHex, fallback: .gray)
@@ -462,6 +572,11 @@ struct AccountWebSessionBanner: View {
         if account.kind == .demo { parts.append("デモアカウント（FANBOX 未ログイン）") }
         if let pixiv = account.pixivUserID, account.kind == .fanbox { parts.append("pixiv ID: \(pixiv)") }
         if account.creatorAccount { parts.append("クリエイター") }
+        switch identity {
+        case .verified: parts.append("ログイン中のユーザーを確認済み")
+        case .mismatch: parts.append("別ユーザーを検出・停止")
+        case .unverified: break
+        }
         return parts.isEmpty ? "専用の Web ストア" : parts.joined(separator: " ・ ")
     }
 }
@@ -484,7 +599,7 @@ struct AccountSessionPill: View {
         case .valid: return "有効"
         case .expired: return "期限切れ"
         case .loggedOut: return "ログアウト"
-        case .error: return "エラー"
+        case .error: return "要再ログイン"
         case .unknown: return "未確認"
         }
     }

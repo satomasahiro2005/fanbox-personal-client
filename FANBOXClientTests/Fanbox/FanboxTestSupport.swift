@@ -5,6 +5,10 @@ import XCTest
 /// Scripted `HTTPClient` for the FANBOX module tests. Responses are queued per `endpointKey` and consumed in order;
 /// the last one repeats. Stubbing a key whose only (already used) response is repeating replaces it.
 /// Every request (and multipart upload body) is recorded.
+///
+/// Mirrors the production `HTTPClient` contract (`AccountHTTPClient` / `RoutingHTTPClient`): non-2xx answers are
+/// RETURNED as `HTTPResponse`s (never thrown), so `FanboxAPIClient.validate` sees the same status / headers / body as in
+/// the app. `FixTransportIntegrationTests` runs the same error paths over the real `AccountHTTPClient`.
 final class FanboxFakeHTTPClient: HTTPClient, @unchecked Sendable {
     struct Stub {
         var status: Int

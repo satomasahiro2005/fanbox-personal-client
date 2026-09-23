@@ -65,9 +65,16 @@ enum FanboxResponseHandling {
         return map(statusCode: statusCode, headers: [:], errorCode: code)
     }
 
-    /// Maps a non-2xx response. `headers` keys are matched case-insensitively.
-    static func map(statusCode: Int, headers: [String: String], errorCode: String? = nil) -> RemoteError {
+    /// Maps a non-2xx response. `headers` keys are matched case-insensitively. `body` lets a CDN edge block (HTML
+    /// challenge / "ブロックされました") be told apart from a FANBOX JSON refusal (docs/API.md §1.6).
+    static func map(statusCode: Int, headers: [String: String], errorCode: String? = nil, body: Data? = nil) -> RemoteError {
+        if errorCode == nil, EdgeBlockDetector.isEdgeBlock(status: statusCode, headers: headers, body: body) {
+            return .edgeBlocked(retryAfter: retryAfter(from: headers))
+        }
         switch statusCode {
+        case 300..<400:
+            // Redirects are never followed for writes (and capped for reads): a 3xx here is a refusal.
+            return .invalidRequest("FANBOX がリダイレクトを返しました (\(statusCode))")
         case 400:
             // Missing Origin, bad parameters, or (on some endpoints) a logged-out session.
             return .invalidRequest("FANBOX がリクエストを拒否しました (400\(errorCode.map { " \($0.prefix(40))" } ?? ""))")
@@ -106,12 +113,9 @@ enum FanboxResponseHandling {
         return headers.first { $0.key.lowercased() == lower }?.value
     }
 
-    /// True when a 403 is a Cloudflare edge block / challenge rather than a FANBOX JSON refusal.
-    static func isCloudflareBlock(statusCode: Int, headers: [String: String]) -> Bool {
-        guard statusCode == 403 || statusCode == 503 || statusCode == 429 else { return false }
-        if header("cf-mitigated", in: headers) != nil { return true }
-        let contentType = header("Content-Type", in: headers)?.lowercased() ?? ""
-        return contentType.contains("text/html") && (header("Server", in: headers)?.lowercased().contains("cloudflare") ?? false)
+    /// True when a 403 / 503 is a Cloudflare edge block / challenge rather than a FANBOX JSON refusal (see `EdgeBlockDetector`).
+    static func isCloudflareBlock(statusCode: Int, headers: [String: String], body: Data? = nil) -> Bool {
+        EdgeBlockDetector.isEdgeBlock(status: statusCode, headers: headers, body: body)
     }
 }
 

@@ -47,10 +47,11 @@ The full specification (in Japanese) is in [SPEC.md](SPEC.md).
 
 | Area | What it does |
 |---|---|
-| Accounts | Any number of FANBOX / pixiv accounts. Each account has its own `WKWebsiteDataStore`, its own Keychain credential and its own `URLSession`, so cookies never mix. |
+| Accounts | Any number of FANBOX / pixiv accounts. Each account has its own `WKWebsiteDataStore`, its own Keychain credential and its own `URLSession`, so cookies never mix. A web session is stored for an account only after its logged-in pixiv user was verified. Accounts that sign in only with Google cannot log in inside the app (Google blocks embedded web views): set a pixiv password first. |
 | Reader | One timeline across all accounts. A post seen by several accounts is shown once. The app picks the account to read with (cached, can view, valid session, higher plan, main account) and you can switch by hand. Posts render natively: text, images, galleries, files, audio, video, links, embeds and article blocks. |
 | Notifications | One inbox for all accounts, with duplicates merged. When an event is detected, the app fetches the post body or comment thread before it posts the iOS notification. A tap then opens the post from the local database. Replies can be written from the notification and are queued offline. |
-| Low data | Automatic / Normal / Low Data / Extreme / Offline modes. A text-first scheduler sends comment posts and interactive reads before any media and pauses media transfers while they run. |
+| Low data | Automatic / Normal / Low Data / Extreme / Offline modes. A text-first scheduler sends comment posts and interactive reads before any media and pauses media transfers while they run. Offline stops everything, including the account web views. |
+| Transport | FANBOX requests go through a per-account URLSession or, for `post.info` and whenever the native request is stopped by Cloudflare, through a hidden WebView of the same account (same cookies and web session). A device-wide budget spaces `post.info`, pauses after a 429 and never multiplies a block across accounts. |
 | Support | Supports grouped by creator and by account, with monthly totals, this month's actual payments, next month's planned total, a locally observed support history and anomaly flags. Payment profiles (nickname, brand, last four digits, memo) can be linked to each support. Payment itself always happens in the account-aware web view. |
 | Creator mode | Dashboard, managed posts, local drafts with a block editor, a media upload queue, comments, fans and plans for accounts that own a creator page. |
 | Library | Local full-text search, favorites, read later, local tags and memos (never sent to FANBOX), offline saving with a size-limited media cache. |

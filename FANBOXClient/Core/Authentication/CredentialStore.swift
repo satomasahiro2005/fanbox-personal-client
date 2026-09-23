@@ -69,6 +69,27 @@ struct SessionCredential: Codable, Sendable, Hashable {
 
     var hasSessionCookie: Bool { cookies.contains { $0.name == Self.sessionCookieName && !$0.value.isEmpty && !$0.isExpired() } }
 
+    /// Current FANBOXSESSID value on a fanbox.cc domain (a secret: never log it).
+    var sessionCookieValue: String? {
+        cookies.first { $0.name == Self.sessionCookieName && !$0.value.isEmpty && !$0.isExpired()
+            && ($0.normalizedDomain == "fanbox.cc" || $0.normalizedDomain.hasSuffix(".fanbox.cc")) }?.value
+    }
+
+    /// Cookies minted by the CDN for ONE client (bound to its UA / IP / TLS fingerprint, docs/API.md §1.3). They are
+    /// never copied between the URLSession and the WebKit store.
+    static func isEdgeCookie(name: String) -> Bool {
+        let n = name.lowercased()
+        return n == "cf_clearance" || n == "__cf_bm" || n.hasPrefix("cf_chl") || n.hasPrefix("__cf")
+    }
+
+    /// Merges Set-Cookie values like `merge(_:)`; when the session cookie changes, the CSRF token (bound to the old
+    /// session, docs/API.md §1.4) is dropped so the next write fetches a fresh one.
+    mutating func mergeResponseCookies(_ newCookies: [StoredCookie], now: Date = .now) {
+        let before = sessionCookieValue
+        merge(newCookies, now: now)
+        if sessionCookieValue != before { csrfToken = nil }
+    }
+
     /// `Cookie` header value for a host, or nil when no cookie matches.
     func cookieHeader(for host: String, now: Date = .now) -> String? {
         let pairs = cookies
@@ -106,12 +127,32 @@ struct SessionCredential: Codable, Sendable, Hashable {
     }
 }
 
+/// Per-account session secrets.
+///
+/// `updateCSRFToken` and `mergeCookies` only UPDATE an existing credential: a credential is created exclusively by an
+/// explicit, verified `save` (login). A late response for a logged-out / removed account therefore can never re-create
+/// its Keychain item.
 protocol CredentialStoring: Sendable {
     func credential(for accountID: String) async -> SessionCredential?
     func save(_ credential: SessionCredential, for accountID: String) async throws
     func delete(for accountID: String) async throws
     func updateCSRFToken(_ token: String?, for accountID: String) async
     func mergeCookies(_ cookies: [StoredCookie], for accountID: String) async
+    /// Sets the User-Agent of an EXISTING credential (the account WebView's UA). No credential → no-op.
+    func updateUserAgent(_ userAgent: String, for accountID: String) async
+    /// Account ids that currently have a stored credential (nil = the store cannot enumerate).
+    func storedAccountIDs() async -> [String]?
+}
+
+extension CredentialStoring {
+    func storedAccountIDs() async -> [String]? { nil }
+
+    /// Default for test doubles (not atomic; the real stores override it).
+    func updateUserAgent(_ userAgent: String, for accountID: String) async {
+        guard var credential = await credential(for: accountID), credential.userAgent != userAgent else { return }
+        credential.userAgent = userAgent
+        try? await save(credential, for: accountID)
+    }
 }
 
 /// Keychain-backed credential store, one Keychain item per account (SPEC §39).
@@ -164,32 +205,32 @@ actor CredentialStore: CredentialStoring {
         try keychain.remove(Self.key(for: accountID))
     }
 
-    /// Sets (or clears with nil) the CSRF token and persists it. Creates a cookie-less credential when none exists yet.
+    /// Sets (or clears with nil) the CSRF token of an EXISTING credential and persists it. No credential → no-op.
     func updateCSRFToken(_ token: String?, for accountID: String) async {
-        var credential = await credential(for: accountID)
-        if credential == nil {
-            guard let token, !token.isEmpty else { return }
-            credential = SessionCredential(cookies: [])
-        }
-        guard var updated = credential else { return }
+        guard var updated = await credential(for: accountID) else { return }
         guard updated.csrfToken != token else { return }
         updated.csrfToken = token
         persist(updated, for: accountID)
     }
 
-    /// Merges cookies (e.g. from Set-Cookie) and persists. Creates the credential when none exists yet.
+    /// Merges cookies (e.g. from Set-Cookie) into an EXISTING credential and persists. No credential → no-op.
     func mergeCookies(_ cookies: [StoredCookie], for accountID: String) async {
-        guard !cookies.isEmpty else { return }
-        var updated = await credential(for: accountID) ?? SessionCredential(cookies: [])
+        guard !cookies.isEmpty, var updated = await credential(for: accountID) else { return }
         let before = updated
-        updated.merge(cookies)
+        updated.mergeResponseCookies(cookies)
         guard updated != before else { return }
         persist(updated, for: accountID)
     }
 
+    func updateUserAgent(_ userAgent: String, for accountID: String) async {
+        guard !userAgent.isEmpty, var updated = await credential(for: accountID), updated.userAgent != userAgent else { return }
+        updated.userAgent = userAgent
+        persist(updated, for: accountID)
+    }
+
     /// Account IDs that have a stored credential.
-    func storedAccountIDs() -> [String] {
-        let keys = (try? keychain.allKeys()) ?? []
+    func storedAccountIDs() async -> [String]? {
+        guard let keys = try? keychain.allKeys() else { return nil }
         return keys.filter { $0.hasPrefix(Self.keyPrefix) }.map { String($0.dropFirst(Self.keyPrefix.count)) }
     }
 
@@ -238,17 +279,20 @@ actor InMemoryCredentialStore: CredentialStoring {
     func delete(for accountID: String) async throws { storage[accountID] = nil }
 
     func updateCSRFToken(_ token: String?, for accountID: String) async {
-        if storage[accountID] == nil {
-            guard let token, !token.isEmpty else { return }
-            storage[accountID] = SessionCredential(cookies: [])
-        }
+        guard storage[accountID] != nil else { return }
         storage[accountID]?.csrfToken = token
     }
 
     func mergeCookies(_ cookies: [StoredCookie], for accountID: String) async {
-        guard !cookies.isEmpty else { return }
-        var credential = storage[accountID] ?? SessionCredential(cookies: [])
-        credential.merge(cookies)
+        guard !cookies.isEmpty, var credential = storage[accountID] else { return }
+        credential.mergeResponseCookies(cookies)
         storage[accountID] = credential
     }
+
+    func updateUserAgent(_ userAgent: String, for accountID: String) async {
+        guard storage[accountID] != nil else { return }
+        storage[accountID]?.userAgent = userAgent
+    }
+
+    func storedAccountIDs() async -> [String]? { Array(storage.keys) }
 }

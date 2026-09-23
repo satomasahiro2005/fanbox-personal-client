@@ -50,6 +50,28 @@ enum WebDestination: Hashable, Sendable {
         return URL(string: s) ?? URL(string: base)!
     }
 
+    /// Pages to try, in order, when the destination's main page answers 404 (docs/API.md §20: several of these URLs
+    /// are unverified). The verified pixiv card page is the fallback for payment settings.
+    var fallbacks: [WebDestination] {
+        switch self {
+        case .plan(let creatorID, _): return [.creatorPlans(creatorID: creatorID), .creator(creatorID: creatorID)]
+        case .creatorPlans(let creatorID): return [.creator(creatorID: creatorID)]
+        case .paymentSettings: return [.url(WebDestination.pixivCardsURL)]
+        case .paymentHistory: return [.url(URL(string: "https://www.fanbox.cc/user/settings")!), .home]
+        case .supportingPlans: return [.home]
+        case .notifications, .newsletter: return [.home]
+        case .managePostEditor(nil): return [.managePosts]
+        case .login: return [.url(WebDestination.pixivLoginURL)]
+        case .post(let creatorID, _): return [.creator(creatorID: creatorID)]
+        default: return []
+        }
+    }
+
+    /// Verified card management page (docs/API.md §20, Help Center 360008991393).
+    static let pixivCardsURL = URL(string: "https://payment.pixiv.net/cards")!
+    /// pixiv login returning to FANBOX; used only if www.fanbox.cc/login does not exist (unverified, docs/API.md §20).
+    static let pixivLoginURL = URL(string: "https://accounts.pixiv.net/login?return_to=https%3A%2F%2Fwww.fanbox.cc%2F")!
+
     var title: String {
         switch self {
         case .login: return "ログイン"
@@ -100,7 +122,14 @@ final class WebBridge {
     init() {}
 
     func openWeb(account accountID: String, destination: WebDestination, purpose: WebPurpose = .browse) {
-        presented = WebSessionRequest(accountID: accountID, destination: destination, purpose: purpose)
+        let next = WebSessionRequest(accountID: accountID, destination: destination, purpose: purpose)
+        if let current = presented, current.id != next.id {
+            // The replaced session ends here: its dismissal work (e.g. the payment resync) must still run.
+            presented = next
+            onDismiss?(current)
+        } else {
+            presented = next
+        }
     }
 
     func dismiss() {

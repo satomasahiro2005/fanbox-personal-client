@@ -38,6 +38,11 @@ struct HTTPResponse: Sendable {
 /// - run every request through `NetworkScheduler` with the request priority,
 /// - record a redacted `ResearchLog` entry for each request,
 /// - map failures to `RemoteError` and never log secrets.
+///
+/// Contract of `send` / `upload`: every HTTP answer is RETURNED, including non-2xx statuses (the caller —
+/// `FanboxAPIClient.validate` — reads the status, headers and body to tell a FANBOX JSON refusal from a CDN edge block);
+/// only transport failures (offline, timeout, cancellation, a missing CSRF token) throw. `download` throws for non-2xx
+/// statuses (the partial file is deleted).
 protocol HTTPClient: Sendable {
     func send(_ request: HTTPRequest, accountID: String?) async throws -> HTTPResponse
     /// Downloads to a temporary file the caller must move. Registered with the scheduler as a pausable transfer.
@@ -46,4 +51,23 @@ protocol HTTPClient: Sendable {
     /// Uploads `bodyFileURL` (e.g. a prebuilt multipart body) as the request body.
     func upload(_ request: HTTPRequest, bodyFileURL: URL, accountID: String?,
                 progress: (@Sendable (Double) -> Void)?) async throws -> HTTPResponse
+}
+
+/// A transport that reads the per-account `CredentialStoring` (the store `FanboxAPIClient` keeps the CSRF token in).
+protocol CredentialBackedHTTPClient: HTTPClient {
+    var credentials: CredentialStoring { get }
+}
+
+/// Tears down everything a transport holds for one account (SPEC §7.2, logout / account removal): cancels its in-flight
+/// requests and makes sure late responses can no longer write cookies or tokens for it.
+protocol SessionRevoking: AnyObject, Sendable {
+    func revokeSession(accountID: String) async
+}
+
+/// Which transport carried a request (Research Mode, routing decisions).
+enum TransportKind: String, Sendable, CaseIterable {
+    /// Per-account URLSession (`AccountHTTPClient`).
+    case native
+    /// `fetch()` inside the account's hidden WKWebView (`WebFetchHostPool`).
+    case webView = "webview"
 }

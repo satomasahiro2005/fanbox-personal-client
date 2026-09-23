@@ -90,6 +90,14 @@ final class AccountWebController {
         return await WebPageInspector.inspect(webView)
     }
 
+    /// `navigator.userAgent` of this web view (fallback when page inspection failed: the API must present the same UA
+    /// as the web session, docs/API.md §1.2).
+    func userAgent() async -> String? {
+        guard let webView else { return nil }
+        let value = try? await webView.evaluateJavaScript("navigator.userAgent")
+        return (value as? String).flatMap { $0.isEmpty ? nil : $0 }
+    }
+
     func closePopup() {
         popup?.webView.stopLoading()
         popup = nil
@@ -98,6 +106,10 @@ final class AccountWebController {
 
 /// `WKWebView` bound to ONE account's isolated `WKWebsiteDataStore` (SPEC §7.1 / §40). Cookies of other accounts are
 /// physically unreachable from here. Every main-frame navigation is recorded (redacted) for Research Mode.
+///
+/// Offline (SPEC §30 "ネットワーク通信を完全停止する"): nothing is loaded while `policy` forbids network access; every
+/// http(s) navigation of the view and its popups is cancelled.
+/// Unverified destinations (docs/API.md §20): a 404 answer to the initial page loads `fallbackURLs` in order.
 struct AccountWebView: UIViewRepresentable {
     let accountID: String
     let webProfileID: String
@@ -107,9 +119,14 @@ struct AccountWebView: UIViewRepresentable {
     let webSessions: WebSessionStore
     /// `env.research` — receives one redacted `.navigation` entry per main-frame navigation.
     let research: ResearchRecorder
+    /// `env.policyStore` — Offline blocks every load.
+    var policy: NetworkPolicyStore? = nil
+    /// Tried in order when the initial page (or the previous fallback) answers 404.
+    var fallbackURLs: [URL] = []
 
     func makeCoordinator() -> AccountWebCoordinator {
-        AccountWebCoordinator(controller: controller, accountID: accountID, research: research)
+        AccountWebCoordinator(controller: controller, accountID: accountID, research: research, policy: policy,
+                              initialURL: initialURL, fallbackURLs: fallbackURLs)
     }
 
     func makeUIView(context: Context) -> WKWebView {
@@ -125,7 +142,11 @@ struct AccountWebView: UIViewRepresentable {
         webView.accessibilityIdentifier = "accountWebView"
         context.coordinator.mainWebView = webView
         controller.attach(webView)
-        webView.load(URLRequest(url: initialURL))
+        if context.coordinator.allowsNetwork {
+            webView.load(URLRequest(url: initialURL))
+        } else {
+            controller.loadError = "オフラインモードのため読み込みません"
+        }
         return webView
     }
 
@@ -155,14 +176,48 @@ final class AccountWebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate 
     weak var mainWebView: WKWebView?
     let accountID: String
     let research: ResearchRecorder
+    let policy: NetworkPolicyStore?
+    /// URL whose 404 triggers the next fallback (nil once a page was shown).
+    private var expectedURL: URL?
+    private var pendingFallbacks: [URL]
 
-    init(controller: AccountWebController, accountID: String, research: ResearchRecorder) {
+    init(controller: AccountWebController, accountID: String, research: ResearchRecorder, policy: NetworkPolicyStore? = nil,
+         initialURL: URL? = nil, fallbackURLs: [URL] = []) {
         self.controller = controller
         self.accountID = accountID
         self.research = research
+        self.policy = policy
+        self.expectedURL = fallbackURLs.isEmpty ? nil : initialURL
+        self.pendingFallbacks = fallbackURLs
     }
 
+    var allowsNetwork: Bool { policy?.current.allowsNetwork ?? true }
+
     private func isMain(_ webView: WKWebView) -> Bool { webView === mainWebView }
+
+    /// Same page (host + path, trailing slash ignored): redirects between equivalent URLs keep the fallback armed.
+    static func samePage(_ a: URL?, _ b: URL?) -> Bool {
+        guard let a, let b else { return false }
+        func norm(_ u: URL) -> String {
+            var path = u.path
+            while path.hasSuffix("/") && path.count > 1 { path.removeLast() }
+            return (u.host ?? "").lowercased() + path
+        }
+        return norm(a) == norm(b)
+    }
+
+    /// Next fallback for a main-frame 404 of the expected page (nil = show the 404 page).
+    func fallback(afterNotFound url: URL?) -> URL? {
+        guard let expected = expectedURL, Self.samePage(expected, url), !pendingFallbacks.isEmpty else { return nil }
+        let next = pendingFallbacks.removeFirst()
+        expectedURL = pendingFallbacks.isEmpty ? nil : next
+        return next
+    }
+
+    private func disarmFallbacks() {
+        expectedURL = nil
+        pendingFallbacks.removeAll()
+    }
 
     // MARK: WKNavigationDelegate
 
@@ -170,6 +225,12 @@ final class AccountWebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate 
                  decisionHandler: @escaping @MainActor (WKNavigationActionPolicy) -> Void) {
         guard let url = navigationAction.request.url, let scheme = url.scheme?.lowercased() else {
             decisionHandler(.allow)
+            return
+        }
+        if (scheme == "http" || scheme == "https") && !allowsNetwork {
+            // Offline mode: no page (or popup) of the account web view may load.
+            decisionHandler(.cancel)
+            if isMain(webView) { controller?.loadError = "オフラインモードのため読み込みません" }
             return
         }
         switch scheme {
@@ -190,6 +251,18 @@ final class AccountWebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate 
         if navigationResponse.isForMainFrame {
             let status = (navigationResponse.response as? HTTPURLResponse)?.statusCode
             recordNavigation(url: navigationResponse.response.url, method: isMain(webView) ? "NAVIGATE" : "POPUP", status: status, error: nil)
+            if isMain(webView) {
+                if status == 404, let next = fallback(afterNotFound: navigationResponse.response.url) {
+                    decisionHandler(.cancel)
+                    recordNavigation(url: next, method: "FALLBACK", status: nil, error: nil)
+                    webView.load(URLRequest(url: next))
+                    return
+                }
+                if let status, (200..<300).contains(status) {
+                    // A real page is showing: later 404s are the user's own navigation.
+                    disarmFallbacks()
+                }
+            }
         }
         decisionHandler(.allow)
     }
