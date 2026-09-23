@@ -68,8 +68,7 @@ struct CreatorPostsSection: View {
     }
 
     private func localPostCount() -> Int {
-        let id = creatorID
-        return (try? env.store.context.fetchCount(FetchDescriptor<Post>(predicate: #Predicate { $0.creatorID == id }))) ?? posts.count
+        (try? env.store.context.fetchCount(ReaderPostQueries.byCreator(creatorID))) ?? posts.count
     }
 }
 
@@ -334,8 +333,8 @@ struct CreatorAboutSection: View {
             Toggle(isOn: Binding(
                 get: { creator.offlineRecentCount > 0 },
                 set: { enabled in
-                    creator.offlineRecentCount = enabled ? max(1, env.settings.creatorRecentCount) : 0
-                    env.store.save()
+                    // Turning the rule off releases the posts it saved (explicitly saved posts stay).
+                    env.offline.setRecentRule(creatorID: creatorID, count: enabled ? max(1, env.settings.creatorRecentCount) : 0)
                     if enabled { Task { await saveRecent(count: creator.offlineRecentCount) } }
                 }
             )) {
@@ -346,7 +345,8 @@ struct CreatorAboutSection: View {
             if creator.offlineRecentCount > 0 {
                 Stepper(value: Binding(
                     get: { creator.offlineRecentCount },
-                    set: { creator.offlineRecentCount = $0; env.store.save() }
+                    // Local only: posts beyond the new N are released now, newly covered ones are saved by the next sync.
+                    set: { env.offline.setRecentRule(creatorID: creatorID, count: $0) }
                 ), in: 1...100) {
                     Text("最近 \(creator.offlineRecentCount) 件")
                         .monospacedDigit()
@@ -372,7 +372,7 @@ struct CreatorAboutSection: View {
         } footer: {
             VStack(alignment: .leading, spacing: 4) {
                 if let offlineMessage { Text(offlineMessage) }
-                Text("既知の投稿と最新ページの差分だけを保存します。過去の全履歴は取得しません。")
+                Text("既知の投稿と最新ページの差分だけを保存します。過去の全履歴は取得しません。新しい投稿は同期のたびに自動で保存され、古くなった分は保存が解除されます。")
             }
         }
     }

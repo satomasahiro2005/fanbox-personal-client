@@ -31,8 +31,10 @@ enum OfflineState: String, Codable, CaseIterable, Sendable {
     case none
     /// Automatically saved because the user viewed it while "auto-save viewed posts" is on.
     case autoSaved
-    /// Explicitly saved by the user ("この投稿" / "Creator の最近 N 件").
+    /// Explicitly saved by the user ("この投稿").
     case saved
+    /// Saved by a creator's "最近 N 件" rule: released when it falls out of the newest N or the rule is removed.
+    case ruleSaved
 }
 
 enum SupportStatus: String, Codable, CaseIterable, Sendable {

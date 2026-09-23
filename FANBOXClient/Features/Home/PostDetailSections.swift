@@ -187,3 +187,40 @@ struct PostDetailCommentPreview: View {
         .accessibilityIdentifier("postCommentPreview")
     }
 }
+
+/// The body could not be fetched natively (edge block, forbidden, unknown response …): open the post in the
+/// account-aware WebView with the selected account (SPEC §40), or retry.
+struct PostDetailWebFallbackCard: View {
+    let error: RemoteError?
+    let accountID: String
+    let openWeb: () -> Void
+    let retry: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("本文を取得できませんでした", systemImage: "exclamationmark.triangle")
+                .font(.subheadline.weight(.semibold))
+            if let error {
+                Text(error.userMessage).font(.caption).foregroundStyle(.secondary)
+            }
+            Text("Web で開くと、このアカウントのログイン状態で FANBOX のページを表示します。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            AccountBadge(accountID: accountID)
+            HStack(spacing: 12) {
+                Button(action: openWeb) {
+                    Label("Web で開く", systemImage: "safari")
+                }
+                .buttonStyle(.borderedProminent)
+                .accessibilityIdentifier("postOpenWebFallback")
+                Button("再試行", action: retry)
+                    .buttonStyle(.bordered)
+                    .accessibilityIdentifier("postFetchBodyButton")
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(Color.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 12))
+        .accessibilityIdentifier("postWebFallback")
+    }
+}

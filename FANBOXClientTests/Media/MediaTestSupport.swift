@@ -123,5 +123,6 @@ final class MediaTestHarness {
 
     func cleanup() {
         try? FileManager.default.removeItem(at: root)
+        try? FileManager.default.removeItem(at: media.fileCache.pinnedRoot)
     }
 }

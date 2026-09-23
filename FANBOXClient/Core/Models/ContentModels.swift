@@ -98,6 +98,9 @@ final class Post {
     var publishedAt: Date
     var updatedAt: Date
     var fanboxTags: [String]
+    /// Searchable copy of `fanboxTags` (one tag per line) so local search matches tags in SQLite instead of loading every
+    /// post (SPEC §33). nil = written before this field existed; `SearchService` backfills it.
+    var fanboxTagsText: String?
     var likeCount: Int
     var commentCount: Int
     var isLiked: Bool

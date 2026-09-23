@@ -165,6 +165,10 @@ private struct ImageViewerPage: View {
                         Text("オフラインのため表示できません")
                             .font(.footnote)
                             .foregroundStyle(.white.opacity(0.7))
+                    } else if displayState == .failed {
+                        Text("画像を読み込めませんでした")
+                            .font(.footnote)
+                            .foregroundStyle(.white.opacity(0.7))
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -173,7 +177,8 @@ private struct ImageViewerPage: View {
             }
         }
         .overlay(alignment: .bottom) { controls }
-        .task(id: item.id) { await start() }
+        // Re-runs when connectivity returns (a fixed network mode keeps its mode while the path is down).
+        .task(id: ImageViewerPageKey(itemID: item.id, online: env.networkMode.isOnline)) { await start() }
     }
 
     @ViewBuilder
@@ -187,6 +192,15 @@ private struct ImageViewerPage: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .accessibilityIdentifier("imageViewerLoadDisplay")
+            } else if displayState == .failed {
+                Button {
+                    Task { await loadDisplay(trigger: .manual) }
+                } label: {
+                    Label("再読み込み", systemImage: "arrow.clockwise")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!env.networkMode.isOnline)
+                .accessibilityIdentifier("imageViewerRetryDisplay")
             }
             switch originalState {
             case .manualRequired, .blocked, .failed:
@@ -299,6 +313,11 @@ private struct ImageViewerPage: View {
 
 private enum ViewerLoadState: Equatable {
     case idle, loading, manualRequired, blocked, failed, done
+}
+
+private struct ImageViewerPageKey: Hashable {
+    var itemID: String
+    var online: Bool
 }
 
 // MARK: - Zoom

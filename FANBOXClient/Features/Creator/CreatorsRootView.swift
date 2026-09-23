@@ -123,7 +123,7 @@ struct CreatorsRootView: View {
 
     /// Newest local post date per creator. Cheap (two properties only) and never touches the network.
     private func reloadLocalPostDates() {
-        var descriptor = FetchDescriptor<Post>(sortBy: [SortDescriptor(\.publishedAt, order: .reverse)])
+        var descriptor = FetchDescriptor<Post>(predicate: ReaderPostQueries.visible, sortBy: [SortDescriptor(\.publishedAt, order: .reverse)])
         descriptor.propertiesToFetch = [\.creatorID, \.publishedAt]
         descriptor.fetchLimit = 5000
         var result: [String: Date] = [:]

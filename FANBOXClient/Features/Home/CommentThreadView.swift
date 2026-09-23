@@ -23,6 +23,8 @@ struct CommentThreadView: View {
     @State private var scrollRequest: String?
     @State private var pendingDelete: Comment?
     @State private var alertMessage: String?
+    /// Account to open the post with in the WebView when a comment operation failed natively (SPEC §21 / §40).
+    @State private var alertWebAccountID: String?
     /// Queued `.draft` item currently loaded in the composer (hidden from the list while edited).
     @State private var editingDraftID: String?
     @State private var didPreselectReply = false
@@ -125,6 +127,17 @@ struct CommentThreadView: View {
         }
         .navigationTitle("コメント")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    if let account = webAccountID { openWeb(account: account) }
+                } label: {
+                    Label("Web で開く", systemImage: "safari")
+                }
+                .disabled(webAccountID == nil || webCreatorID == nil)
+                .accessibilityIdentifier("commentOpenWeb")
+            }
+        }
         .task { await start() }
         .onDisappear { persistDraft(clearComposer: true) }
         .onChange(of: scenePhase) { _, phase in
@@ -139,11 +152,36 @@ struct CommentThreadView: View {
                 pendingDelete = nil
             }
         }
-        .alert("操作できませんでした", isPresented: Binding(get: { alertMessage != nil }, set: { if !$0 { alertMessage = nil } })) {
+        .alert("操作できませんでした", isPresented: Binding(get: { alertMessage != nil }, set: { if !$0 {
+            alertMessage = nil
+            alertWebAccountID = nil
+        } })) {
+            if let account = alertWebAccountID, webCreatorID != nil {
+                Button("Web で開く") { openWeb(account: account) }
+                    .accessibilityIdentifier("commentAlertOpenWeb")
+            }
             Button("OK", role: .cancel) {}
         } message: {
             Text(alertMessage ?? "")
         }
+    }
+
+    // MARK: - Web fallback (SPEC §21 / §40)
+
+    /// Creator of the post (the web URL needs it); falls back to the comments' creator when the post is not local.
+    private var webCreatorID: String? {
+        post?.creatorID ?? comments.lazy.compactMap(\.creatorID).first
+    }
+
+    /// The composer's account, else the owner / automatically chosen account.
+    private var webAccountID: String? {
+        composerAccountID ?? ownerAccountID() ?? AccountSelector.bestAccount(postID: postID, store: env.store)
+    }
+
+    private func openWeb(account: String) {
+        guard let creatorID = webCreatorID else { return }
+        env.web.openWeb(account: account, destination: .post(creatorID: creatorID, postID: postID),
+                        purpose: .fallback(reason: "コメントの操作"))
     }
 
     // MARK: - Rows
@@ -311,7 +349,14 @@ struct CommentThreadView: View {
             let error = await RequestContext.$priority.withValue(.interactiveWrite) {
                 await env.sync.deleteComment(commentID: commentID, postID: postID, accountID: accountID)
             }
-            if let error { alertMessage = error.userMessage }
+            if let error {
+                if PostAccountLogic.commentOperationOffersWeb(error) {
+                    alertWebAccountID = accountID
+                    alertMessage = "アプリから削除できませんでした（\(error.userMessage)）。Web で開いて、このアカウントで操作できます。"
+                } else {
+                    alertMessage = error.userMessage
+                }
+            }
         }
     }
 

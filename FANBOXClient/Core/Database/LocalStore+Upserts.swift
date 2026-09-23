@@ -658,6 +658,8 @@ extension LocalStore {
         post.publishedAt = item.publishedAt
         post.updatedAt = item.updatedAt
         if post.fanboxTags != item.tags { post.fanboxTags = item.tags }
+        let tagsText = SearchService.tagsSearchText(item.tags)
+        if post.fanboxTagsText != tagsText { post.fanboxTagsText = tagsText }
         post.likeCount = item.likeCount
         post.commentCount = max(item.commentCount, 0)
         // isLiked is per account on FANBOX; follow the account whose body we show (or the first one seen).

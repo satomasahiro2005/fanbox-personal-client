@@ -20,11 +20,13 @@ final class HomeFeedFilterTests: XCTestCase {
 
     private func ids(_ filter: HomeFeedFilter) -> [String] { filter.apply(entries()).map(\.postID) }
 
+    /// p4 has neither timeline flag (only seen via a creator page / link): not part of すべて / 未読, but a favorite
+    /// still shows under お気に入り. (Updated: すべて / 未読 used to list every locally known post.)
     func testChipFilters() {
-        XCTAssertEqual(ids(HomeFeedFilter(kind: .all)), ["p1", "p2", "p3", "p4"])
+        XCTAssertEqual(ids(HomeFeedFilter(kind: .all)), ["p1", "p2", "p3"])
         XCTAssertEqual(ids(HomeFeedFilter(kind: .supporting)), ["p1", "p3"])
         XCTAssertEqual(ids(HomeFeedFilter(kind: .following)), ["p2", "p3"])
-        XCTAssertEqual(ids(HomeFeedFilter(kind: .unread)), ["p1", "p4"])
+        XCTAssertEqual(ids(HomeFeedFilter(kind: .unread)), ["p1"])
         XCTAssertEqual(ids(HomeFeedFilter(kind: .favorite)), ["p2", "p4"])
     }
 
@@ -36,7 +38,7 @@ final class HomeFeedFilterTests: XCTestCase {
     }
 
     func testAccessOnlyAccountMatches() {
-        let e = HomeFeedEntry(postID: "x", accessAccountIDs: ["C"], seenByAccountIDs: [])
+        let e = HomeFeedEntry(postID: "x", isFromFollowedCreator: true, accessAccountIDs: ["C"], seenByAccountIDs: [])
         XCTAssertTrue(HomeFeedFilter(kind: .all, accountID: "C").matches(e))
     }
 
@@ -46,7 +48,7 @@ final class HomeFeedFilterTests: XCTestCase {
         dup.isRead = true
         list.append(dup)
         let result = HomeFeedFilter(kind: .all).apply(list)
-        XCTAssertEqual(result.map(\.postID), ["p1", "p2", "p3", "p4"])
+        XCTAssertEqual(result.map(\.postID), ["p1", "p2", "p3"])
         XCTAssertFalse(result[0].isRead, "first occurrence wins")
         // A duplicate that only the second copy matches is still included once.
         XCTAssertEqual(HomeFeedFilter(kind: .all).apply([dup, list[0]]).count, 1)
@@ -84,8 +86,9 @@ final class HomeFeedFilterTests: XCTestCase {
             let expected = HomeFeedFilter.newestFirst(filter.apply(entries())).map(\.postID)
             XCTAssertEqual(fetched.map(\.postID), expected, "kind \(kind)")
         }
+        // p4 (no timeline flag) is not part of すべて; updated from ["p4", "p3"].
         let limited = store.fetch(HomeFeedFilter(kind: .all).descriptor(limit: 2))
-        XCTAssertEqual(limited.map(\.postID), ["p4", "p3"], "newest first with limit")
+        XCTAssertEqual(limited.map(\.postID), ["p3", "p2"], "newest first with limit")
     }
 
     func testUserActionsWriteLocalMetadata() throws {

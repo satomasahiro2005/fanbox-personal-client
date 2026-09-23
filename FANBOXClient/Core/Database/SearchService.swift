@@ -35,6 +35,29 @@ struct LibrarySearchResults {
     var totalCount: Int { creators.count + posts.count + comments.count + drafts.count }
 }
 
+/// Fetch descriptors for reader-facing post lists (Home, Library, search, creator pages, offline rules).
+/// They hide my own FANBOX drafts / scheduled posts: `Post.isVisibleToReaders` expressed on the stored
+/// `remoteStatusRaw` so SQLite does the filtering.
+enum ReaderPostQueries {
+    static let publishedStatus: String? = RemotePostStatus.published.rawValue
+
+    /// `Post.isVisibleToReaders` as a predicate.
+    static var visible: Predicate<Post> {
+        let published = publishedStatus
+        return #Predicate<Post> { $0.remoteStatusRaw == nil || $0.remoteStatusRaw == published }
+    }
+
+    /// Reader-visible posts of one creator, newest first.
+    static func byCreator(_ creatorID: String, limit: Int? = nil) -> FetchDescriptor<Post> {
+        let published = publishedStatus
+        var d = FetchDescriptor<Post>(predicate: #Predicate {
+            $0.creatorID == creatorID && ($0.remoteStatusRaw == nil || $0.remoteStatusRaw == published)
+        }, sortBy: [SortDescriptor(\.publishedAt, order: .reverse)])
+        d.fetchLimit = limit
+        return d
+    }
+}
+
 struct TagSummary: Identifiable, Hashable, Sendable {
     var name: String
     var count: Int
@@ -48,10 +71,31 @@ final class SearchService {
     let store: LocalStore
     /// Maximum results per group.
     var limit: Int
+    /// Rows materialized per group at most (SQLite pre-filters on the most selective term; the rest is matched in memory).
+    var candidateLimit: Int
 
-    init(store: LocalStore, limit: Int = 100) {
+    init(store: LocalStore, limit: Int = 100, candidateLimit: Int = 1000) {
         self.store = store
         self.limit = limit
+        self.candidateLimit = candidateLimit
+    }
+
+    /// Searchable form of FANBOX tags (`Post.fanboxTagsText`): one tag per line. Empty tags ⇒ "" (indexed, nothing to find).
+    nonisolated static func tagsSearchText(_ tags: [String]) -> String {
+        tags.joined(separator: "\n")
+    }
+
+    /// Fills `Post.fanboxTagsText` for rows written before it existed (nil = not indexed). One-time work after an
+    /// upgrade; afterwards the SQL check finds nothing.
+    func indexFanboxTagsIfNeeded() {
+        var descriptor = FetchDescriptor<Post>(predicate: #Predicate { $0.fanboxTagsText == nil })
+        descriptor.fetchLimit = 500
+        for _ in 0..<1000 {
+            let batch = store.fetch(descriptor)
+            guard !batch.isEmpty else { return }
+            for post in batch { post.fanboxTagsText = Self.tagsSearchText(post.fanboxTags) }
+            store.save()
+        }
     }
 
     // MARK: - Search
@@ -72,7 +116,9 @@ final class SearchService {
     }
 
     func searchPosts(_ query: LibrarySearchQuery) -> [Post] {
+        let published = ReaderPostQueries.publishedStatus
         let candidates: [Post]
+        let remaining: [String]
         if !query.tags.isEmpty {
             var ids: Set<String>?
             for tag in query.tags {
@@ -81,35 +127,46 @@ final class SearchService {
             }
             let list = Array(ids ?? [])
             guard !list.isEmpty else { return [] }
-            candidates = store.fetch(FetchDescriptor<Post>(predicate: #Predicate { list.contains($0.postID) }))
-        } else if let first = query.terms.first {
-            let byText = store.fetch(FetchDescriptor<Post>(predicate: #Predicate {
-                $0.title.localizedStandardContains(first) || $0.excerpt.localizedStandardContains(first)
-                    || $0.bodyText.localizedStandardContains(first)
+            candidates = store.fetch(FetchDescriptor<Post>(predicate: #Predicate {
+                list.contains($0.postID) && ($0.remoteStatusRaw == nil || $0.remoteStatusRaw == published)
             }))
-            let byMeta = store.fetch(FetchDescriptor<Post>(predicate: #Predicate {
-                $0.memo.localizedStandardContains(first) || $0.creatorName.localizedStandardContains(first)
-            }))
-            // FANBOX tags are an array property: matched in memory.
-            let byFanboxTag = store.fetch(FetchDescriptor<Post>()).filter { post in
-                post.fanboxTags.contains { $0.localizedStandardContains(first) }
-            }
-            var seen = Set<String>()
-            candidates = (byText + byMeta + byFanboxTag).filter { seen.insert($0.postID).inserted }
+            remaining = query.terms
+        } else if let term = Self.mostSelective(query.terms) {
+            indexFanboxTagsIfNeeded()
+            // One SQL query on the most selective term (every searchable field, FANBOX tags included), newest first and
+            // bounded, so a keystroke never materializes the whole library.
+            var descriptor = FetchDescriptor<Post>(predicate: #Predicate {
+                ($0.title.localizedStandardContains(term) || $0.excerpt.localizedStandardContains(term)
+                    || $0.bodyText.localizedStandardContains(term) || $0.memo.localizedStandardContains(term)
+                    || $0.creatorName.localizedStandardContains(term)
+                    || $0.fanboxTagsText?.localizedStandardContains(term) == true)
+                    && ($0.remoteStatusRaw == nil || $0.remoteStatusRaw == published)
+            }, sortBy: [SortDescriptor(\.publishedAt, order: .reverse)])
+            descriptor.fetchLimit = candidateLimit
+            candidates = store.fetch(descriptor)
+            var rest = query.terms
+            if let index = rest.firstIndex(of: term) { rest.remove(at: index) }
+            remaining = rest
         } else {
             return []
         }
-        let terms = query.tags.isEmpty ? Array(query.terms.dropFirst()) : query.terms
-        let filtered = candidates.filter { post in terms.allSatisfy { Self.post(post, matches: $0) } }
+        let filtered = candidates.filter { post in remaining.allSatisfy { Self.post(post, matches: $0) } }
         return Array(filtered.sorted { $0.publishedAt > $1.publishedAt }.prefix(limit))
+    }
+
+    /// The longest term narrows the SQL pre-filter the most.
+    static func mostSelective(_ terms: [String]) -> String? {
+        terms.max { $0.count < $1.count }
     }
 
     func searchCreators(_ terms: [String]) -> [Creator] {
         guard let first = terms.first else { return [] }
-        let candidates = store.fetch(FetchDescriptor<Creator>(predicate: #Predicate {
+        var descriptor = FetchDescriptor<Creator>(predicate: #Predicate {
             $0.name.localizedStandardContains(first) || $0.profileText.localizedStandardContains(first)
                 || $0.memo.localizedStandardContains(first)
-        }, sortBy: [SortDescriptor(\.name)]))
+        }, sortBy: [SortDescriptor(\.name)])
+        descriptor.fetchLimit = candidateLimit
+        let candidates = store.fetch(descriptor)
         let rest = terms.dropFirst()
         return Array(candidates.filter { creator in
             rest.allSatisfy {
@@ -121,9 +178,11 @@ final class SearchService {
 
     func searchComments(_ terms: [String]) -> [Comment] {
         guard let first = terms.first else { return [] }
-        let candidates = store.fetch(FetchDescriptor<Comment>(predicate: #Predicate {
+        var descriptor = FetchDescriptor<Comment>(predicate: #Predicate {
             !$0.isRemoved && $0.body.localizedStandardContains(first)
-        }, sortBy: [SortDescriptor(\.createdAt, order: .reverse)]))
+        }, sortBy: [SortDescriptor(\.createdAt, order: .reverse)])
+        descriptor.fetchLimit = candidateLimit
+        let candidates = store.fetch(descriptor)
         let rest = terms.dropFirst()
         return Array(candidates.filter { comment in rest.allSatisfy { comment.body.localizedStandardContains($0) } }.prefix(limit))
     }
@@ -156,7 +215,7 @@ final class SearchService {
     // MARK: - User metadata lists
 
     func favoritePosts(limit: Int? = nil) -> [Post] {
-        store.fetch(Self.descriptor(#Predicate<Post> { $0.isFavorite }, limit: limit))
+        store.fetch(LibraryListKind.favorites.descriptor(limit: limit))
     }
 
     func favoriteCreators() -> [Creator] {
@@ -164,15 +223,15 @@ final class SearchService {
     }
 
     func unreadPosts(limit: Int? = nil) -> [Post] {
-        store.fetch(Self.descriptor(#Predicate<Post> { !$0.isRead }, limit: limit))
+        store.fetch(LibraryListKind.unread.descriptor(limit: limit))
     }
 
     func readLaterPosts(limit: Int? = nil) -> [Post] {
-        store.fetch(Self.descriptor(#Predicate<Post> { $0.isReadLater }, limit: limit))
+        store.fetch(LibraryListKind.readLater.descriptor(limit: limit))
     }
 
     func memoPosts(limit: Int? = nil) -> [Post] {
-        store.fetch(Self.descriptor(#Predicate<Post> { $0.memo != "" }, limit: limit))
+        store.fetch(LibraryListKind.memo.descriptor(limit: limit))
     }
 
     func memoCreators() -> [Creator] {
@@ -180,10 +239,7 @@ final class SearchService {
     }
 
     func recentlyViewedPosts(limit: Int? = 50) -> [Post] {
-        var d = FetchDescriptor<Post>(predicate: #Predicate { $0.lastViewedAt != nil },
-                                      sortBy: [SortDescriptor(\.lastViewedAt, order: .reverse)])
-        d.fetchLimit = limit
-        return store.fetch(d)
+        store.fetch(LibraryListKind.recent.descriptor(limit: limit))
     }
 
     func offlinePosts() -> [Post] {
@@ -207,8 +263,10 @@ final class SearchService {
     func posts(taggedWith name: String) -> [Post] {
         let ids = postIDs(taggedWith: name)
         guard !ids.isEmpty else { return [] }
-        return store.fetch(FetchDescriptor<Post>(predicate: #Predicate { ids.contains($0.postID) },
-                                                 sortBy: [SortDescriptor(\.publishedAt, order: .reverse)]))
+        let published = ReaderPostQueries.publishedStatus
+        return store.fetch(FetchDescriptor<Post>(predicate: #Predicate {
+            ids.contains($0.postID) && ($0.remoteStatusRaw == nil || $0.remoteStatusRaw == published)
+        }, sortBy: [SortDescriptor(\.publishedAt, order: .reverse)]))
     }
 
     func tags(forPostID postID: String) -> [String] {

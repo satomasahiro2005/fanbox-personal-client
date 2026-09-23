@@ -27,13 +27,18 @@ struct LibrarySearchView: View {
                     prompt: Text("投稿・クリエイター・コメント・下書き・#タグ"))
         .modifier(LibraryTagSuggestions(query: $query))
         .task(id: query) {
-            if results != nil {
-                try? await Task.sleep(for: .milliseconds(250))
+            // An initial query (e.g. a tapped FANBOX tag) runs at once; typing is debounced.
+            if results != nil || query != initialQuery {
+                try? await Task.sleep(for: LibrarySearchDebounce.interval)
                 guard !Task.isCancelled else { return }
             }
             results = env.librarySearch.search(query)
         }
     }
+}
+
+enum LibrarySearchDebounce {
+    static let interval: Duration = .milliseconds(250)
 }
 
 /// Grouped search results as List sections. Tapping navigates via `AppRoute`.

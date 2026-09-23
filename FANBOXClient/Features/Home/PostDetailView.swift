@@ -32,6 +32,12 @@ struct PostDetailView: View {
     @State private var pendingLike: Bool?
     @State private var alertMessage: String?
     @State private var confirmClearCache = false
+    /// The automatic choice already triggered its one extra fetch (see `refresh`).
+    @State private var didRefetchForSelection = false
+    /// The user set 既読 / 未読 by hand on this screen: never overwritten automatically.
+    @State private var userChangedReadState = false
+    /// "Creator を開く": pushed on whichever NavigationStack hosts this screen (tab or the notification sheet).
+    @State private var showCreator = false
 
     init(postID: String) {
         self.postID = postID
@@ -76,6 +82,11 @@ struct PostDetailView: View {
         })
         .fullScreenCover(item: $viewerStart) { start in
             ImageViewer(items: imageItems, startIndex: start.index, postID: postID, accountID: selectedAccountID)
+        }
+        .navigationDestination(isPresented: $showCreator) {
+            if let creatorID = post?.creatorID {
+                CreatorDetailView(creatorID: creatorID)
+            }
         }
         .sheet(isPresented: $showPayment) {
             if let post {
@@ -157,6 +168,13 @@ struct PostDetailView: View {
                     }
                 } else if post.hasCachedBody {
                     Text("本文はありません").font(.subheadline).foregroundStyle(.secondary)
+                } else if PostAccountLogic.offersWebFallback(for: refreshError), let account = browserAccountID {
+                    PostDetailWebFallbackCard(error: refreshError, accountID: account) {
+                        env.web.openWeb(account: account, destination: .post(creatorID: post.creatorID, postID: postID),
+                                        purpose: .fallback(reason: "本文を取得できませんでした"))
+                    } retry: {
+                        Task { await refresh(force: true) }
+                    }
                 } else {
                     Text("本文はまだ取得されていません").font(.subheadline).foregroundStyle(.secondary)
                     Button("本文を取得") { Task { await refresh(force: true) } }
@@ -225,9 +243,25 @@ struct PostDetailView: View {
                 Button("再試行") { Task { await refresh(force: true) } }
                     .buttonStyle(.borderedProminent)
                     .accessibilityIdentifier("postRetryButton")
+                if PostAccountLogic.offersWebFallback(for: refreshError), let account = browserAccountID,
+                   let creatorID = knownCreatorIDForMissingPost {
+                    Button("Web で開く") {
+                        env.web.openWeb(account: account, destination: .post(creatorID: creatorID, postID: postID),
+                                        purpose: .fallback(reason: "投稿を取得できませんでした"))
+                    }
+                    .accessibilityIdentifier("postOpenWebFallback")
+                }
             }
         }
         .padding()
+    }
+
+    /// Creator of a post that is not local yet, when a notification mentioned it (needed for the web URL).
+    private var knownCreatorIDForMissingPost: String? {
+        let id: String? = postID
+        var descriptor = FetchDescriptor<NotificationEvent>(predicate: #Predicate { $0.postID == id && $0.creatorID != nil })
+        descriptor.fetchLimit = 1
+        return env.store.fetch(descriptor).first?.creatorID
     }
 
     // MARK: - Toolbar
@@ -287,6 +321,7 @@ struct PostDetailView: View {
     private func actionMenuItems(_ post: Post) -> some View {
         Section {
             Button {
+                userChangedReadState = true
                 HomePostUserActions.setRead(post, !post.isRead, store: env.store)
             } label: {
                 Label(post.isRead ? "未読にする" : "既読にする", systemImage: post.isRead ? "envelope.badge" : "envelope.open")
@@ -310,7 +345,10 @@ struct PostDetailView: View {
         Section {
             if post.offlineState != .saved {
                 Button {
-                    Task { await env.offline.save(postID: postID) }
+                    Task {
+                        let summary = await env.offline.save(postID: postID)
+                        if let failure = summary.failureReason { alertMessage = failure.message }
+                    }
                 } label: {
                     Label(env.offline.activeSaves.contains(postID) ? "Offline 保存中…" : "Offline 保存", systemImage: "arrow.down.circle")
                 }
@@ -344,7 +382,7 @@ struct PostDetailView: View {
                 Label("Account 切り替え", systemImage: "person.2.circle")
             }
             Button {
-                env.router.open(.creator(creatorID: post.creatorID))
+                showCreator = true
             } label: {
                 Label("Creator を開く", systemImage: "person.crop.square")
             }
@@ -370,10 +408,7 @@ struct PostDetailView: View {
     private var imageBlocks: [PostBlock] { blocks.filter { $0.kind == .image } }
 
     private var imageItems: [ImageViewerItem] {
-        imageBlocks.map {
-            ImageViewerItem(id: $0.key, thumbnailURL: $0.thumbnailURL, displayURL: $0.displayURL, originalURL: $0.originalURL,
-                            width: $0.width, height: $0.height)
-        }
+        imageBlocks.map(ImageViewerItem.init(block:))
     }
 
     private func renderContext(_ post: Post) -> PostDetailRenderContext {
@@ -439,20 +474,29 @@ struct PostDetailView: View {
         selectedAccountID = PostAccountLogic.effectiveAccountID(override: accountOverride, best: best, enabledAccountIDs: enabled)
     }
 
-    /// First appearance: pick the account, mark read, fetch only what is missing. Re-appearing (e.g. back from comments)
-    /// only refreshes the read timestamp.
+    /// First appearance: pick the account, mark read, fetch only what is missing — text first: the body, then the
+    /// comment preview, and only then (detached) the auto-save media. Re-appearing (e.g. back from comments) only
+    /// refreshes the history timestamp, so a manual 未読 survives navigation.
     private func start() async {
-        markViewed()
-        guard !didStart else { return }
+        guard !didStart else {
+            touchLastViewed()
+            return
+        }
         resolveSelectedAccount()
         didStart = true
-        await refresh(force: false)
         markViewed()
-        await env.offline.postViewed(postID: postID)
+        await refresh(force: false)
+        markViewed()        // the post may only exist locally after the refresh
         await prefetchCommentsIfNeeded()
+        // Media never gates text (SPEC §3.3 / §46): the auto-save download runs on its own.
+        let offline = env.offline
+        let id = postID
+        Task { await offline.postViewed(postID: id) }
     }
 
     /// Fetches the body when needed (or when forced by pull-to-refresh / retry). Never deletes cached content.
+    /// Automatic mode passes no account so the engine walks every account that may read the post (SPEC §8); a manual
+    /// choice is fetched with exactly that account.
     private func refresh(force: Bool) async {
         guard !isRefreshing else {
             refreshAgain = (refreshAgain ?? false) || force
@@ -470,14 +514,26 @@ struct PostDetailView: View {
         }
         guard needed else { return }
         isRefreshing = true
+        let override = accountOverride
         let error = await RequestContext.$priority.withValue(.interactiveRead) {
-            await env.sync.refreshPost(postID: postID, accountID: selectedAccountID, priority: .interactiveRead)
+            await env.sync.refreshPost(postID: postID, accountID: override, priority: .interactiveRead)
         }
         isRefreshing = false
         refreshError = error
-        if error == nil, accountOverride == nil {
-            // A fresh body may change the automatic choice (e.g. access info arrived).
+        if accountOverride == nil {
+            // A fresh body / access info may change the automatic choice.
+            let before = selectedAccountID
             resolveSelectedAccount()
+            // Safety net: the choice moved to an account whose body is not local yet (and that may read it) → fetch once
+            // more, so the screen never shows a paywall next to a selected account that could read the post.
+            if refreshAgain == nil, !didRefetchForSelection, let now = selectedAccountID, now != before,
+               PostAccountLogic.needsFetchAfterSelectionChange(
+                   selectedAccountID: now, cachedAccountID: env.store.post(id: postID)?.detailAccountID,
+                   hasCachedBody: env.store.post(id: postID)?.hasCachedBody ?? false,
+                   selectedCanView: env.store.postAccesses(postID: postID).first { $0.accountID == now }?.canView) {
+                didRefetchForSelection = true
+                refreshAgain = false
+            }
         }
         if let again = refreshAgain {
             refreshAgain = nil
@@ -488,17 +544,25 @@ struct PostDetailView: View {
     /// Comments are small and high priority (SPEC §46): fetch them once when the post says there are some but none are local.
     private func prefetchCommentsIfNeeded() async {
         guard let local = env.store.post(id: postID), local.commentCount > 0, env.store.comments(postID: postID).isEmpty else { return }
+        let override = accountOverride
         _ = await RequestContext.$priority.withValue(.interactiveRead) {
-            await env.sync.refreshComments(postID: postID, accountID: selectedAccountID, priority: .interactiveRead)
+            await env.sync.refreshComments(postID: postID, accountID: override, priority: .interactiveRead)
         }
     }
 
+    /// First view: mark read (unless the user chose 既読 / 未読 here) and record the history timestamp.
     private func markViewed() {
         guard let local = env.store.post(id: postID) else { return }
-        if !local.isRead {
+        if !local.isRead, !userChangedReadState {
             local.isRead = true
             local.readAt = .now
         }
+        local.lastViewedAt = .now
+        env.store.save()
+    }
+
+    private func touchLastViewed() {
+        guard let local = env.store.post(id: postID) else { return }
         local.lastViewedAt = .now
         env.store.save()
     }

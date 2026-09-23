@@ -37,20 +37,33 @@ enum LibraryListKind: String, Hashable, CaseIterable, Identifiable {
         }
     }
 
+    /// Reader-visible posts only (my own FANBOX drafts / scheduled posts never appear). "未読" follows the Home feed:
+    /// unread posts from the timeline (supported / followed creators), not every post fetched via a creator page or link.
     @MainActor
     func descriptor(limit: Int?) -> FetchDescriptor<Post> {
+        let published = ReaderPostQueries.publishedStatus
         switch self {
         case .favorites:
-            return SearchService.descriptor(#Predicate<Post> { $0.isFavorite }, limit: limit)
+            return SearchService.descriptor(#Predicate<Post> {
+                $0.isFavorite && ($0.remoteStatusRaw == nil || $0.remoteStatusRaw == published)
+            }, limit: limit)
         case .unread:
-            return SearchService.descriptor(#Predicate<Post> { !$0.isRead }, limit: limit)
+            return SearchService.descriptor(#Predicate<Post> {
+                !$0.isRead && ($0.isFromSupportedCreator || $0.isFromFollowedCreator)
+                    && ($0.remoteStatusRaw == nil || $0.remoteStatusRaw == published)
+            }, limit: limit)
         case .readLater:
-            return SearchService.descriptor(#Predicate<Post> { $0.isReadLater }, limit: limit)
+            return SearchService.descriptor(#Predicate<Post> {
+                $0.isReadLater && ($0.remoteStatusRaw == nil || $0.remoteStatusRaw == published)
+            }, limit: limit)
         case .memo:
-            return SearchService.descriptor(#Predicate<Post> { $0.memo != "" }, limit: limit)
+            return SearchService.descriptor(#Predicate<Post> {
+                $0.memo != "" && ($0.remoteStatusRaw == nil || $0.remoteStatusRaw == published)
+            }, limit: limit)
         case .recent:
-            var d = FetchDescriptor<Post>(predicate: #Predicate { $0.lastViewedAt != nil },
-                                          sortBy: [SortDescriptor(\.lastViewedAt, order: .reverse)])
+            var d = FetchDescriptor<Post>(predicate: #Predicate {
+                $0.lastViewedAt != nil && ($0.remoteStatusRaw == nil || $0.remoteStatusRaw == published)
+            }, sortBy: [SortDescriptor(\.lastViewedAt, order: .reverse)])
             d.fetchLimit = limit
             return d
         }
@@ -117,6 +130,7 @@ struct LibraryPostRow: View {
                     switch post.offlineState {
                     case .saved: PillLabel(text: "Offline", systemImage: "arrow.down.circle.fill", tint: .green)
                     case .autoSaved: PillLabel(text: "自動保存", systemImage: "arrow.down.circle", tint: .teal)
+                    case .ruleSaved: PillLabel(text: "最近 N 件", systemImage: "arrow.down.circle", tint: .mint)
                     case .none: EmptyView()
                     }
                 }

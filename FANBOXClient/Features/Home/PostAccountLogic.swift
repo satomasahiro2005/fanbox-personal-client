@@ -47,6 +47,35 @@ enum PostAccountLogic {
         return false
     }
 
+    /// After a fetch in automatic mode the choice moved to `selectedAccountID`: fetch again when that account's body
+    /// is not the local one and the account is not known to be restricted.
+    static func needsFetchAfterSelectionChange(selectedAccountID: String, cachedAccountID: String?, hasCachedBody: Bool,
+                                               selectedCanView: Bool?) -> Bool {
+        guard selectedCanView != false else { return false }
+        return !hasCachedBody || cachedAccountID != selectedAccountID
+    }
+
+    /// A failed body fetch offers the account-aware WebView (SPEC §40 fallback) when FANBOX answered but the answer
+    /// could not be used natively: edge / bot block, forbidden, unknown schema, server error, unsupported operation.
+    /// Offline, policy blocks, cancellation and plain transport errors would fail in the WebView as well.
+    static func offersWebFallback(for error: RemoteError?) -> Bool {
+        guard let error else { return false }
+        switch error {
+        case .offline, .cancelled, .blockedByPolicy, .network: return false
+        default: return true
+        }
+    }
+
+    /// Comment operations (delete, …) that the API refused, does not support or answered unreadably fall back to the
+    /// WebView (SPEC §21 "不安定な操作は Account-aware WebView へフォールバックしてよい"). Connectivity problems and
+    /// "already gone" do not.
+    static func commentOperationOffersWeb(_ error: RemoteError) -> Bool {
+        switch error {
+        case .offline, .cancelled, .blockedByPolicy, .network, .rateLimited, .notFound: return false
+        default: return true
+        }
+    }
+
     /// Nobody among my accounts can view the paid body (→ "支援が必要です").
     static func isRestricted(feeRequired: Int, accessAccountIDs: [String], hasBlocks: Bool) -> Bool {
         feeRequired > 0 && accessAccountIDs.isEmpty && !hasBlocks
