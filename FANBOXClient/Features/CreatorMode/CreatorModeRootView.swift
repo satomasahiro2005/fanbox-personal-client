@@ -51,7 +51,7 @@ private struct CreatorModeAccountView: View {
         _drafts = Query(filter: #Predicate<Draft> { $0.accountID == accountID }, sort: [SortDescriptor(\.updatedAt, order: .reverse)])
         _snapshots = Query(filter: #Predicate<CreatorDashboardSnapshot> { $0.accountID == accountID },
                            sort: [SortDescriptor(\.month, order: .reverse)])
-        _ownPostComments = Query(filter: #Predicate<Comment> { $0.isOnOwnPost && !$0.isDeleted })
+        _ownPostComments = Query(filter: #Predicate<Comment> { $0.isOnOwnPost && !$0.isRemoved })
         _fans = Query(filter: #Predicate<Fan> { $0.accountID == accountID })
         _plans = Query(filter: #Predicate<Plan> { $0.creatorID == creatorID }, sort: [SortDescriptor(\.fee)])
         _syncStates = Query(filter: #Predicate<SyncState> { $0.accountID == accountID })

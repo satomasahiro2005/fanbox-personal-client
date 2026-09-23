@@ -71,7 +71,7 @@ private struct CreatorCommentsList: View {
         let creatorID = account.creatorID ?? ""
         self.accountID = accountID
         self.creatorID = creatorID
-        _comments = Query(filter: #Predicate<Comment> { $0.isOnOwnPost && !$0.isDeleted }, sort: [SortDescriptor(\.createdAt, order: .reverse)])
+        _comments = Query(filter: #Predicate<Comment> { $0.isOnOwnPost && !$0.isRemoved }, sort: [SortDescriptor(\.createdAt, order: .reverse)])
         _posts = Query(filter: #Predicate<Post> { $0.creatorID == creatorID })
         _pendingReplies = Query(filter: #Predicate<OutgoingComment> { $0.accountID == accountID })
         let resource = SyncResource.creatorComments.rawValue
