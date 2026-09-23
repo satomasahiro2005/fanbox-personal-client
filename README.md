@@ -1,10 +1,26 @@
-<p align="center">
-  <img src="docs/icon.png" width="128" height="128" alt="FANBOX Personal Client app icon">
+<div align="center">
+
+<img src="docs/icon.png" width="104" alt="">
+
+# FANBOX Personal Client
+
+**Several pixivFANBOX accounts, one local-first iOS app**
+
+![iOS](https://img.shields.io/badge/iOS-26%2B-000000?logo=apple&logoColor=white)
+![Swift](https://img.shields.io/badge/Swift-SwiftUI%20%2B%20SwiftData-F05138?logo=swift&logoColor=white)
+![Dependencies](https://img.shields.io/badge/dependencies-none-2DD4BF)
+![License](https://img.shields.io/badge/license-all%20rights%20reserved-8B5CF6)
+
+<p>
+  <img src="docs/shot-home.png" width="23%" alt="Home: one timeline across accounts">
+  <img src="docs/shot-post.png" width="23%" alt="Post detail rendered natively">
+  <img src="docs/shot-notifications.png" width="23%" alt="Merged notification inbox">
+  <img src="docs/shot-support.png" width="23%" alt="Support dashboard">
 </p>
 
-<h1 align="center">FANBOX Personal Client</h1>
+<sub>Screenshots use the built-in demo accounts. All creators and posts in them are fictional.</sub>
 
-<p align="center">A local-first iOS client that combines several pixivFANBOX accounts in one app.</p>
+</div>
 
 ---
 
@@ -45,7 +61,7 @@ Not included on purpose: bulk downloading, full-history crawling, and card payme
 
 ## Requirements
 
-- macOS with **Xcode 27** (iOS 26 SDK)
+- macOS with **Xcode 27** (iOS 27 SDK; the deployment target is iOS 26)
 - An iPhone or simulator running **iOS 26** or later
 - **[XcodeGen](https://github.com/yonaskolb/XcodeGen)** (`brew install xcodegen`). The Xcode project is generated from
   `project.yml` and is not committed.
@@ -84,6 +100,12 @@ Two launch arguments help with development and UI checks:
 |---|---|
 | `-demoData` | Adds three demo accounts ("Demo A", "Demo B", "Demo Creator") when there are no accounts. Demo accounts use `DemoRemoteDataSource`, which returns local fixture data and never touches the network. |
 | `-uiTesting` | Uses an in-memory SwiftData store, an in-memory credential store and a throwaway `UserDefaults` suite. |
+| `-initialTab <tab>` | Starts on a tab: `home`, `creators`, `support`, `creatorMode` or `library`. |
+| `-openRoute <route>` | Pushes a screen at launch, e.g. `post:demo-post-101`, `creator:<id>`, `comments:<postID>`, `supportHistory`. |
+| `-openSheet <sheet>` | Opens `settings` or `notifications` at launch. |
+
+`scripts/shot.sh <out.png> [arguments]` launches the demo app with these arguments on a separate simulator and saves a
+screenshot. The README screenshots were taken this way.
 
 In Xcode, set them under *Scheme > Run > Arguments Passed On Launch*. Previews and unit tests use
 `AppEnvironment.preview(seedDemo:)`, which builds the same demo setup in memory.
@@ -111,6 +133,23 @@ Local database  <---- normalized upserts ----  FanboxAPIClient -> HTTPClient (pe
 The app starts from the local database. Network work begins after the first frame, writes through `LocalStore`, and
 the views update through `@Query`. Differential sync reads newest-first and stops at the first known post. Network
 errors never delete cached data.
+
+Notifications are treated as a trigger to fetch text, not as something to look at later. The body is in the
+local database before the iOS notification appears, so opening it does not start an HTTP request:
+
+```text
+FANBOX event
+  | foreground polling / launch refresh / BGAppRefreshTask / optional silent push
+  v
+event detected --> text prefetch (comment thread, post body, おたより)   priority: notificationPrefetch
+  |
+  v
+local database --> iOS notification (body already readable, inline 返信 action)
+  |
+  v
+tap --> post / thread rendered from the local database
+reply --> queued locally --> sent as interactiveWrite, ahead of any media transfer
+```
 
 Details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
