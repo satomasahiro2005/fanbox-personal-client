@@ -163,6 +163,13 @@ struct AccountWebView: UIViewRepresentable {
         configuration.allowsInlineMediaPlayback = true
         configuration.dataDetectorTypes = []
         configuration.defaultWebpagePreferences.preferredContentMode = .mobile
+        if research.capturesBodies {
+            // Research Mode: record the page's own API calls (structure only), e.g. the post editor's upload endpoint.
+            configuration.userContentController.add(
+                WebPageRequestCaptureHandler(accountID: accountID, research: research), contentWorld: .page,
+                name: WebPageRequestCapture.handlerName)
+            configuration.userContentController.addUserScript(WebPageRequestCapture.userScript)
+        }
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
         webView.uiDelegate = context.coordinator
@@ -182,6 +189,7 @@ struct AccountWebView: UIViewRepresentable {
 
     static func dismantleUIView(_ uiView: WKWebView, coordinator: AccountWebCoordinator) {
         uiView.stopLoading()
+        uiView.configuration.userContentController.removeAllScriptMessageHandlers()
         uiView.navigationDelegate = nil
         uiView.uiDelegate = nil
         coordinator.controller?.closePopup()

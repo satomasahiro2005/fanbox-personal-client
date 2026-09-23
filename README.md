@@ -91,6 +91,10 @@ API Inspector) is the tool for it. The areas below are expected to need verifica
 | Derived events | 決済要確認 from `hasUnpaidPayments` / `payment.listUnpaid`, 新規支援 from the fan list, 支援状態変化 from the supporting-plan list | Support State, notification inbox |
 | Background | When iOS runs `BGAppRefreshTask`, and what the native transport can fetch in the background | Scheduler, Requests |
 
+Research Mode can also record the API calls FANBOX's own pages make inside the account web view (structure only:
+method, redacted URL, status, field names). This is how the post editor's media upload endpoint, which the research
+could not find (docs/API.md §15.1), can be read from your own session.
+
 ## Known limitations
 
 **Creator Mode with real FANBOX accounts.** The FANBOX write API is reconstructed from public sources and has not

@@ -1540,7 +1540,8 @@ HTTP 400 { "error": "general_error" }
 - **Limits (Help 360011057793, updated 2026-09-17):**
   - Images: jpg, jpeg, png, gif. Audio: mp3, wav, flac. Video: mp4, mov, avi. Other: zip, pdf, txt, psd, clip.
   - Up to **300 MB** per file. Post covers and creator-page covers up to **30 MB**.
-- **App policy:** the Upload Queue (SPEC §20) prepares media locally (resize and convert). The actual upload runs in the WebView editor at `/manage/posts/{postId}` until the endpoint has been captured from the user's **own** browser session in Research Mode (Web Bridge network observation).
+- **App policy:** the Upload Queue (SPEC §20) prepares media locally (resize and convert). The actual upload runs in the WebView editor at `/manage/posts/{postId}` until the endpoint has been captured from the user's **own** browser session in Research Mode.
+- **How to capture it:** turn on Research Mode, open the post editor through the app (Creator → Web で投稿管理, or a draft's "Web エディタで開く"), and add an image. `WebPageRequestCapture` (Core/Web/WebPageRequestCapture.swift) records every `fetch` / `XMLHttpRequest` the FANBOX page makes: method, redacted URL, status, content type, form field **names**, file part type and size, and the top-level key names of a JSON answer. No values or bodies are recorded. The entries appear under Research Mode → Requests with `# transport: web-page`.
 - **Sources:** danbooru (url/fanbox.rb, storage paths), Pixiv-Shaft (FanboxImage and FanboxFile fields), Help 360011057793.
 
 ---
