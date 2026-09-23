@@ -68,6 +68,8 @@ private struct CreatorFansList: View {
     @Query private var syncStates: [SyncState]
 
     @State private var query = ""
+    /// Refresh only on the first appearance (returning from a pushed screen does not refetch; pull-to-refresh does).
+    @State private var didInitialLoad = false
     @State private var planFilter: CreatorFanPlanFilter = .all
     @State private var stateFilter: FanState?
     @State private var syncError: RemoteError?
@@ -177,7 +179,11 @@ private struct CreatorFansList: View {
                 .accessibilityIdentifier("creatorFanFilterMenu")
             }
         }
-        .task(id: accountID) { await refresh(reason: .onDemand) }
+        .task(id: accountID) {
+            guard !didInitialLoad else { return }
+            didInitialLoad = true
+            await refresh(reason: .onDemand)
+        }
         .refreshable { await refresh(reason: .userRefresh) }
     }
 

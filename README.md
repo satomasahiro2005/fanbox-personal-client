@@ -52,12 +52,31 @@ The full specification (in Japanese) is in [SPEC.md](SPEC.md).
 | Notifications | One inbox for all accounts, with duplicates merged. When an event is detected, the app fetches the post body or comment thread before it posts the iOS notification. A tap then opens the post from the local database. Replies can be written from the notification and are queued offline. |
 | Low data | Automatic / Normal / Low Data / Extreme / Offline modes. A text-first scheduler sends comment posts and interactive reads before any media and pauses media transfers while they run. |
 | Support | Supports grouped by creator and by account, with monthly totals, this month's actual payments, next month's planned total, a locally observed support history and anomaly flags. Payment profiles (nickname, brand, last four digits, memo) can be linked to each support. Payment itself always happens in the account-aware web view. |
-| Creator mode | Dashboard, managed posts, local drafts with a block editor, a media upload queue, comments, fans and plans for accounts that own a creator page. |
+| Creator mode | Dashboard, managed posts, local drafts with a block editor, a media upload queue, comments, fans and plans for accounts that own a creator page. See the limitations below. |
 | Library | Local full-text search, favorites, read later, local tags and memos (never sent to FANBOX), offline saving with a size-limited media cache. |
 | Research mode | Redacted request / response / navigation logs, an API schema inspector that flags new or missing fields, and account, sync, support and scheduler state. |
 
 Not included on purpose: bulk downloading, full-history crawling, and card payment handling inside the app
 (see [SPEC.md §3.7](SPEC.md) and [docs/SECURITY.md](docs/SECURITY.md)).
+
+### Creator mode limitations (real FANBOX accounts)
+
+The FANBOX write API used by Creator mode is reconstructed from public sources and **has not been verified against the
+live service** (see [docs/API.md](docs/API.md) §14–§15). With a real account:
+
+- **Native sends cover text and headings only.** Image and file uploads, new link cards, new embeds, the R-18 flag and
+  plan-specific gating (FANBOX gates by minimum fee) have no documented request shape. The editor marks these blocks
+  "Web" before you publish. Sending saves the text first as a FANBOX draft, then hands off to the account's web editor
+  with an ordered checklist and the app's resized / converted images exported for the web file picker. The demo
+  account supports every block natively, so you can try the full flow offline.
+- **Post Edit round-trip.** Unchanged paragraphs are sent back as they were, including bold, links and empty spacing
+  paragraphs. Media, link cards and embeds that are already on the post are kept by their ids. An edited paragraph
+  keeps the styles outside the edited text; the app asks before it sends a change that would drop any. Posts the app
+  cannot write back faithfully (non-article posts, scheduled posts, unknown block types) are edited in the web editor.
+  If FANBOX does not report the tags or the comment permission, the app asks before it overwrites them.
+- **No accidental unpublish or overwrite.** Updating a live post keeps it published. Taking it down to a draft needs
+  explicit confirmation. Before each update the app reads the post again and stops if it changed elsewhere, for example
+  in the web editor, so local content never overwrites that change.
 
 ## Requirements
 

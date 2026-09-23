@@ -86,6 +86,9 @@ final class AppEnvironment {
             if case .payment = request.purpose {
                 Task { await self.sync.sync(.supports, accountID: request.accountID, reason: .afterWrite) }
             }
+            if CreatorWebReconcile.needsManagedPostsResync(request) {
+                Task { await self.sync.sync(.creatorPosts, accountID: request.accountID, reason: .afterWrite) }
+            }
         }
     }
 

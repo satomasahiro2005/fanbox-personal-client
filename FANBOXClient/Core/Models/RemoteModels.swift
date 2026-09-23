@@ -53,6 +53,8 @@ struct RemotePostSummary: Sendable, Hashable {
     /// True when THIS account cannot view the body.
     var isRestricted: Bool
     var hasAdultContent: Bool
+    /// Creator Mode listing only (my own managed posts): FANBOX-side status. nil for reader listings.
+    var remoteStatus: RemotePostStatus?
 
     init(id: String, creatorID: String, creatorName: String, creatorIconURL: String? = nil, pixivUserID: String? = nil, title: String,
          excerpt: String = "", type: PostType = .unknown, feeRequired: Int = 0, coverImageURL: String? = nil, publishedAt: Date,
@@ -299,6 +301,12 @@ struct RemoteEditablePost: Sendable, Hashable {
     var hasAdultContent: Bool
     var publishedAt: Date?
     var updatedAt: Date?
+    /// Post type. Only article bodies (blocks) can be written back by a block-based update.
+    var postType: PostType = .article
+    /// Who may comment. nil = not reported by the service.
+    var commentPermission: CommentPermission? = nil
+    /// False when the service did not report the tags at all (`tags` is then empty but may not be).
+    var tagsKnown: Bool = true
 }
 
 struct RemoteDraftBlock: Sendable, Hashable {
@@ -308,6 +316,10 @@ struct RemoteDraftBlock: Sendable, Hashable {
     var url: String?
     var embedProvider: String?
     var embedContentID: String?
+    /// Text styles / links (offsets relative to `text`). Empty = plain text.
+    var styles: [RemoteTextStyle] = []
+    /// Send a text block as ONE paragraph even when it contains line breaks (an unchanged imported paragraph).
+    var keepsLineBreaks: Bool = false
 }
 
 /// Payload to create / update a post on FANBOX.
@@ -320,6 +332,8 @@ struct RemotePostDraft: Sendable, Hashable {
     var blocks: [RemoteDraftBlock]
     /// true = publish, false = save as FANBOX draft.
     var publish: Bool
+    /// Comment permission to keep. nil = unknown (the adapter uses its default for the fee).
+    var commentPermission: CommentPermission? = nil
 }
 
 struct RemoteUploadResult: Sendable, Hashable {

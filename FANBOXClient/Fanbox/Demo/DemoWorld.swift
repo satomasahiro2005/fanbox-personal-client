@@ -328,7 +328,14 @@ actor DemoWorld {
         let v = try creatorViewer(account)
         let list = DemoWorld.sortedNewestFirst(posts.values.filter { $0.creatorID == DemoFixtures.selfCreatorID },
                                                key: { ($0.sortDate, $0.id) })
-        return try summaryPage(list, viewer: v, cursor: cursor)
+        var page = try summaryPage(list, viewer: v, cursor: cursor)
+        // Managed listings carry the post status (drafts must not look published).
+        page.items = page.items.map { item in
+            var item = item
+            item.remoteStatus = posts[item.id]?.status
+            return item
+        }
+        return page
     }
 
     func editablePost(id: String, account: AccountContext) throws -> RemoteEditablePost {
@@ -336,7 +343,7 @@ actor DemoWorld {
         guard let post = posts[id], post.creatorID == DemoFixtures.selfCreatorID else { throw RemoteError.notFound }
         return RemoteEditablePost(id: post.id, title: post.title, feeRequired: post.feeRequired, planID: post.planID, status: post.status,
                                   blocks: post.blocks, tags: post.tags, hasAdultContent: post.hasAdultContent,
-                                  publishedAt: post.publishedAt, updatedAt: post.updatedAt)
+                                  publishedAt: post.publishedAt, updatedAt: post.updatedAt, postType: post.type)
     }
 
     func createPost(_ draft: RemotePostDraft, account: AccountContext) throws -> String {
@@ -431,7 +438,8 @@ actor DemoWorld {
         let postCount = posts.values.filter {
             $0.creatorID == DemoFixtures.selfCreatorID && $0.isPublished && ($0.publishedAt ?? .distantPast) >= monthStart
         }.count
-        return RemoteCreatorDashboard(month: SupportAnalyzer.monthKey(anchor, calendar: calendar), supporterCount: supporting.count,
+        // Keyed like FANBOX: the JST month (CreatorMonth), whatever the device time zone.
+        return RemoteCreatorDashboard(month: CreatorMonth.key(anchor), supporterCount: supporting.count,
                                       earnings: supporting.compactMap(\.fee).reduce(0, +), postCount: postCount, commentCount: nil)
     }
 
@@ -634,9 +642,9 @@ actor DemoWorld {
     private func makeBlock(_ draft: RemoteDraftBlock) -> RemoteBlock {
         switch draft.kind {
         case .text:
-            return RemoteBlock(kind: .paragraph, text: draft.text)
+            return RemoteBlock(kind: .paragraph, text: draft.text, styles: draft.styles)
         case .header:
-            return RemoteBlock(kind: .header, text: draft.text)
+            return RemoteBlock(kind: .header, text: draft.text, styles: draft.styles)
         case .image:
             if let id = draft.mediaID, let known = mediaIndex[id] { return known }
             let seed = draft.mediaID ?? "image-\(sequence)"

@@ -220,6 +220,10 @@ struct FanboxRemoteDataSource: RemoteDataSource {
 
     // MARK: - Creator Mode
 
+    /// Native writes cover text / header blocks and media already on the post (docs/API.md §14.4 "App scope"); uploads,
+    /// new link cards / embeds, the R-18 flag and plan ids have no documented request shape (§14.4 / §15).
+    var draftCapabilities: DraftCapabilities { nativePostWritesEnabled ? .textOnly : .webOnly }
+
     /// post.listManaged returns the whole list at once (no paging); a non-nil cursor yields an empty page.
     func managedPosts(account: AccountContext, cursor: String?) async throws -> RemotePage<RemotePostSummary> {
         guard cursor == nil else { return RemotePage(items: []) }
@@ -249,8 +253,9 @@ struct FanboxRemoteDataSource: RemoteDataSource {
             try await sendUpdate(postID: postID, draft: draft, token: token, existing: FanboxPostUpdateForm.ExistingMedia(), account: account)
         } catch {
             // The empty draft exists on FANBOX; never delete it automatically (the update may have been applied).
+            // The id is handed back so the caller stores it and retries with post.update (never a second post.create).
             AppLog.creator.error("post.update after post.create failed")
-            throw RemoteError.invalidRequest("FANBOX に空の下書き (ID: \(postID)) を作成しましたが、本文の保存に失敗しました。Web で確認してください")
+            throw RemotePostCreatedPartially(postID: postID, underlying: FanboxAPIClient.normalize(error))
         }
         return postID
     }
@@ -259,6 +264,7 @@ struct FanboxRemoteDataSource: RemoteDataSource {
     func updatePost(id: String, _ draft: RemotePostDraft, account: AccountContext) async throws {
         guard nativePostWritesEnabled else { throw RemoteError.unsupported(operation: "updatePost") }
         _ = try requireCreator(account)
+        try FanboxPostUpdateForm.validateBasics(draft)
         let editable = try await api.send(.getEditable(postID: id), as: FanboxEditablePostBody.self, accountID: account.accountID)
         let existing = FanboxPostUpdateForm.ExistingMedia(editable: editable.post)
         _ = try FanboxPostUpdateForm.blocksJSON(draft.blocks, existing: existing)

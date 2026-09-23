@@ -100,14 +100,13 @@ final class HomeAccountLogicTests: XCTestCase {
     }
 
     func testEmbedLinks() {
-        XCTAssertEqual(PostDetailEmbedLink.url(provider: "youtube", contentID: "abc123", explicitURL: nil)?.absoluteString,
-                       "https://www.youtube.com/watch?v=abc123")
-        XCTAssertEqual(PostDetailEmbedLink.url(provider: "vimeo", contentID: "42", explicitURL: nil)?.absoluteString, "https://vimeo.com/42")
-        XCTAssertEqual(PostDetailEmbedLink.url(provider: "youtube", contentID: "x", explicitURL: "https://e.example/v")?.absoluteString,
-                       "https://e.example/v")
-        XCTAssertNil(PostDetailEmbedLink.url(provider: "unknown", contentID: "x", explicitURL: nil))
-        XCTAssertNil(PostDetailEmbedLink.url(provider: "youtube", contentID: "  ", explicitURL: nil))
-        XCTAssertEqual(PostDetailEmbedLink.providerName("youtube"), "YouTube")
+        // The UI only follows the adapter-provided link (SPEC §43); provider vocabulary lives in Core / the adapter.
+        XCTAssertEqual(PostDetailEmbedLink.url(explicitURL: "https://e.example/v")?.absoluteString, "https://e.example/v")
+        XCTAssertNil(PostDetailEmbedLink.url(explicitURL: nil))
+        XCTAssertNil(PostDetailEmbedLink.url(explicitURL: "not a url"))
+        XCTAssertEqual(DraftEmbedProvider.displayName(forKey: "youtube"), "YouTube")
+        XCTAssertEqual(DraftEmbedProvider.displayName(forKey: "x"), DraftEmbedProvider.twitter.displayName)
+        XCTAssertNil(DraftEmbedProvider.displayName(forKey: "unknown"))
         XCTAssertTrue(PostDetailEmbedLink.isFanboxHost(URL(string: "https://www.fanbox.cc/@a/posts/1")!))
         XCTAssertTrue(PostDetailEmbedLink.isFanboxHost(URL(string: "https://creator.fanbox.cc/posts/1")!))
         XCTAssertFalse(PostDetailEmbedLink.isFanboxHost(URL(string: "https://notfanbox.cc/")!))
