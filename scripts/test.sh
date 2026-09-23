@@ -25,7 +25,7 @@ trap 'rmdir /tmp/fanbox-sim-lock 2>/dev/null' EXIT INT TERM
 DEVICE=${SIM_DEVICE:-iPhone 17 Pro}
 LOG=$(mktemp -t fanbox-test)
 xcodebuild -project FANBOXClient.xcodeproj -scheme FANBOXClient \
-  -destination "platform=iOS Simulator,name=$DEVICE" -jobs ${JOBS:-3} \
+  -destination "platform=iOS Simulator,name=$DEVICE" -jobs ${JOBS:-2} \
   COMPILER_INDEX_STORE_ENABLE=NO test "$@" > "$LOG" 2>&1
 STATUS=$?
 grep -E '(error|warning): ' "$LOG" | grep -E '/FANBOXClient(Tests|UITests)?/' | sort -u | head -80

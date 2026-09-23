@@ -8,7 +8,7 @@ xcodegen generate --quiet || exit 1
 ACTION=${1:-build}
 LOG=$(mktemp -t fanbox-build)
 xcodebuild -project FANBOXClient.xcodeproj -scheme FANBOXClient \
-  -destination 'generic/platform=iOS Simulator' -jobs ${JOBS:-3} \
+  -destination 'generic/platform=iOS Simulator' -jobs ${JOBS:-2} \
   COMPILER_INDEX_STORE_ENABLE=NO $ACTION > "$LOG" 2>&1
 STATUS=$?
 grep -E '(error|warning): ' "$LOG" | grep -E '/FANBOXClient(Tests|UITests)?/' | sort -u | head -${MAX_LINES:-120}
