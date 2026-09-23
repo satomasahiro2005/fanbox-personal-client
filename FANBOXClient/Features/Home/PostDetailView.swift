@@ -75,7 +75,7 @@ struct PostDetailView: View {
             return .systemAction
         })
         .fullScreenCover(item: $viewerStart) { start in
-            PostDetailImageViewerCover(items: imageItems, startIndex: start.index, postID: postID, accountID: selectedAccountID)
+            ImageViewer(items: imageItems, startIndex: start.index, postID: postID, accountID: selectedAccountID)
         }
         .sheet(isPresented: $showPayment) {
             if let post {
@@ -85,7 +85,7 @@ struct PostDetailView: View {
             }
         }
         .sheet(isPresented: $showTagMemo) {
-            PostTagMemoSheet(postID: postID)
+            TagMemoEditorView(postID: postID)
         }
         .confirmationDialog("この投稿のキャッシュ (画像・添付) を削除しますか？", isPresented: $confirmClearCache, titleVisibility: .visible) {
             Button("Cache 削除", role: .destructive) { env.media.clearCache(postID: postID) }
@@ -510,28 +510,3 @@ struct PostDetailImageViewerStart: Identifiable, Hashable {
     var id: Int { index }
 }
 
-/// `ImageViewer` in a full-screen cover with a close button.
-struct PostDetailImageViewerCover: View {
-    let items: [ImageViewerItem]
-    let startIndex: Int
-    let postID: String
-    let accountID: String?
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        ImageViewer(items: items, startIndex: startIndex, postID: postID, accountID: accountID)
-            .overlay(alignment: .topLeading) {
-                Button {
-                    dismiss()
-                } label: {
-                    Image(systemName: "xmark")
-                        .font(.body.weight(.semibold))
-                        .padding(10)
-                        .background(.ultraThinMaterial, in: Circle())
-                }
-                .padding()
-                .accessibilityLabel("閉じる")
-                .accessibilityIdentifier("imageViewerClose")
-            }
-    }
-}

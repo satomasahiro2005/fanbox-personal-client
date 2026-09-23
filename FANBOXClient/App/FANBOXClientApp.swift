@@ -28,6 +28,7 @@ struct FANBOXClientApp: App {
                     env.networkMode.start()
                     env.notifications.configure()
                     env.coordinator.start()
+                    RemoteRelay.shared.registerIfEnabled(settings: env.settings)
                 }
         }
         .onChange(of: scenePhase) { _, phase in
@@ -53,11 +54,14 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
     }
 
     /// Silent push from the optional relay (SPEC §28): fetch directly from FANBOX, then notify locally.
-    func application(_ application: UIApplication, didReceiveRemoteNotification userInfo: [AnyHashable: Any]) async
-        -> UIBackgroundFetchResult {
-        await MainActor.run { () -> Task<UIBackgroundFetchResult, Never>? in
-            guard let env = AppDelegate.environment else { return nil }
-            return Task { @MainActor in await RemoteRelay.shared.handleSilentPush(environment: env) }
-        }?.value ?? .noData
+    func application(_ application: UIApplication, didReceiveRemoteNotification userInfo: [AnyHashable: Any],
+                     fetchCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void) {
+        Task { @MainActor in
+            guard let env = AppDelegate.environment else {
+                completionHandler(.noData)
+                return
+            }
+            completionHandler(await RemoteRelay.shared.handleSilentPush(environment: env))
+        }
     }
 }
