@@ -6,3 +6,4 @@ xcuserdata/
 *.xcodeproj/project.xcworkspace/xcuserdata/
 .build/
 FANBOXClient.xcodeproj/
+.claude/
