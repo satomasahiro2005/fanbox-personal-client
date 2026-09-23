@@ -54,7 +54,7 @@ final class SearchServiceTests: XCTestCase {
                               body: "Great piano cover!", createdAt: base)
         let deleted = Comment(commentID: "cm2", postID: "p5", fetchedByAccountID: "a", authorUserID: "u", authorName: "fan",
                               body: "piano (deleted)", createdAt: base)
-        deleted.isDeleted = true
+        deleted.isRemoved = true
         store.context.insert(comment)
         store.context.insert(deleted)
 

@@ -122,7 +122,7 @@ final class SearchService {
     func searchComments(_ terms: [String]) -> [Comment] {
         guard let first = terms.first else { return [] }
         let candidates = store.fetch(FetchDescriptor<Comment>(predicate: #Predicate {
-            !$0.isDeleted && $0.body.localizedStandardContains(first)
+            !$0.isRemoved && $0.body.localizedStandardContains(first)
         }, sortBy: [SortDescriptor(\.createdAt, order: .reverse)]))
         let rest = terms.dropFirst()
         return Array(candidates.filter { comment in rest.allSatisfy { comment.body.localizedStandardContains($0) } }.prefix(limit))
