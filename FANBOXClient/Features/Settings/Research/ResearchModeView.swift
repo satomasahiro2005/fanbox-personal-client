@@ -57,6 +57,17 @@ struct ResearchModeView: View {
 
             Section {
                 NavigationLink {
+                    LiveAPICheckView()
+                } label: {
+                    Label("Live API チェック（実際の FANBOX で確認）", systemImage: "checklist.checked")
+                }
+                .accessibilityIdentifier("researchLiveCheckLink")
+            } footer: {
+                Text("docs/API.md は他のクライアントの実装と FANBOX の Web コードのアーカイブから作ったものです。ここで自分のアカウントで実際のレスポンス構造を確認できます。")
+            }
+
+            Section {
+                NavigationLink {
                     APIInspectorView()
                 } label: {
                     HStack {

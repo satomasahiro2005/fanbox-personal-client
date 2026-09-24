@@ -35,8 +35,18 @@ final class SchemaInspector: @unchecked Sendable {
         var pendingSamples: Int
     }
 
+    /// One JSON response captured while a Live API check runs (Research Mode).
+    struct CapturedResponse: Sendable {
+        var endpointKey: String
+        var rawJSON: Data
+        var known: [String: Set<String>]
+    }
+
     let persistInterval: TimeInterval
     private let states = OSAllocatedUnfairLock(initialState: [String: PathState]())
+    /// Non-nil while `beginCapture()` is active: every observed response is kept (at most `captureLimit`).
+    private let capture = OSAllocatedUnfairLock<[CapturedResponse]?>(initialState: nil)
+    static let captureLimit = 80
     /// Sink for `.error` research events (`recordFailure`); set once by AppEnvironment, readable from any thread.
     private let recorder = OSAllocatedUnfairLock<ResearchRecorder?>(initialState: nil)
     @MainActor private var store: LocalStore?
@@ -80,7 +90,12 @@ final class SchemaInspector: @unchecked Sendable {
     ///   - rawJSON: full response body
     ///   - known: object path → field names the DTO understands, e.g. ["body": ["id", "title", ...], "body.items[]": [...]]
     func observe(endpointKey: String, rawJSON: Data, known: [String: Set<String>]) {
-        guard !known.isEmpty, !rawJSON.isEmpty else { return }
+        guard !rawJSON.isEmpty else { return }
+        capture.withLock { buffer in
+            guard buffer != nil, buffer!.count < Self.captureLimit else { return }
+            buffer!.append(CapturedResponse(endpointKey: endpointKey, rawJSON: rawJSON, known: known))
+        }
+        guard !known.isEmpty else { return }
         Task.detached(priority: .utility) { [self] in
             await self.observeAndWait(endpointKey: endpointKey, rawJSON: rawJSON, known: known)
         }
@@ -93,6 +108,22 @@ final class SchemaInspector: @unchecked Sendable {
         let changes = coalesce(endpointKey: endpointKey, observations: observations, now: now)
         guard !changes.isEmpty else { return }
         await persist(changes, now: now)
+    }
+
+    // MARK: - Capture (Live API check)
+
+    /// Starts keeping every observed response in memory (responses are never persisted by the capture).
+    func beginCapture() {
+        capture.withLock { $0 = [] }
+    }
+
+    /// Stops capturing and returns what was observed since `beginCapture()`.
+    func endCapture() -> [CapturedResponse] {
+        capture.withLock { buffer in
+            let result = buffer ?? []
+            buffer = nil
+            return result
+        }
     }
 
     // MARK: - Analysis (pure)

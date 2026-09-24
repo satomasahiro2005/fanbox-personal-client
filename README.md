@@ -92,6 +92,14 @@ API Inspector) is the tool for it. The areas below are expected to need verifica
 | Derived events | 決済要確認 from `hasUnpaidPayments` / `payment.listUnpaid`, 新規支援 from the fan list, 支援状態変化 from the supporting-plan list | Support State, notification inbox |
 | Background | When iOS runs `BGAppRefreshTask`, and what the native transport can fetch in the background | Scheduler, Requests |
 
+**Live API check.** Research Mode → Live API チェック calls every read endpoint the app uses, once, against the real
+FANBOX with one of your own accounts, through the app's own stack (transport routing, DTOs, adapter). It shows per
+endpoint whether the call worked, what the adapter made of it, and which fields the DTOs expected but did not see (or saw
+but do not know). The shareable report contains masked structure only (field names, JSON types, date formats, counts;
+ids replaced by per-report pseudonyms, no text, names, cookies or tokens). Put a report into
+`FANBOXClientTests/Research/LiveReports/` and `LiveContractTests` decodes every captured shape with the app's decoders,
+so the tests run against the live service's real structure instead of documentation.
+
 Research Mode can also record the API calls FANBOX's own pages make inside the account web view (structure only:
 method, redacted URL, status, field names). Adding an image in the web editor that way shows the media upload request
 of your own session next to the app's own `post.addImage` call, which is how the endpoints read from FANBOX's archived
