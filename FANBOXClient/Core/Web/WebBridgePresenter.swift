@@ -239,31 +239,11 @@ struct AccountWebSessionView: View {
                 WebFallbackMenu(steps: request.destination.fallbackSteps) { controller.openFallback($0) }
             }
         case .login:
-            VStack(alignment: .leading, spacing: 6) {
-                WebNoticeBanner(systemImage: "person.badge.key", tint: .purple,
-                                text: loginState == .completed
-                                    ? "ログインを確認しました"
-                                    : "pixiv の画面でログインしてください。ログインが確認できると自動で閉じます。パスワードはこのアプリに保存されません。")
-                if loginState != .completed {
-                    WebNoticeBanner(systemImage: "exclamationmark.bubble", tint: .orange, text: Self.googleLoginHint)
-                        .accessibilityIdentifier("webGoogleLoginHint")
-                }
-                if loginState != .completed {
-                    Button {
-                        Task { await attemptLogin(metadata: nil, manual: true) }
-                    } label: {
-                        Label("ログイン済みの場合はこちらで確認", systemImage: "checkmark.circle")
-                            .font(.caption.weight(.semibold))
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .disabled(loginState == .verifying)
-                    .padding(.horizontal)
-                    .padding(.bottom, 6)
-                    .accessibilityIdentifier("webLoginCheckButton")
-                }
+            if loginState != .completed {
+                WebNoticeBanner(systemImage: "exclamationmark.bubble", tint: .orange, text: Self.googleLoginHint)
+                    .lineLimit(1)
+                    .accessibilityIdentifier("webGoogleLoginHint")
             }
-            .background(Color.purple.opacity(0.06))
         case .fallback(let reason):
             WebNoticeBanner(systemImage: "arrow.up.forward.app", tint: .orange,
                             text: reason.isEmpty ? "アプリ内で処理できないため Web で表示しています" : "Web で表示しています: \(reason)")
@@ -309,6 +289,15 @@ struct AccountWebSessionView: View {
         ToolbarItem(placement: .cancellationAction) {
             Button("閉じる") { close() }
                 .accessibilityIdentifier("webCloseButton")
+        }
+        if isLogin && loginState != .completed {
+            ToolbarItem(placement: .confirmationAction) {
+                Button("ログイン済み") {
+                    Task { await attemptLogin(metadata: nil, manual: true) }
+                }
+                .disabled(loginState == .verifying)
+                .accessibilityIdentifier("webLoginCheckButton")
+            }
         }
         ToolbarItemGroup(placement: .bottomBar) {
             Button { controller.goBack() } label: { Image(systemName: "chevron.backward") }
@@ -394,8 +383,7 @@ struct AccountWebSessionView: View {
     }
 
     /// Google-only pixiv accounts cannot sign in inside an embedded WKWebView (Google refuses OAuth there).
-    static let googleLoginHint = "Google アカウントでのログインはアプリ内の画面では使えません。Google 連携のみの pixiv アカウントは、"
-        + "先に pixiv でパスワードを設定してから、pixiv ID / メールアドレスとパスワードでログインしてください。"
+    static let googleLoginHint = "Googleではログインできません"
 
     /// Login is complete when the account's store has a FANBOXSESSID cookie and the page shows a logged-in user
     /// (or, for the manual check, when the API confirms the session).

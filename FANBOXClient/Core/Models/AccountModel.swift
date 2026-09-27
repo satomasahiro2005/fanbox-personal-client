@@ -29,6 +29,12 @@ final class Account {
     /// Used only to show "決済状態を確認できません" — never to assert that a payment failed (SPEC §15).
     var hasUnpaidPayments: Bool?
     var unpaidPaymentsCheckedAt: Date?
+    /// USER-ENTERED: the Payment Profile this account usually pays with (SPEC §12 / §13). A support without its own
+    /// linked profile inherits it when rendered (`PaymentResolution`). nil = not set.
+    var defaultPaymentProfileID: String?
+    /// When the user confirmed the default on the account's FANBOX payment page. nil = never confirmed: an inherited
+    /// default is then never shown as 確認済み.
+    var defaultPaymentVerifiedAt: Date?
 
     init(
         id: String = UUID().uuidString,

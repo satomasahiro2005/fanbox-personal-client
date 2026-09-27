@@ -7,8 +7,7 @@ import SwiftUI
 /// every account is fine.
 struct AccountReloginBanner: View {
     @Environment(AppEnvironment.self) private var env
-    @Query(filter: #Predicate<Account> { $0.enabled },
-           sort: [SortDescriptor(\Account.sortOrder), SortDescriptor(\Account.createdAt)]) private var accounts: [Account]
+    @Query(FetchDescriptorFactory.enabledAccounts()) private var accounts: [Account]
 
     /// Accounts needing a re-login (the session state is a computed property: filtered in memory).
     static func needsRelogin(_ account: Account) -> Bool {

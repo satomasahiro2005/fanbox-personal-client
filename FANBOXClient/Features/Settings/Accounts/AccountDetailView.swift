@@ -83,8 +83,6 @@ struct AccountDetailView: View {
                 }
             } header: {
                 Text("表示")
-            } footer: {
-                Text("無効にしたアカウントは同期・通知・自動アカウント選択の対象外になります。")
             }
 
             creatorSection(account)

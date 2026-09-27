@@ -5,7 +5,7 @@ import SwiftUI
 struct SettingsRootView: View {
     @Environment(AppEnvironment.self) private var env
     @Environment(\.dismiss) private var dismiss
-    @Query(sort: [SortDescriptor(\Account.sortOrder), SortDescriptor(\Account.createdAt)]) private var accounts: [Account]
+    @Query(FetchDescriptorFactory.enabledAccounts()) private var accounts: [Account]
 
     var body: some View {
         Form {
@@ -14,7 +14,7 @@ struct SettingsRootView: View {
                     AccountsSettingsView()
                 } label: {
                     LabeledContent {
-                        Text("\(accounts.filter(\.enabled).count) 件")
+                        Text("\(accounts.count)件")
                     } label: {
                         Label("アカウント", systemImage: "person.2.circle")
                     }

@@ -3,7 +3,9 @@
 This document describes how FANBOX Personal Client is put together. The requirements are in [SPEC.md](../SPEC.md);
 section numbers below (§n) refer to it. "docs/API.md §n" refers to [API.md](API.md).
 
-It describes the code. The app has been verified on a real iPhone with real FANBOX accounts. The FANBOX details it
+It describes the code. The app has been verified on a real iPhone with real FANBOX accounts, except posting: Creator
+Mode's post create / update and media uploads (`post.create`, `post.update`, `post.addImage`, `post.addFile`,
+`post.addUrlEmbed`) have not been tried against FANBOX yet. The FANBOX details it
 relies on (endpoint shapes, Cloudflare behavior, rate limits) were collected from public reports in API.md. The demo
 accounts run the same UI without a network.
 
@@ -134,6 +136,7 @@ Account ───< PostAccess >─── Post ───< PostBlock
    │        │
    │        ├── SupportHistory (observed changes)
    │        └── SupportPaymentAssignment ──> PaymentProfile
+   ├── defaultPaymentProfileID ──────────────────> PaymentProfile
    │
    ├───< PaymentRecord, NotificationEvent (post / comment / newsletter events merged across accounts), Newsletter
    ├───< Fan, CreatorDashboardSnapshot            (creator accounts)
@@ -154,6 +157,11 @@ ResearchLog, APISchemaSnapshot                    (Research Mode / API Inspector
 - Supports are one row per account and creator (`Support.key` is `accountID|creatorID`), and so are
   `SupportPaymentAssignment` rows; `PaymentRecord` and `SupportHistory` rows carry their account too. The same creator
   under several accounts is the normal case: per-creator views add the rows up and never merge them.
+- The payment profile a support line shows is resolved when the line is drawn (`PaymentResolution`): the support's
+  own assignment, else the account default (`Account.defaultPaymentProfileID`, skipped when FANBOX reports a different
+  payment type), else a guess from the reported type, else none. Nothing is copied into the supports, so changing the
+  default changes every support that inherits it. 前回 is the newest `PaymentRecord` of the account and creator; 次回 is
+  the 1st–5th (JST) of the next billing month unless a stop is scheduled (`SupportBilling.nextCharge`).
 - User metadata (read, favorite, read later, memo, tags, offline state) is never overwritten by remote data and is
   never sent to FANBOX (§33).
 - Secrets are not stored in SwiftData. See [SECURITY.md](SECURITY.md).
@@ -325,6 +333,12 @@ The effective mode (Automatic / Normal / Low Data / Extreme / Offline) comes fro
 
 - `AccountService` (`Core/Authentication/AccountService.swift`) adds accounts through a login in the account-aware web
   view, checks sessions, logs out, removes accounts and manages the main account.
+- A disabled account (`Account.enabled == false`) is skipped by sync and hidden everywhere except Settings → アカウント,
+  the account's own support screen, the reply queue and Research Mode:
+  screens read `FetchDescriptorFactory.enabledAccounts()` / `LocalStore.enabledAccountIDs()`, the denormalized
+  `Creator.isSupported` / `isFollowed` and the post feed flags count enabled accounts only (`LocalStore.refreshRelationFlags`
+  runs at launch and when an account is enabled or disabled), and the badge counts events of enabled accounts. Its local
+  data is kept, so enabling it again shows everything again.
 - `WebSessionStore` gives each account its own `WKWebsiteDataStore(forIdentifier: Account.webProfileID)`.
 - `CredentialStore` keeps each account's cookies, CSRF token and user agent as one Keychain item. The item is created
   only for a verified session (a login, or a re-login verified in a web session); cookie, token and user-agent updates
@@ -547,7 +561,7 @@ with every block kind native; file names and URLs containing "fail" fail so the 
 | `Core/Sync/` | `SyncEngine`, `SyncCoordinator` + `BackgroundRefresh`, `ReplyQueue`, `RemoteDataSource`, `FanboxRepository`, `AccountSelector`, creator tools (`CreatorTools`: `UploadQueue`, `DraftService`; `DraftSendPlan`, `DraftPostMapping`, `DraftMediaStore`, `CreatorCapabilities`) |
 | `Core/Notifications/` | `NotificationService`, `NotificationCommentResolver`, `RemoteRelay` |
 | `Core/Media/` | `MediaService`, `MediaCache` (file layout, eviction), `MediaPrefetcher`, `OfflineLibraryService`, `ImageDownsampler`, `DemoMediaRenderer` |
-| `Core/Payments/` | `SupportAnalyzer`, `PaymentProfileValidator`, `PaymentResync`, support stop rules and texts |
+| `Core/Payments/` | `SupportAnalyzer`, `PaymentResolution` (profile per support line, account defaults), `PaymentProfileValidator`, `PaymentResync`, support stop rules, next charge window and texts |
 | `Core/Security/` | `SecretRedactor`, `KeychainStore`, `AppLog` |
 | `Core/Web/` | `WebBridge` (`WebDestination`), `WebDestination+Fallback`, `WebBridgePresenter` (`AccountWebSessionView`), `AccountWebView`, `WebFetchHost` (`WebFetchHostPool`), `WebSessionStore`, `WebPageMetadata`, `WebTransportResearchSection` |
 | `Fanbox/API`, `Fanbox/DTO`, `Fanbox/Adapter` | FANBOX endpoints, multipart forms, lenient DTOs, mapping to Remote*, `post.update` form, media upload forms and limits (`FanboxUploadForm`) |

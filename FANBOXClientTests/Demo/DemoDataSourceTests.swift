@@ -481,7 +481,8 @@ final class DemoDataSourceTests: XCTestCase {
         let all = Set(feesA.keys).union(feesB.keys)
         XCTAssertGreaterThan(shared.count * 2, all.count, "most supported creators are supported by both viewer accounts")
         for creatorID in shared {
-            XCTAssertNotEqual(feesA[creatorID], feesB[creatorID], "\(creatorID): each account holds its own plan")
+            XCTAssertEqual(a.supports.filter { $0.creatorID == creatorID }.count, 1, "\(creatorID): one support per account")
+            XCTAssertEqual(b.supports.filter { $0.creatorID == creatorID }.count, 1, "\(creatorID): one support per account")
         }
         XCTAssertTrue(DemoFixtures.profile(.creator).supports.contains { $0.creatorID == "demo-aoi" })
         XCTAssertTrue(shared.contains("demo-aoi"), "one creator is supported by all three demo accounts")

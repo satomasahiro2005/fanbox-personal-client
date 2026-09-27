@@ -11,7 +11,7 @@ struct CommentThreadView: View {
     @Query private var comments: [Comment]
     @Query private var outgoing: [OutgoingComment]
     @Query private var posts: [Post]
-    @Query(sort: [SortDescriptor(\Account.sortOrder), SortDescriptor(\Account.createdAt)]) private var allAccounts: [Account]
+    @Query(FetchDescriptorFactory.enabledAccounts()) private var accounts: [Account]
 
     @State private var draftText = ""
     @State private var replyTargetID: String?
@@ -40,7 +40,6 @@ struct CommentThreadView: View {
     }
 
     private var post: Post? { posts.first }
-    private var accounts: [Account] { allAccounts.filter(\.enabled) }
 
     /// Deleted comments are kept only as placeholders for their replies.
     private var visibleComments: [Comment] {

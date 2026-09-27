@@ -143,6 +143,7 @@ struct AppRouteDestination: View {
         case .notificationInbox: NotificationInboxView()
         case .supportCreator(let creatorID): SupportCreatorDetailView(creatorID: creatorID)
         case .supportAccount(let accountID): SupportAccountDetailView(accountID: accountID)
+        case .paymentRecords(let accountID): SupportPaymentRecordsView(accountID: accountID)
         case .supportHistory: SupportHistoryView()
         case .paymentProfiles: PaymentProfilesView()
         case .draft(let draftID): DraftEditorView(draftID: draftID)

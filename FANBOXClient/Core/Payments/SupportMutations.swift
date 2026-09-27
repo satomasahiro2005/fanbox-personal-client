@@ -99,7 +99,7 @@ enum SupportMutations {
     }
 
     /// Creates or updates the assignment for (account, creator).
-    /// - `.verified` stamps `lastVerifiedAt = now` ("Web で確認した"); other states clear it.
+    /// - `.verified` stamps `lastVerifiedAt = now` ("Webで確認した"); other states clear it.
     /// - A nil profile always means `.unknown` (nothing to verify).
     @discardableResult
     static func setAssignment(store: LocalStore, accountID: String, creatorID: String, planID: String?,
@@ -141,6 +141,32 @@ enum SupportMutations {
                              profileID: nil, state: .unknown, now: now)
     }
 
+    // MARK: Account default (このアカウントのカード)
+
+    /// Sets or clears the account's default profile. Supports without their own profile inherit it at render time
+    /// (`PaymentResolution`). `verified` ("Webで確認した") stamps `defaultPaymentVerifiedAt = now`, or keeps the earlier
+    /// date when the same profile was already confirmed; another profile, nil or `verified: false` clear it.
+    /// Returns false when nothing was written.
+    @discardableResult
+    static func setAccountDefault(store: LocalStore, accountID: String, profileID: String?, verified: Bool = false,
+                                  now: Date = .now) -> Bool {
+        guard let account = store.account(id: accountID) else { return false }
+        let changed = profileID != account.defaultPaymentProfileID
+        let verifiedAt: Date?
+        if profileID == nil || !verified {
+            verifiedAt = nil
+        } else if !changed, let earlier = account.defaultPaymentVerifiedAt {
+            verifiedAt = earlier
+        } else {
+            verifiedAt = now
+        }
+        guard changed || verifiedAt != account.defaultPaymentVerifiedAt else { return false }
+        account.defaultPaymentProfileID = profileID
+        account.defaultPaymentVerifiedAt = verifiedAt
+        store.save()
+        return true
+    }
+
     // MARK: Payment profiles (SPEC §12)
 
     /// Validates and saves. Returns the issues (nothing is written) when the draft violates the storage policy.
@@ -165,8 +191,8 @@ enum SupportMutations {
         return .success(profile)
     }
 
-    /// Deletes a profile. Assignments that pointed to it lose the profile and become `.unknown`.
-    /// Returns how many assignments were reset.
+    /// Deletes a profile. Assignments that pointed to it lose the profile and become `.unknown`, and accounts that used it
+    /// as their default lose the default (disabled accounts too). Returns how many assignments were reset.
     @discardableResult
     static func deleteProfile(id: String, store: LocalStore, now: Date = .now) -> Int {
         let affected = assignments(store: store, profileID: id)
@@ -175,6 +201,10 @@ enum SupportMutations {
             a.verificationState = .unknown
             a.lastVerifiedAt = nil
             a.updatedAt = now
+        }
+        for account in store.accounts(includeDisabled: true) where account.defaultPaymentProfileID == id {
+            account.defaultPaymentProfileID = nil
+            account.defaultPaymentVerifiedAt = nil
         }
         if let profile = store.first(#Predicate<PaymentProfile> { $0.id == id }) {
             store.context.delete(profile)
@@ -194,12 +224,18 @@ struct PaymentProfileIssues: Error, Equatable, Sendable {
     var issues: [PaymentProfileIssue]
 }
 
-/// Counting helper: how many supports use each profile (assignments whose support is still active).
+/// Counting helper: how many active supports use each profile, through their own link or the account default they
+/// inherit (resolved like the support lines, `PaymentResolution`). Guesses are not counted.
 enum PaymentProfileUsage {
-    static func counts(assignments: [AssignmentSnapshot], activeSupportKeys: Set<String>) -> [String: Int] {
+    static func counts(supports: [SupportSnapshot], assignments: [AssignmentSnapshot], accountDefaults: [AccountPaymentDefault] = [],
+                       profiles: [PaymentProfileSnapshot]) -> [String: Int] {
+        let assignmentByKey = Dictionary(assignments.map { ($0.key, $0) }, uniquingKeysWith: { a, _ in a })
+        let defaults = Dictionary(accountDefaults.map { ($0.accountID, $0) }, uniquingKeysWith: { a, _ in a })
         var result: [String: Int] = [:]
-        for a in assignments {
-            guard let pid = a.paymentProfileID, activeSupportKeys.contains(a.key) else { continue }
+        for support in supports where support.isActive {
+            let resolved = PaymentResolution.resolve(assignment: assignmentByKey[support.id], accountDefault: defaults[support.accountID],
+                                                     profiles: profiles, reportedPaymentMethod: support.reportedPaymentMethod)
+            guard resolved.source == .support || resolved.source == .accountDefault, let pid = resolved.profileID else { continue }
             result[pid, default: 0] += 1
         }
         return result

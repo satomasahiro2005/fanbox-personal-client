@@ -122,6 +122,10 @@ final class AppEnvironment {
             }
         }
 
+        // The badge counts events of enabled accounts only.
+        accounts.onEnabledAccountsChanged = { [weak self] in
+            Task { await self?.notifications.updateBadge() }
+        }
         // Transport ↔ accounts (SPEC §3.2 / §7.2 / §40).
         accounts.sessionRevoker = transport
         transport.native.onSessionCookieChanged = { [weak self] accountID in
@@ -174,8 +178,15 @@ final class AppEnvironment {
         env.networkMode.start()
         // A multipart body interrupted by a kill may still be on disk; the CSRF token must not stay there (SPEC §39).
         MultipartFormData.removeStaleTemporaryFiles()
+        env.refreshStoredFlagsAtLaunch()
         Task { @MainActor in await env.accounts.purgeOrphanCredentials() }
         return env
+    }
+
+    /// Re-derives the stored creator / feed relation flags once per launch. Earlier builds counted disabled accounts in
+    /// them, and a sync only recomputes the syncing account's own creators; one Creator fetch when nothing changed.
+    func refreshStoredFlagsAtLaunch() {
+        store.refreshRelationFlags()
     }
 
     /// In-memory environment with demo accounts (previews / tests).

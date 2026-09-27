@@ -106,20 +106,86 @@ final class CreatorListFilterTests: XCTestCase {
         let totals = ["rows": 1500]
         let own: Set<String> = ["mine"]
         let latest = ["plain": t0]
-        let f1 = CreatorFilterFacts(creator: plain, activeSupportTotals: totals, ownCreatorIDs: own, localLatestPostAt: latest)
+        let enabled: Set<String> = ["acc1"]
+        let f1 = CreatorFilterFacts(creator: plain, activeSupportTotals: totals, ownCreatorIDs: own, enabledAccountIDs: enabled,
+                                    localLatestPostAt: latest)
         XCTAssertFalse(f1.isSupported)
         XCTAssertTrue(f1.hasPosts, "local posts count as 投稿あり even if hasKnownPosts is not denormalized")
         XCTAssertEqual(f1.latestPostAt, t0)
+        XCTAssertFalse(f1.isOnlyRelatedToDisabledAccounts, "a creator without any account relation stays listed")
 
-        let f2 = CreatorFilterFacts(creator: supportedOnlyByRows, activeSupportTotals: totals, ownCreatorIDs: own)
+        let f2 = CreatorFilterFacts(creator: supportedOnlyByRows, activeSupportTotals: totals, ownCreatorIDs: own, enabledAccountIDs: enabled)
         XCTAssertTrue(f2.isSupported)
         XCTAssertEqual(f2.monthlySupportTotal, 1500)
 
-        let f3 = CreatorFilterFacts(creator: followed, activeSupportTotals: totals, ownCreatorIDs: own)
+        let f3 = CreatorFilterFacts(creator: followed, activeSupportTotals: totals, ownCreatorIDs: own, enabledAccountIDs: enabled)
         XCTAssertTrue(f3.isFollowed)
         XCTAssertFalse(f3.isOwnCreator)
 
-        let f4 = CreatorFilterFacts(creator: mine, activeSupportTotals: totals, ownCreatorIDs: own)
+        let f4 = CreatorFilterFacts(creator: mine, activeSupportTotals: totals, ownCreatorIDs: own, enabledAccountIDs: enabled)
         XCTAssertTrue(f4.isOwnCreator)
+    }
+
+    /// A disabled account's relations stay stored but count nowhere: a creator supported by A (enabled) and B (disabled)
+    /// shows with A's total only; one related to disabled accounts only is hidden under every chip; re-enabling brings it back.
+    func testDisabledAccountsRelationsAreIgnoredAndTheirCreatorsHidden() throws {
+        let store = LocalStore(container: try PersistenceController.makeContainer(inMemory: true))
+        let a = Account(id: "A", kind: .demo, displayName: "A", isMain: true, sortOrder: 0)
+        let b = Account(id: "B", kind: .demo, displayName: "B", sortOrder: 1)
+        [a, b].forEach(store.context.insert)
+        let shared = Creator(creatorID: "shared", name: "Shared")
+        shared.supportedByAccountIDs = ["A", "B"]
+        let onlyB = Creator(creatorID: "onlyB", name: "Only B")
+        onlyB.supportedByAccountIDs = ["B"]
+        onlyB.followedByAccountIDs = ["B"]
+        let ownedByB = Creator(creatorID: "ownedByB", name: "Owned by B")
+        ownedByB.ownedByAccountID = "B"
+        let plain = Creator(creatorID: "plain", name: "Plain")
+        let creators = [shared, onlyB, ownedByB, plain]
+        creators.forEach(store.context.insert)
+        let supports = [
+            Support(accountID: "A", creatorID: "shared", creatorName: "Shared", planID: "p1", planTitle: "P1", amount: 500),
+            Support(accountID: "B", creatorID: "shared", creatorName: "Shared", planID: "p2", planTitle: "P2", amount: 1000),
+            Support(accountID: "B", creatorID: "onlyB", creatorName: "Only B", planID: "p3", planTitle: "P3", amount: 300),
+        ]
+        supports.forEach(store.context.insert)
+        b.enabled = false
+        store.save()
+
+        func model() -> CreatorsListModel {
+            CreatorsListModel(creators: creators, activeSupports: supports, accounts: store.accounts(), localLatestPostAt: [:])
+        }
+        var m = model()
+        var byID = Dictionary(uniqueKeysWithValues: m.facts.map { ($0.creatorID, $0) })
+        XCTAssertEqual(byID["shared"]?.monthlySupportTotal, 500, "only A's support counts")
+        XCTAssertEqual(m.supportingAccounts(creatorID: "shared").map(\.id), ["A"])
+        XCTAssertEqual(byID["onlyB"]?.isOnlyRelatedToDisabledAccounts, true)
+        XCTAssertEqual(byID["onlyB"]?.isSupported, false)
+        XCTAssertEqual(byID["ownedByB"]?.isOnlyRelatedToDisabledAccounts, true)
+        XCTAssertEqual(byID["ownedByB"]?.isOwnCreator, false)
+        XCTAssertEqual(Set(CreatorListFilter.apply(m.facts, filter: .all, query: "").map(\.creatorID)), ["shared", "plain"])
+        XCTAssertEqual(CreatorListFilter.apply(m.facts, filter: .supporting, query: "").map(\.creatorID), ["shared"])
+        let counts = CreatorListFilter.counts(m.facts)
+        XCTAssertEqual(counts[.all], 2)
+        XCTAssertEqual(counts[.supporting], 1)
+        XCTAssertEqual(counts[.following], 0)
+        XCTAssertEqual(counts[.ownCreatorAccount], 0)
+        // The offline creator picker applies the same rule to the stored relations.
+        func hiddenInPicker() -> [String] {
+            let enabled = store.enabledAccountIDs()
+            return creators.filter { CreatorFilterFacts.isOnlyRelatedToDisabledAccounts($0, enabledAccountIDs: enabled) }.map(\.creatorID)
+        }
+        XCTAssertEqual(hiddenInPicker(), ["onlyB", "ownedByB"])
+
+        b.enabled = true
+        store.save()
+        XCTAssertEqual(hiddenInPicker(), [])
+        m = model()
+        byID = Dictionary(uniqueKeysWithValues: m.facts.map { ($0.creatorID, $0) })
+        XCTAssertEqual(byID["shared"]?.monthlySupportTotal, 1500)
+        XCTAssertEqual(m.supportingAccounts(creatorID: "shared").map(\.id), ["A", "B"])
+        XCTAssertEqual(CreatorListFilter.counts(m.facts)[.all], 4)
+        XCTAssertEqual(Set(CreatorListFilter.apply(m.facts, filter: .supporting, query: "").map(\.creatorID)), ["shared", "onlyB"])
+        XCTAssertEqual(CreatorListFilter.apply(m.facts, filter: .ownCreatorAccount, query: "").map(\.creatorID), ["ownedByB"])
     }
 }

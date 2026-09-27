@@ -26,6 +26,31 @@ enum SupportBilling {
     static func isSameMonth(_ a: Date, _ b: Date, calendar: Calendar = SupportBilling.calendar) -> Bool {
         calendar.isDate(a, equalTo: b, toGranularity: .month)
     }
+
+    /// Days of the month on which FANBOX runs automatic charges.
+    static let chargeDays = 1...5
+
+    /// Next automatic charge of a support, for display only (the app never learns a result in advance, SPEC §15):
+    /// - active, no scheduled stop → `.planned` in the 1st–5th window (JST) of the next billing month;
+    /// - active with a stop scheduled this month (`SupportStopRule`) → `.stopped` (次回なし);
+    /// - nil for ended / missing / unknown supports and convenience-store payments (paid by hand, no automatic charge).
+    static func nextCharge(_ support: SupportSnapshot, now: Date = .now, calendar: Calendar = SupportBilling.calendar) -> NextCharge? {
+        guard support.isActive else { return nil }
+        if let stop = support.scheduledStop(now: now, calendar: calendar) { return .stopped(stop) }
+        guard FanboxAdapter.paymentMethodFamily(support.reportedPaymentMethod) != "cvs",
+              let thisMonth = calendar.dateInterval(of: .month, for: now),
+              let start = calendar.date(byAdding: .month, value: 1, to: thisMonth.start),
+              let end = calendar.date(byAdding: .day, value: chargeDays.upperBound, to: start) else { return nil }
+        return .planned(DateInterval(start: start, end: end))
+    }
+}
+
+/// Next automatic charge of a support (`SupportBilling.nextCharge`).
+enum NextCharge: Sendable, Hashable {
+    /// Expected within [the 1st 00:00, the 6th 00:00) JST of the next billing month. Shown as 予定.
+    case planned(DateInterval)
+    /// A stop is scheduled this billing month: no charge next month.
+    case stopped(SupportStopSource)
 }
 
 /// When a support counts as "停止予定" for 来月予定, and when a stop explains a support vanishing from FANBOX.

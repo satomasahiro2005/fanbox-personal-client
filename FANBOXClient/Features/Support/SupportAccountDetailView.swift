@@ -1,7 +1,8 @@
 import SwiftUI
 import SwiftData
 
-/// SPEC §10.2: one account — supported creators, amounts and 合計; payment settings / history via the account-aware web.
+/// SPEC §10.2: one account — its default card, supported creators, amounts and 合計, and the observed payments;
+/// payment settings / history via the account-aware web.
 struct SupportAccountDetailView: View {
     let accountID: String
 
@@ -32,11 +33,42 @@ struct SupportAccountDetailView: View {
         let paymentSnapshots = payments.map(PaymentSnapshot.init)
         let now = Date.now
         let status = SupportSyncStatus(states: syncStates)
+        let paymentContext = SupportPaymentContext(profiles: profiles.map(PaymentProfileSnapshot.init),
+                                                   defaults: account.map { [AccountPaymentDefault($0)] } ?? [],
+                                                   payments: paymentSnapshots, now: now)
 
         List {
             if let error = status.bannerError(local: refreshError) {
                 Section {
                     SyncStatusBanner(error: error, lastSync: status.lastSync)
+                }
+            }
+
+            if let account {
+                Section {
+                    Picker("このアカウントのカード", selection: Binding(
+                        get: { account.defaultPaymentProfileID },
+                        set: { SupportMutations.setAccountDefault(store: env.store, accountID: accountID, profileID: $0) }
+                    )) {
+                        Text("なし").tag(String?.none)
+                        ForEach(profiles) { p in
+                            Text(PaymentProfileSnapshot(p).shortLabel).tag(Optional(p.id))
+                        }
+                    }
+                    .accessibilityIdentifier("supportAccountDefaultProfile")
+                    if account.defaultPaymentProfileID != nil {
+                        Toggle("Webで確認した", isOn: Binding(
+                            get: { account.defaultPaymentVerifiedAt != nil },
+                            set: { SupportMutations.setAccountDefault(store: env.store, accountID: accountID,
+                                                                      profileID: account.defaultPaymentProfileID, verified: $0) }
+                        ))
+                        .accessibilityIdentifier("supportAccountDefaultVerified")
+                    }
+                    if profiles.isEmpty {
+                        NavigationLink(value: AppRoute.paymentProfiles) {
+                            Label("Payment Profileを追加", systemImage: "plus")
+                        }
+                    }
                 }
             }
 
@@ -82,8 +114,7 @@ struct SupportAccountDetailView: View {
                 if let group, !group.lines.isEmpty {
                     ForEach(group.lines) { line in
                         NavigationLink(value: AppRoute.supportCreator(creatorID: line.support.creatorID)) {
-                            SupportAccountLineRow(line: line,
-                                                  profile: line.assignment?.paymentProfileID.flatMap { pid in profiles.first { $0.id == pid } })
+                            SupportAccountLineRow(line: line, payment: paymentContext.summary(for: line))
                         }
                         .accessibilityIdentifier("supportAccountLine-\(line.support.creatorID)")
                     }
@@ -116,8 +147,6 @@ struct SupportAccountDetailView: View {
                 }
             } header: {
                 Text("FANBOX / pixiv で確認")
-            } footer: {
-                Text("このアカウントでログインした画面が開きます。カード情報はアプリに保存されません。")
             }
 
             if paymentSnapshots.isEmpty {
@@ -130,10 +159,14 @@ struct SupportAccountDetailView: View {
                     Text("お支払い")
                 }
             } else {
-                paymentSection(title: "今月のお支払い",
-                               records: recordsIn(SupportAnalyzer.monthRange(containing: now)))
-                paymentSection(title: "先月のお支払い",
-                               records: recordsIn(SupportAnalyzer.previousMonthRange(before: now)))
+                PaymentMonthSection(title: "今月のお支払い", records: recordsIn(SupportAnalyzer.monthRange(containing: now)))
+                PaymentMonthSection(title: "先月のお支払い", records: recordsIn(SupportAnalyzer.previousMonthRange(before: now)))
+                Section {
+                    NavigationLink(value: AppRoute.paymentRecords(accountID: accountID)) {
+                        Label("すべてのお支払い", systemImage: "list.bullet.rectangle")
+                    }
+                    .accessibilityIdentifier("supportAccountAllPayments")
+                }
             }
         }
         .navigationTitle(account?.displayName ?? "アカウント")
@@ -147,9 +180,65 @@ struct SupportAccountDetailView: View {
         guard let range else { return [] }
         return payments.filter { range.contains($0.paidAt) }
     }
+}
 
-    @ViewBuilder
-    private func paymentSection(title: String, records: [PaymentRecord]) -> some View {
+/// Every observed payment of one account (all months, newest first), one section per billing month (JST).
+struct SupportPaymentRecordsView: View {
+    let accountID: String
+
+    @Environment(AppEnvironment.self) private var env
+    @Query private var accountRows: [Account]
+    @Query private var payments: [PaymentRecord]
+
+    @State private var refreshError: RemoteError?
+
+    init(accountID: String) {
+        self.accountID = accountID
+        _accountRows = Query(filter: #Predicate<Account> { $0.id == accountID })
+        _payments = Query(filter: #Predicate<PaymentRecord> { $0.accountID == accountID }, sort: \PaymentRecord.paidAt, order: .reverse)
+    }
+
+    var body: some View {
+        let byMonth = Dictionary(grouping: payments) { SupportAnalyzer.monthKey($0.paidAt) }
+        let monthKeys = byMonth.keys.sorted(by: >)
+
+        List {
+            if let refreshError {
+                Section {
+                    SyncStatusBanner(error: refreshError, lastSync: nil)
+                }
+            }
+            if monthKeys.isEmpty {
+                Text("お支払いデータなし（まだ取得されていません）")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+            ForEach(monthKeys, id: \.self) { key in
+                let records = byMonth[key] ?? []
+                PaymentMonthSection(title: records.first.map { Self.monthTitle($0.paidAt) } ?? key, records: records)
+            }
+        }
+        .accessibilityIdentifier("supportPaymentRecordsList")
+        .navigationTitle(accountRows.first.map { "\($0.displayName)のお支払い" } ?? "お支払い")
+        .navigationBarTitleDisplayMode(.inline)
+        .refreshable {
+            refreshError = await SupportSync.refresh(env: env, accountIDs: [accountID], includePayments: true)
+        }
+    }
+
+    /// "2026年9月" (JST billing month).
+    static func monthTitle(_ date: Date, calendar: Calendar = SupportBilling.calendar) -> String {
+        let c = calendar.dateComponents([.year, .month], from: date)
+        return "\(c.year ?? 0)年\(c.month ?? 0)月"
+    }
+}
+
+/// One billing month of payment records with its total. Records without a reported amount are listed but never summed.
+struct PaymentMonthSection: View {
+    let title: String
+    let records: [PaymentRecord]
+
+    var body: some View {
         Section {
             if records.isEmpty {
                 Text("この月のお支払いは観測されていません")
@@ -180,7 +269,7 @@ struct SupportAccountDetailView: View {
 
 struct SupportAccountLineRow: View {
     let line: SupportLine
-    let profile: PaymentProfile?
+    let payment: SupportPaymentSummary
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
@@ -201,11 +290,8 @@ struct SupportAccountLineRow: View {
                     StopScheduledPill(source: stop)
                 }
                 Spacer()
-                if let profile, let a = line.assignment, a.paymentProfileID != nil {
-                    Text(profile.nickname).font(.caption2).foregroundStyle(.secondary)
-                    VerificationLabel(state: a.verificationState)
-                }
             }
+            SupportPaymentLine(summary: payment)
         }
     }
 }
@@ -219,8 +305,8 @@ struct PaymentRecordRow: View {
                 Text(record.creatorName ?? "不明なクリエイター").lineLimit(1)
                 HStack(spacing: 6) {
                     Text(Formatters.shortDate(record.paidAt))
-                    if let method = record.reportedPaymentMethod, !method.isEmpty {
-                        Text("支払い種別: \(method)")
+                    if let method = SupportText.paymentMethodLabel(record.reportedPaymentMethod) {
+                        Text(method)
                     }
                 }
                 .font(.caption)

@@ -53,6 +53,30 @@ final class CreatorSupportSummaryTests: XCTestCase {
         XCTAssertEqual(summary.monthlyTotalText, "¥0 / 月")
     }
 
+    /// The creator page passes the enabled accounts as `knownAccountIDs`: a disabled account's support, total share and
+    /// anomaly are left out, and a creator supported only by disabled accounts reads as not supported.
+    func testDisabledAccountsAreLeftOutOfTheCreatorSummary() {
+        let supports = [
+            input("A", amount: 500),
+            input("B", amount: 1000),
+            input("B", "cB", amount: 300),
+            input("B", "cB2", amount: 700, status: .missing, attention: true),
+        ]
+        let enabled: Set<String> = ["A"]
+        let shared = CreatorSupportSummary.make(creatorID: "cA", supports: supports, accountOrder: ["A", "B"], knownAccountIDs: enabled)
+        XCTAssertEqual(shared.accountIDs, ["A"])
+        XCTAssertEqual(shared.monthlyTotal, 500)
+        let onlyB = CreatorSupportSummary.make(creatorID: "cB", supports: supports, accountOrder: ["A", "B"], knownAccountIDs: enabled)
+        XCTAssertFalse(onlyB.isSupporting)
+        XCTAssertTrue(CreatorSupportSummary.make(creatorID: "cB2", supports: supports, knownAccountIDs: enabled).attentions.isEmpty)
+        XCTAssertEqual(CreatorSupportSummary.totalsByCreator(supports, knownAccountIDs: enabled), ["cA": 500])
+
+        // Enabled again.
+        let all = CreatorSupportSummary.make(creatorID: "cA", supports: supports, accountOrder: ["A", "B"], knownAccountIDs: ["A", "B"])
+        XCTAssertEqual(all.accountIDs, ["A", "B"])
+        XCTAssertEqual(all.monthlyTotal, 1500)
+    }
+
     func testDuplicateRowsForSameAccountAreNotDoubleCounted() {
         let supports = [input("A", amount: 500), input("A", amount: 1000)]
         let summary = CreatorSupportSummary.make(creatorID: "cA", supports: supports)

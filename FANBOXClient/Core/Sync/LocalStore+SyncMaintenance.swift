@@ -42,8 +42,12 @@ extension LocalStore {
         return fetch(descriptor).map(\.id)
     }
 
-    /// Unread notification events (badge count). Uses a count query, never loads the rows.
+    /// Unread notification events of enabled accounts (badge count). An event counts when one of its receiving accounts is
+    /// enabled; `accountIDs` is an array, so the unread rows are filtered in memory.
     func unreadNotificationEventCount() -> Int {
-        (try? context.fetchCount(FetchDescriptor<NotificationEvent>(predicate: #Predicate { !$0.isRead }))) ?? 0
+        let enabled = enabledAccountIDs()
+        var descriptor = FetchDescriptor<NotificationEvent>(predicate: #Predicate { !$0.isRead })
+        descriptor.propertiesToFetch = [\.accountIDs]
+        return fetch(descriptor).filter { $0.accountIDs.contains(where: enabled.contains) }.count
     }
 }

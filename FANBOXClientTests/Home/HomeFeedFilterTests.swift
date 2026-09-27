@@ -91,6 +91,67 @@ final class HomeFeedFilterTests: XCTestCase {
         XCTAssertEqual(limited.map(\.postID), ["p3", "p2"], "newest first with limit")
     }
 
+    /// The timeline flags count enabled accounts only: posts of a creator supported / followed by a disabled account alone
+    /// leave すべて / 支援中 / フォロー中 / 未読 and the Library 未読 list, and come back when the account is enabled again.
+    func testDisabledAccountsCreatorsLeaveTheTimeline() throws {
+        let store = LocalStore(container: try PersistenceController.makeContainer(inMemory: true))
+        let a = Account(id: "A", kind: .demo, displayName: "A", isMain: true, sortOrder: 0)
+        let b = Account(id: "B", kind: .demo, displayName: "B", sortOrder: 1)
+        [a, b].forEach(store.context.insert)
+        store.save()
+        store.applySupports([SyncFixtures.support("shared", plan: "p1", fee: 500)], account: a.context, source: .sync, isBaseline: true)
+        store.applySupports([SyncFixtures.support("shared", plan: "p2", fee: 1000), SyncFixtures.support("onlyB", plan: "p3", fee: 300)],
+                            account: b.context, source: .sync, isBaseline: true)
+        store.applyFollowing([RemoteCreator(creatorID: "followedByB", name: "Followed by B")], account: b.context)
+        store.upsertPostSummaries([SyncFixtures.summary("s1", creator: "shared"), SyncFixtures.summary("b1", creator: "onlyB", minutesAgo: 1),
+                                   SyncFixtures.summary("f1", creator: "followedByB", minutesAgo: 2)], account: b.context, source: .creator)
+
+        func ids(_ kind: HomeFeedFilterKind) -> Set<String> {
+            let filter = HomeFeedFilter(kind: kind)
+            return Set(filter.apply(store.fetch(filter.descriptor(limit: nil))).map(\.postID))
+        }
+        XCTAssertEqual(ids(.all), ["s1", "b1", "f1"])
+
+        b.enabled = false
+        store.refreshRelationFlags()
+        XCTAssertEqual(ids(.all), ["s1"], "the creator A also supports stays")
+        XCTAssertEqual(ids(.supporting), ["s1"])
+        XCTAssertEqual(ids(.following), [])
+        XCTAssertEqual(ids(.unread), ["s1"])
+        XCTAssertEqual(Set(store.fetch(LibraryListKind.unread.descriptor(limit: nil)).map(\.postID)), ["s1"])
+
+        b.enabled = true
+        store.refreshRelationFlags()
+        XCTAssertEqual(ids(.all), ["s1", "b1", "f1"])
+        XCTAssertEqual(ids(.following), ["f1"])
+    }
+
+    /// Earlier builds stored flags that counted disabled accounts, and a sync of another account recomputes only that
+    /// account's creators. The launch pass re-derives them, so a creator supported only by an account disabled before the
+    /// update leaves the timeline.
+    func testLaunchRederivesFlagsStoredWithADisabledAccount() throws {
+        let env = AppEnvironment.preview(seedDemo: false)
+        let store = env.store
+        let a = Account(id: "A", kind: .demo, displayName: "A", isMain: true, sortOrder: 0)
+        let b = Account(id: "B", kind: .demo, displayName: "B", sortOrder: 1)
+        [a, b].forEach(store.context.insert)
+        store.save()
+        store.applySupports([SyncFixtures.support("onlyB", plan: "p3", fee: 300)], account: b.context, source: .sync, isBaseline: true)
+        store.upsertPostSummaries([SyncFixtures.summary("b1", creator: "onlyB")], account: b.context, source: .creator)
+        // What the earlier build's setEnabled did: flip the flag without re-deriving anything.
+        b.enabled = false
+        store.save()
+        store.applySupports([SyncFixtures.support("shared", plan: "p1", fee: 500)], account: a.context, source: .sync, isBaseline: true)
+        store.applyFollowing([], account: a.context)
+        XCTAssertEqual(store.creator(id: "onlyB")?.isSupported, true, "A's sync leaves B's creators alone")
+
+        env.refreshStoredFlagsAtLaunch()
+        XCTAssertEqual(store.creator(id: "onlyB")?.isSupported, false)
+        XCTAssertEqual(store.creator(id: "shared")?.isSupported, true)
+        let all = HomeFeedFilter(kind: .all)
+        XCTAssertFalse(all.apply(store.fetch(all.descriptor(limit: nil))).contains { $0.postID == "b1" })
+    }
+
     func testUserActionsWriteLocalMetadata() throws {
         let container = try PersistenceController.makeContainer(inMemory: true)
         let store = LocalStore(container: container)

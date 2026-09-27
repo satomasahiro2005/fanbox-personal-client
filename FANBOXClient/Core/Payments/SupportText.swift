@@ -160,6 +160,54 @@ enum SupportText {
 
     static func isCardType(_ type: PaymentProfileType) -> Bool { type == .creditCard || type == .debitCard }
 
+    // MARK: Payment line (支払い方法・前回・次回)
+
+    /// FANBOX's payment type (docs/API.md §18.9) in Japanese: カード / PayPal / コンビニ, その他 for a type the app does not
+    /// know, nil when FANBOX reported none. The raw API string is never shown.
+    static func paymentMethodLabel(_ raw: String?) -> String? {
+        guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else { return nil }
+        switch FanboxAdapter.paymentMethodFamily(raw) {
+        case "card": return "カード"
+        case "paypal": return "PayPal"
+        case "cvs": return "コンビニ"
+        default: return "その他"
+        }
+    }
+
+    /// "楽天Visa•••1234": the nickname and the last four digits; the brand stands in for an empty nickname.
+    static func profileShortLabel(nickname: String, brand: String?, last4: String?) -> String {
+        let name = nickname.isEmpty ? (brand ?? "") : nickname
+        guard let last4, !last4.isEmpty else { return name.isEmpty ? "支払い方法" : name }
+        return "\(name)•••\(last4)"
+    }
+
+    /// "9/2" in JST; "2025/12/2" when the year is not the year of `now`.
+    static func billingDate(_ date: Date, now: Date = .now, calendar: Calendar = SupportBilling.calendar) -> String {
+        let c = calendar.dateComponents([.year, .month, .day], from: date)
+        let md = "\(c.month ?? 0)/\(c.day ?? 0)"
+        return c.year == calendar.component(.year, from: now) ? md : "\(c.year ?? 0)/\(md)"
+    }
+
+    /// "前回9/2 ¥500", or "前回9/2" when FANBOX did not report the amount.
+    static func lastPaymentText(_ payment: LastPayment, showsAmount: Bool = true, now: Date = .now,
+                                calendar: Calendar = SupportBilling.calendar) -> String {
+        let date = "前回\(billingDate(payment.paidAt, now: now, calendar: calendar))"
+        guard showsAmount, let amount = payment.amount else { return date }
+        return "\(date) \(Formatters.yen(amount))"
+    }
+
+    /// "次回10/1〜5予定" ("次回10/1〜5" without the suffix) / "次回なし" / "次回なし（自分で記録）".
+    static func nextChargeText(_ next: NextCharge, showsPlannedSuffix: Bool = true, calendar: Calendar = SupportBilling.calendar) -> String {
+        switch next {
+        case .planned(let window):
+            let start = calendar.dateComponents([.month, .day], from: window.start)
+            let lastDay = calendar.component(.day, from: window.end.addingTimeInterval(-1))
+            return "次回\(start.month ?? 0)/\(start.day ?? 0)〜\(lastDay)\(showsPlannedSuffix ? "予定" : "")"
+        case .stopped(.observed): return "次回なし"
+        case .stopped(.userMarked): return "次回なし（自分で記録）"
+        }
+    }
+
     /// Brand picker choices.
     static let brands = ["Visa", "Mastercard", "JCB", "American Express", "Diners", "その他"]
 

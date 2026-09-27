@@ -4,7 +4,9 @@ This document maps the storage, isolation and redaction rules of [SPEC.md](../SP
 §40 to the code that implements them.
 
 Unit tests exercise these rules with in-memory stores, fake data sources and `URLProtocol` stubs, and the app has been
-verified on a real iPhone with real FANBOX accounts. The identity checks rely on the shape of the FANBOX page metadata
+verified on a real iPhone with real FANBOX accounts, except posting: Creator Mode's post create / update and media
+uploads (`post.create`, `post.update`, `post.addImage`, `post.addFile`, `post.addUrlEmbed`) have not been tried
+against FANBOX yet. The identity checks rely on the shape of the FANBOX page metadata
 described in [API.md](API.md) §2.14.
 
 ## Principles
@@ -146,7 +148,7 @@ purpose, in case the accounts come back; only temporary login-probe credentials 
 ## Login limitation
 
 Google refuses OAuth sign-in inside embedded web views (`WKWebView`). pixiv accounts that only use "Sign in with
-Google" cannot log in through the app; the add-account screen and the login sheet say so. Set a pixiv password first,
+Google" cannot log in through the app; the login sheet says so. Set a pixiv password first,
 then log in with the pixiv ID / e-mail address and that password.
 
 ## Payment profile validation

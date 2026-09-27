@@ -15,7 +15,7 @@ struct PostDetailView: View {
     @Query private var comments: [Comment]
     @Query private var localTags: [PostTag]
     @Query private var plans: [Plan]
-    @Query(sort: [SortDescriptor(\Account.sortOrder), SortDescriptor(\Account.createdAt)]) private var allAccounts: [Account]
+    @Query(FetchDescriptorFactory.enabledAccounts()) private var accounts: [Account]
 
     /// Account currently used for this post (automatic or manual).
     @State private var selectedAccountID: String?
@@ -52,7 +52,7 @@ struct PostDetailView: View {
     }
 
     private var post: Post? { posts.first }
-    private var accounts: [Account] { allAccounts.filter(\.enabled) }
+    private var enabledAccountIDs: Set<String> { Set(accounts.map(\.id)) }
     private var creatorPlans: [Plan] {
         guard let creatorID = post?.creatorID else { return [] }
         return plans.filter { $0.creatorID == creatorID }
@@ -111,7 +111,8 @@ struct PostDetailView: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 16) {
                 SyncStatusBanner(error: refreshError, lastSync: post.bodyFetchedAt ?? post.fetchedAt)
-                PostDetailHeader(post: post, plans: creatorPlans, localTags: localTags.map(\.tagName)) {
+                PostDetailHeader(post: post, plans: creatorPlans, enabledAccountIDs: enabledAccountIDs,
+                                 localTags: localTags.map(\.tagName)) {
                     showTagMemo = true
                 }
                 accountHint(post)
@@ -143,7 +144,7 @@ struct PostDetailView: View {
             }
             PostDetailBlocksView(blocks: blocks, context: renderContext(post))
         } else if PostAccountLogic.isRestricted(feeRequired: post.feeRequired, accessAccountIDs: post.accessAccountIDs,
-                                                hasBlocks: false) {
+                                                enabledAccountIDs: enabledAccountIDs, hasBlocks: false) {
             PostDetailRestrictedView(excerpt: post.excerpt, feeRequired: post.feeRequired,
                                planTitle: HomePlanLabel.planTitle(feeRequired: post.feeRequired,
                                                                   plans: creatorPlans.map { ($0.fee, $0.title) })) {

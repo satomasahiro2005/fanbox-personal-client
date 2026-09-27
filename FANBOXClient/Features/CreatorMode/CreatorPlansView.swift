@@ -7,7 +7,7 @@ struct CreatorPlansView: View {
     let creatorID: String
 
     @Query private var plans: [Plan]
-    @Query private var accounts: [Account]
+    @Query(FetchDescriptorFactory.enabledAccounts()) private var accounts: [Account]
     @Query private var fans: [Fan]
     @State private var syncError: RemoteError?
     @State private var expandedPlanIDs: Set<String> = []
@@ -17,12 +17,11 @@ struct CreatorPlansView: View {
     init(creatorID: String) {
         self.creatorID = creatorID
         _plans = Query(filter: #Predicate<Plan> { $0.creatorID == creatorID }, sort: [SortDescriptor(\.fee), SortDescriptor(\.sortOrder)])
-        _accounts = Query(sort: [SortDescriptor(\Account.sortOrder)])
         _fans = Query()
     }
 
-    /// The local account that owns this creator page.
-    private var ownerAccount: Account? { accounts.first { $0.creatorID == creatorID && $0.enabled } ?? accounts.first { $0.creatorID == creatorID } }
+    /// The enabled local account that owns this creator page.
+    private var ownerAccount: Account? { accounts.first { $0.creatorID == creatorID } }
 
     private var ownerFans: [Fan] {
         guard let id = ownerAccount?.id else { return [] }

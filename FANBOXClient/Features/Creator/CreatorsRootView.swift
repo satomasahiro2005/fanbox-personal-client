@@ -7,7 +7,7 @@ struct CreatorsRootView: View {
 
     @Query(sort: \Creator.name) private var creators: [Creator]
     @Query(filter: #Predicate<Support> { $0.statusRaw == "active" }) private var activeSupports: [Support]
-    @Query(sort: [SortDescriptor(\Account.sortOrder), SortDescriptor(\Account.createdAt)]) private var accounts: [Account]
+    @Query(FetchDescriptorFactory.enabledAccounts()) private var accounts: [Account]
 
     @State private var filter: CreatorListFilter = .all
     @State private var sort: CreatorListSort = .recommended
@@ -142,13 +142,15 @@ struct CreatorsListModel {
     private let accountsByID: [String: Account]
     private let supportingAccountIDs: [String: [String]]
 
+    /// `accounts`: the enabled accounts. Supports, relations and totals of disabled accounts are left out.
     init(creators: [Creator], activeSupports: [Support], accounts: [Account], localLatestPostAt: [String: Date]) {
         let inputs = activeSupports.map(CreatorSupportInput.init)
         let known = Set(accounts.map(\.id))
         let totals = CreatorSupportSummary.totalsByCreator(inputs, knownAccountIDs: known)
         let ownCreatorIDs = Set(accounts.compactMap(\.creatorID))
         facts = creators.map {
-            CreatorFilterFacts(creator: $0, activeSupportTotals: totals, ownCreatorIDs: ownCreatorIDs, localLatestPostAt: localLatestPostAt)
+            CreatorFilterFacts(creator: $0, activeSupportTotals: totals, ownCreatorIDs: ownCreatorIDs, enabledAccountIDs: known,
+                               localLatestPostAt: localLatestPostAt)
         }
         creatorsByID = Dictionary(creators.map { ($0.creatorID, $0) }, uniquingKeysWith: { first, _ in first })
         accountsByID = Dictionary(accounts.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })

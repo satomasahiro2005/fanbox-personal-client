@@ -80,6 +80,8 @@ struct HomeFilterChip: View {
 struct HomePostStatusPills: View {
     let post: Post
     var plans: [Plan] = []
+    /// 閲覧不可 when none of these can view the post.
+    let enabledAccountIDs: Set<String>
     var showsUserFlags: Bool = true
 
     var body: some View {
@@ -87,7 +89,8 @@ struct HomePostStatusPills: View {
             PillLabel(text: HomePlanLabel.text(feeRequired: post.feeRequired, plans: plans),
                       systemImage: post.feeRequired > 0 ? "yensign.circle" : "globe",
                       tint: post.feeRequired > 0 ? .purple : .teal)
-            if post.feeRequired > 0 && post.accessAccountIDs.isEmpty {
+            if PostAccountLogic.isRestricted(feeRequired: post.feeRequired, accessAccountIDs: post.accessAccountIDs,
+                                             enabledAccountIDs: enabledAccountIDs, hasBlocks: false) {
                 PillLabel(text: "閲覧不可", systemImage: "lock.fill", tint: .red)
                     .accessibilityIdentifier("postPill.restricted")
             }

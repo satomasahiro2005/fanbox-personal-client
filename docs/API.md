@@ -1,7 +1,7 @@
 # FANBOX Personal Client — internal API reference
 
 > **Status:** research snapshot, 2026-09-24.
-> The pixivFANBOX API is **unofficial and undocumented**. The facts below come from public sources (§0), and the confidence ratings describe those sources. The app itself has since been verified on a real device with real FANBOX accounts. Before relying on a shape, confirm it in Research Mode / API Inspector (SPEC §36–37).
+> The pixivFANBOX API is **unofficial and undocumented**. The facts below come from public sources (§0), and the confidence ratings describe those sources. The app itself has since been verified on a real iPhone with real FANBOX accounts, except posting: Creator Mode's post create / update and media uploads (`post.create`, `post.update`, `post.addImage`, `post.addFile`, `post.addUrlEmbed`) have not been tried against FANBOX yet. Before relying on a shape, confirm it in Research Mode / API Inspector (SPEC §36–37).
 > This file sits under the repository's All Rights Reserved policy (SPEC §3.5).
 
 ## Contents
@@ -1478,6 +1478,8 @@ All endpoints in this section need an account where `context.user.isCreator` is 
 { "body": { "postId": string } }
 ```
 
+The app has not sent this call to FANBOX yet; the response shape comes from the sources above.
+
 - **Notes:** fanboxsync's create command calls `post.update` immediately afterwards with status `draft`, fee `"0"` and the title.
 - **Sources:** defaultcf spec (`/post.create`, `requestBodies.Create`, `responses.Create`), fanboxsync (fanbox.go `CreatePost`, cmd.go `CommandCreate`).
 
@@ -1506,6 +1508,8 @@ All endpoints in this section need an account where `context.user.isCreator` is 
 // missing credentials
 HTTP 400 { "error": "general_error" }
 ```
+
+The app has not sent this call to FANBOX yet; the response shape comes from the sources above.
 
 - **Fields the web client sends that the app does not:** `scheduledFor` (`YYYY-MM-DDTHH:mm:ssZ`, local time with offset; only when scheduling) and `coverImage` (a PNG blob sets the cover, `"delete"` removes it, omitting it keeps it; §15.5). Non-article bodies are known too: image `{text, images}`, file `{text, files}`, video `{text, video: {videoId, serviceProvider}}`, text `{text}` (§15.5).
 - **Fields not seen in any source:** `planId`, a per-post adult flag, `excerpt`, a visibility field. `imageMap` / `fileMap` / `urlEmbedMap` are **never** sent on write. **Do not invent them.** Leave those features to the web editor at `/manage/posts/{postId}`.
@@ -1539,8 +1543,9 @@ asset **by id only**. There is no separate cover upload: the cover is the `cover
 
 **Confidence: high** for names, fields and the save flow: the same names appear in every archived FANBOX web bundle
 from 2020-01 to 2026-09 (`post.addUrlEmbed` from 2022-01), and two independent readings plus a verification pass agree.
-The response bodies are inferred from how the web client uses them. Research Mode → Requests / API Schema shows the
-real ones from your own session; use a throwaway draft.
+The response bodies are inferred from how the web client uses them. Like the `post.create` / `post.update` responses
+(§14.3–§14.4), they are still inferred: the app has not sent any of these calls to FANBOX yet. Research Mode →
+Requests / API Schema shows the real ones from your own session; use a throwaway draft.
 
 ### 15.1 `post.addImage`
 

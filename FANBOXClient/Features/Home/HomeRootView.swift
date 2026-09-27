@@ -10,11 +10,9 @@ struct HomeRootView: View {
     @AppStorage("home.accountFilter") private var accountFilterRaw = ""
     @State private var limit = HomeRootView.pageSize
 
-    @Query(sort: [SortDescriptor(\Account.sortOrder), SortDescriptor(\Account.createdAt)]) private var allAccounts: [Account]
+    @Query(FetchDescriptorFactory.enabledAccounts()) private var accounts: [Account]
 
     static let pageSize = 300
-
-    private var accounts: [Account] { allAccounts.filter(\.enabled) }
 
     private var kind: HomeFeedFilterKind { HomeFeedFilterKind(rawValue: kindRaw) ?? .all }
 
@@ -27,7 +25,7 @@ struct HomeRootView: View {
     private var filter: HomeFeedFilter { HomeFeedFilter(kind: kind, accountID: accountFilterID) }
 
     var body: some View {
-        HomeFeedList(filter: filter, limit: limit, hasAccounts: !accounts.isEmpty) {
+        HomeFeedList(filter: filter, limit: limit, enabledAccountIDs: Set(accounts.map(\.id))) {
             limit += HomeRootView.pageSize
         }
         .safeAreaInset(edge: .top, spacing: 0) { header }
@@ -116,20 +114,22 @@ struct HomeRootView: View {
 private struct HomeFeedList: View {
     let filter: HomeFeedFilter
     let limit: Int
-    let hasAccounts: Bool
+    let enabledAccountIDs: Set<String>
     let loadMore: () -> Void
 
     @Environment(AppEnvironment.self) private var env
     @Query private var posts: [Post]
     @Query(sort: \Plan.fee) private var plans: [Plan]
 
-    init(filter: HomeFeedFilter, limit: Int, hasAccounts: Bool, loadMore: @escaping () -> Void) {
+    init(filter: HomeFeedFilter, limit: Int, enabledAccountIDs: Set<String>, loadMore: @escaping () -> Void) {
         self.filter = filter
         self.limit = limit
-        self.hasAccounts = hasAccounts
+        self.enabledAccountIDs = enabledAccountIDs
         self.loadMore = loadMore
         _posts = Query(filter.descriptor(limit: limit))
     }
+
+    private var hasAccounts: Bool { !enabledAccountIDs.isEmpty }
 
     var body: some View {
         let visible = filter.apply(posts)
@@ -137,7 +137,7 @@ private struct HomeFeedList: View {
         List {
             ForEach(visible) { post in
                 NavigationLink(value: AppRoute.post(postID: post.postID)) {
-                    PostCardView(post: post, plans: plansByCreator[post.creatorID] ?? [])
+                    PostCardView(post: post, plans: plansByCreator[post.creatorID] ?? [], enabledAccountIDs: enabledAccountIDs)
                 }
                 .accessibilityIdentifier("homePost.\(post.postID)")
                 .swipeActions(edge: .leading, allowsFullSwipe: true) {

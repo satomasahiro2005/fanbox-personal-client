@@ -3,14 +3,16 @@ import SwiftData
 
 /// Tab 「支援」 (SPEC §10.3 dashboard, §15 要確認, §10.1 / §10.2 groupings).
 /// Renders from SwiftData immediately; pull-to-refresh re-syncs supports + payments of all enabled accounts.
+/// Disabled accounts are left out of everything here: totals, counts, groupings and 要確認.
 struct SupportRootView: View {
     enum Grouping: String, Hashable { case creator, account }
 
     @Environment(AppEnvironment.self) private var env
     @Query(sort: \Support.creatorName) private var supports: [Support]
-    @Query(sort: [SortDescriptor(\Account.sortOrder), SortDescriptor(\Account.createdAt)]) private var accounts: [Account]
+    @Query(FetchDescriptorFactory.enabledAccounts()) private var accounts: [Account]
     @Query(sort: \PaymentRecord.paidAt, order: .reverse) private var payments: [PaymentRecord]
     @Query private var assignments: [SupportPaymentAssignment]
+    @Query(sort: [SortDescriptor(\PaymentProfile.sortOrder), SortDescriptor(\PaymentProfile.createdAt)]) private var profiles: [PaymentProfile]
     @Query private var syncStates: [SyncState]
 
     @State private var grouping: Grouping = .creator
@@ -34,6 +36,8 @@ struct SupportRootView: View {
         let attention = SupportAnalyzer.attentionItems(snapshots)
         let order = accounts.map(\.id)
         let assignmentSnapshots = assignments.map(AssignmentSnapshot.init)
+        let paymentContext = SupportPaymentContext(profiles: profiles.map(PaymentProfileSnapshot.init),
+                                                   defaults: accounts.map(AccountPaymentDefault.init), payments: paymentSnapshots, now: now)
         let status = SupportSyncStatus(states: syncStates, accountIDs: known)
 
         List {
@@ -88,7 +92,7 @@ struct SupportRootView: View {
                     }
                     ForEach(groups) { group in
                         NavigationLink(value: AppRoute.supportCreator(creatorID: group.creatorID)) {
-                            SupportCreatorGroupRow(group: group)
+                            SupportCreatorGroupRow(group: group, payment: paymentContext)
                         }
                         .accessibilityIdentifier("supportCreatorRow-\(group.creatorID)")
                     }
@@ -123,7 +127,7 @@ struct SupportRootView: View {
         .navigationTitle("支援")
         .refreshable { await refreshAll(priority: .interactiveRead, reason: .userRefresh) }
         .task {
-            let ids = accounts.filter(\.enabled).map(\.id)
+            let ids = accounts.map(\.id)
             guard !ids.isEmpty, SupportSync.isStale(states: syncStates, accountIDs: ids) else { return }
             await refreshAll(priority: .backgroundSync, reason: .onDemand)
         }
@@ -138,7 +142,7 @@ struct SupportRootView: View {
     }
 
     private func refreshAll(priority: RequestPriority, reason: SyncReason) async {
-        let ids = accounts.filter(\.enabled).map(\.id)
+        let ids = accounts.map(\.id)
         guard !ids.isEmpty else { return }
         refreshError = await SupportSync.refresh(env: env, accountIDs: ids, includePayments: true, priority: priority, reason: reason)
     }
@@ -371,19 +375,32 @@ struct PaymentStateAttentionCard: View {
 
 // MARK: - Group rows
 
+/// Creator row with one sub-line per account: the account and its plan fee, then card, 前回 and 次回 on a row of their own
+/// (the payment line gets the full width).
 struct SupportCreatorGroupRow: View {
     let group: CreatorSupportGroup
+    let payment: SupportPaymentContext
 
     var body: some View {
-        HStack(spacing: 10) {
-            AvatarView(url: group.creatorIconURL, size: 36)
-            VStack(alignment: .leading, spacing: 3) {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 10) {
+                AvatarView(url: group.creatorIconURL, size: 36)
                 Text(group.creatorName).font(.body.weight(.medium)).lineLimit(1)
-                AccountBadgeRow(accountIDs: group.activeAccountIDs)
+                Spacer()
+                Text(SupportText.monthly(group.total))
+                    .font(.subheadline.monospacedDigit())
             }
-            Spacer()
-            Text(SupportText.monthly(group.total))
-                .font(.subheadline.monospacedDigit())
+            ForEach(group.lines) { line in
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        AccountBadge(accountID: line.support.accountID)
+                        Spacer(minLength: 8)
+                        Text(Formatters.yen(line.support.amount))
+                            .font(.caption.monospacedDigit())
+                    }
+                    SupportPaymentLine(summary: payment.summary(for: line))
+                }
+            }
         }
         .accessibilityElement(children: .combine)
     }

@@ -1,10 +1,10 @@
 import SwiftUI
 import SwiftData
 
-/// SPEC §11: support changes observed by the app, newest first, filterable by account / creator.
+/// SPEC §11: support changes observed by the app, newest first, filterable by account / creator. Enabled accounts only.
 struct SupportHistoryView: View {
     @Query(sort: \SupportHistory.timestamp, order: .reverse) private var history: [SupportHistory]
-    @Query(sort: [SortDescriptor(\Account.sortOrder), SortDescriptor(\Account.createdAt)]) private var accounts: [Account]
+    @Query(FetchDescriptorFactory.enabledAccounts()) private var accounts: [Account]
 
     @State private var accountFilter: String?
     @State private var creatorFilter: String?
@@ -15,9 +15,11 @@ struct SupportHistoryView: View {
     }
 
     var body: some View {
-        let creators = SupportHistoryFilter.creators(in: history.map { ($0.creatorID, $0.creatorName) })
-        let filtered = history.filter { SupportHistoryFilter.matches(accountID: $0.accountID, creatorID: $0.creatorID,
-                                                                     accountFilter: accountFilter, creatorFilter: creatorFilter) }
+        let enabled = Set(accounts.map(\.id))
+        let rows = history.filter { enabled.contains($0.accountID) }
+        let creators = SupportHistoryFilter.creators(in: rows.map { ($0.creatorID, $0.creatorName) })
+        let filtered = rows.filter { SupportHistoryFilter.matches(accountID: $0.accountID, creatorID: $0.creatorID,
+                                                                  accountFilter: accountFilter, creatorFilter: creatorFilter) }
         List {
             if accountFilter != nil || creatorFilter != nil {
                 Section {

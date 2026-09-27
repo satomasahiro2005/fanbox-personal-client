@@ -37,8 +37,10 @@ from the network afterwards, so a slow or missing connection does not block read
 The app is not distributed through the App Store, and it is not affiliated with or endorsed by pixiv Inc.
 The full specification (in Japanese) is in [SPEC.md](SPEC.md).
 
-> **Status:** verified on a real iPhone with real FANBOX accounts. The FANBOX API is unofficial and can change at any
-> time. See [Verification status](#verification-status) and [Known limitations](#known-limitations).
+> **Status:** verified on a real iPhone with real FANBOX accounts, except posting: Creator Mode's post create / update
+> and media uploads (`post.create`, `post.update`, `post.addImage`, `post.addFile`, `post.addUrlEmbed`) have not been
+> tried against FANBOX yet. The FANBOX API is unofficial and can change at any time. See
+> [Verification status](#verification-status) and [Known limitations](#known-limitations).
 
 ## Contents
 
@@ -62,7 +64,7 @@ The full specification (in Japanese) is in [SPEC.md](SPEC.md).
 | Notifications | One inbox for all accounts. The same post, comment or newsletter seen by several accounts is one entry. When an event is detected, the app first tries to fetch the post body or comment thread, then posts the iOS notification. A tap opens the post from the local database. Replies can be written from the notification and are queued offline. Besides FANBOX's own notifications, the app derives 支援状態変化 (support changed), 決済要確認 (payment needs checking) and 新規支援 (new supporter) events from what it observes. These stay one per account, so one account's stop or payment problem is shown even when another account keeps supporting the same creator. |
 | Low data | Automatic / Normal / Low Data / Extreme / Offline modes. A text-first scheduler sends comment posts and interactive reads before any media and pauses media transfers while they run. Offline stops every request: queued requests fail, downloads and uploads are cancelled, and no web view loads a page. |
 | Transport | FANBOX requests go through the account's `URLSession`, or through a hidden web view of the same account (same cookies and web session). `post.info` and `post.getEditable` use the web view first while the app is in the foreground; other calls switch to it only when Cloudflare stops the native request. A device-wide budget spaces `post.info`, pauses every FANBOX call after a 429 and does not repeat a block across accounts. This design follows public reports (docs/API.md §1.7–§1.11). |
-| Support | Supports grouped by creator and by account, with monthly totals, this month's actual payments, next month's planned total, a locally observed support history and anomaly flags. A creator's total adds up every account's plan for that creator; each account's support keeps its own plan, payment state, history and stop. Payment profiles (nickname, brand, last four digits, memo) can be linked to each support, and one profile can be linked to supports of several accounts. Payment itself always happens in the account-aware web view. |
+| Support | Supports grouped by creator and by account, with monthly totals, this month's actual payments, next month's planned total, a locally observed support history and anomaly flags. A creator's total adds up every account's plan for that creator; each account's support keeps its own plan, payment state, history and stop. Payment profiles (nickname, brand, last four digits, memo) can be linked to each support, and one profile can be linked to supports of several accounts. Each account can have a default card that its supports use unless they have their own. Every support line shows its card, the last observed payment (前回) and the next charge window (次回, the 1st–5th in Japan time, or none when a stop is scheduled); each account also lists all of its observed payments. Payment itself always happens in the account-aware web view. |
 | Creator mode | Dashboard, managed posts, local drafts with a block editor, a media upload queue, comments, fans and plans for accounts that own a creator page. With real accounts, images, files and link cards are uploaded natively into the post; new embeds are finished in the web editor. See [Known limitations](#known-limitations). |
 | Library | Local full-text search, favorites, read later, local tags and memos (never sent to FANBOX), offline saving with a size-limited media cache. |
 | Research mode | Redacted request / response / navigation logs, an API schema inspector that flags new or missing fields, account, sync, support and scheduler state, and a switch that forces the native or the web view transport. Debug builds add demo tools that simulate new notifications. |
@@ -72,7 +74,9 @@ Not included on purpose: bulk downloading, full-history crawling, and card payme
 
 ## Verification status
 
-The app has been verified on a real iPhone with real FANBOX accounts.
+The app has been verified on a real iPhone with real FANBOX accounts, except posting: Creator Mode's post create /
+update and media uploads (`post.create`, `post.update`, `post.addImage`, `post.addFile`, `post.addUrlEmbed`) have not
+been tried against FANBOX yet.
 
 **What the tests cover.** Unit tests (`FANBOXClientTests`) run the modules against in-memory stores, the demo data
 source, fake data sources and `URLProtocol` stubs. UI tests (`FANBOXClientUITests`) run a smoke test and a tour that
@@ -103,8 +107,9 @@ web client (docs/API.md §15) when it changes.
 
 ## Known limitations
 
-**Creator Mode with real FANBOX accounts.** The FANBOX write calls follow public sources and FANBOX's own archived
-web client (docs/API.md §14–§15).
+**Creator Mode with real FANBOX accounts.** Posting is not yet verified on the device: creating and updating posts
+and uploading media have not been tried against FANBOX. The FANBOX write calls follow public sources and FANBOX's own
+archived web client (docs/API.md §14–§15).
 
 - **Media upload is native.** Images, files and link cards are stored into the post with `post.addImage`,
   `post.addFile` and `post.addUrlEmbed`, which were read from FANBOX's own (archived) web client (docs/API.md §15).
@@ -133,7 +138,7 @@ web client (docs/API.md §14–§15).
 
 - **Google sign-in does not work.** Google refuses OAuth sign-in inside embedded web views (`WKWebView`). pixiv
   accounts that only use "Sign in with Google" cannot log in through the app. Set a pixiv password first, then log in
-  with the pixiv ID / e-mail address and that password. The add-account screen and the login sheet say so.
+  with the pixiv ID / e-mail address and that password. The login sheet says so in one line.
 - **Support and payment changes stay on the web.** Starting, changing or stopping a support and changing the payment
   method happen in the account web view. The app never handles card data (docs/SECURITY.md). After a payment session
   it syncs supports again, because FANBOX can take a while to show the change.
@@ -207,7 +212,7 @@ used by Creator Mode, is created only by the `-demoData` launch argument (and by
 | `-demoData` | When there are no accounts at all, adds three demo accounts: "Demo A", "Demo B" and "Demo Creator" (owner of the demo creator page `demo-creator-self`). |
 | `-uiTesting` | Uses an in-memory SwiftData store, an in-memory credential store, a throwaway `UserDefaults` suite and in-memory transport preferences, and skips the notification permission request, so the database, credentials and settings start fresh on every launch. |
 | `-initialTab <tab>` | Starts on a tab: `home`, `creators`, `support`, `creatorMode` or `library`. |
-| `-openRoute <route>` | Pushes a screen at launch: `post:<postID>`, `creator:<creatorID>`, `comments:<postID>`, `newsletter:<id>`, `supportCreator:<creatorID>`, `supportAccount:<accountID>`, `draft:<draftID>`, `plans:<creatorID>`, `search:<query>`, `tag:<name>`, or one of `supportHistory`, `paymentProfiles`, `creatorComments`, `fans`, `offlineLibrary`. Example: `post:demo-post-101`. |
+| `-openRoute <route>` | Pushes a screen at launch: `post:<postID>`, `creator:<creatorID>`, `comments:<postID>`, `newsletter:<id>`, `supportCreator:<creatorID>`, `supportAccount:<accountID>`, `paymentRecords:<accountID>`, `draft:<draftID>`, `plans:<creatorID>`, `search:<query>`, `tag:<name>`, or one of `supportHistory`, `paymentProfiles`, `creatorComments`, `fans`, `offlineLibrary`. Example: `post:demo-post-101`. |
 | `-openSheet <sheet>` | Opens `settings` or `notifications` at launch. |
 
 `-initialTab`, `-openRoute` and `-openSheet` are read from the `UserDefaults` argument domain (`AppRouter`), so they
@@ -302,7 +307,7 @@ FANBOXClient/
   Core/         Models, Database, Network, Authentication, Sync, Notifications, Media, Payments, Security, Web
   Fanbox/       API client, adapter (DTO -> Remote* values), demo data source, research recorder, schema inspector
   UI/           shared components (account badges, sync banner, remote images, image viewer)
-  Resources/    Info.plist, asset catalog
+  Resources/    Info.plist, asset catalog (accent color), AppIcon.icon (Icon Composer app icon)
 FANBOXClientTests/     unit tests (hosted in the app)
 FANBOXClientUITests/   UI smoke test and screen tour
 docs/                  architecture, security, network modes, notification relay, API notes

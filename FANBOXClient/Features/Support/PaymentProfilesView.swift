@@ -7,6 +7,9 @@ struct PaymentProfilesView: View {
     @Query(sort: [SortDescriptor(\PaymentProfile.sortOrder), SortDescriptor(\PaymentProfile.createdAt)]) private var profiles: [PaymentProfile]
     @Query private var assignments: [SupportPaymentAssignment]
     @Query private var supports: [Support]
+    @Query(FetchDescriptorFactory.enabledAccounts()) private var accounts: [Account]
+    /// Disabled accounts too: deleting a profile also clears their defaults (`SupportMutations.deleteProfile`).
+    @Query private var allAccounts: [Account]
 
     @State private var editing: ProfileEditRequest?
     @State private var pendingDelete: PaymentProfile?
@@ -14,8 +17,13 @@ struct PaymentProfilesView: View {
     init() {}
 
     var body: some View {
-        let activeKeys = Set(supports.filter(\.isActive).map(\.key))
-        let usage = PaymentProfileUsage.counts(assignments: assignments.map(AssignmentSnapshot.init), activeSupportKeys: activeKeys)
+        let enabled = Set(accounts.map(\.id))
+        let usage = PaymentProfileUsage.counts(
+            supports: supports.filter { $0.isActive && enabled.contains($0.accountID) }.map(SupportSnapshot.init),
+            assignments: assignments.map(AssignmentSnapshot.init),
+            accountDefaults: accounts.map(AccountPaymentDefault.init),
+            profiles: profiles.map(PaymentProfileSnapshot.init)
+        )
 
         List {
             Section {
@@ -68,7 +76,7 @@ struct PaymentProfilesView: View {
                 } label: {
                     Image(systemName: "plus")
                 }
-                .accessibilityLabel("Payment Profile を追加")
+                .accessibilityLabel("Payment Profileを追加")
                 .accessibilityIdentifier("addPaymentProfile")
             }
         }
@@ -89,10 +97,12 @@ struct PaymentProfilesView: View {
             Button("キャンセル", role: .cancel) { pendingDelete = nil }
         } message: { profile in
             let count = assignments.filter { $0.paymentProfileID == profile.id }.count
-            if count > 0 {
-                Text("\(count) 件の支援の割り当てが解除され、「不明」になります。")
+            let defaults = allAccounts.filter { $0.defaultPaymentProfileID == profile.id }.count
+            if count > 0 || defaults > 0 {
+                let parts = (count > 0 ? ["\(count)件の支援の割り当て"] : []) + (defaults > 0 ? ["アカウント\(defaults)件の既定"] : [])
+                Text("\(parts.joined(separator: "と"))が解除されます。")
             } else {
-                Text("この Payment Profile を削除します。")
+                Text("このPayment Profileを削除します。")
             }
         }
     }

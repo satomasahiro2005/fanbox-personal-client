@@ -111,6 +111,31 @@ final class NotificationRowFormatterTests: XCTestCase {
         XCTAssertTrue(filter.isActive)
     }
 
+    /// Items show only when one of their receiving accounts is enabled: a disabled account's items and items left without
+    /// any account (after a removal) are hidden, and "すべて既読" does not touch them.
+    func testEnabledAccountsRestriction() throws {
+        let enabledOnly = NotificationInboxFilter(enabledAccountIDs: ["A"])
+        XCTAssertFalse(enabledOnly.isActive, "not a user filter")
+        XCTAssertTrue(enabledOnly.matches(type: .newPost, accountIDs: ["A"], isRead: false))
+        XCTAssertTrue(enabledOnly.matches(type: .newPost, accountIDs: ["B", "A"], isRead: false), "shared with an enabled account")
+        XCTAssertFalse(enabledOnly.matches(type: .newPost, accountIDs: ["B"], isRead: false))
+        XCTAssertFalse(enabledOnly.matches(type: .newPost, accountIDs: [], isRead: false))
+        XCTAssertTrue(NotificationInboxFilter().matches(type: .newPost, accountIDs: [], isRead: false), "nil = no restriction")
+
+        var byB = enabledOnly
+        byB.accountID = "B"
+        XCTAssertFalse(byB.matches(type: .newPost, accountIDs: ["B"], isRead: false))
+
+        let store = LocalStore(container: try PersistenceController.makeContainer(inMemory: true))
+        let ofA = NotificationEvent(id: "e1", type: .newPost, accountIDs: ["A"], title: "", message: "", timestamp: now)
+        let ofB = NotificationEvent(id: "e2", type: .newPost, accountIDs: ["B"], title: "", message: "", timestamp: now)
+        [ofA, ofB].forEach(store.context.insert)
+        store.save()
+        XCTAssertEqual(NotificationReadActions.markAllRead([ofA, ofB], filter: enabledOnly, store: store), 1)
+        XCTAssertTrue(ofA.isRead)
+        XCTAssertFalse(ofB.isRead, "a disabled account's event stays as it was")
+    }
+
     // MARK: SwiftData integration
 
     func testRowInputFromEventAndMarkAllRead() throws {

@@ -119,6 +119,18 @@ struct PaymentSnapshot: Sendable, Hashable {
     }
 }
 
+/// Newest observed payment of one account × creator: the 前回 of a support line.
+struct LastPayment: Sendable, Hashable {
+    var accountID: String
+    var creatorID: String
+    var paidAt: Date
+    /// nil when FANBOX did not report the amount (the date is still observed).
+    var amount: Int?
+
+    /// Same key format as `Support.key`.
+    var key: String { "\(accountID)|\(creatorID)" }
+}
+
 /// Payment-state flag of one account (SPEC §15 "決済状態を確認できない").
 struct AccountPaymentState: Sendable, Hashable {
     var accountID: String
@@ -207,9 +219,10 @@ struct AccountSupportGroup: Sendable, Hashable, Identifiable {
 /// Pure aggregation + anomaly helpers for supports (SPEC §10 / §15).
 /// Everything except `summary(store:)` is a pure function over Sendable snapshots.
 enum SupportAnalyzer {
+    /// Dashboard numbers of the enabled accounts (a disabled account's supports and payments are left out).
     @MainActor
     static func summary(store: LocalStore, now: Date = .now, calendar: Calendar = SupportBilling.calendar) -> SupportDashboardSummary {
-        let accounts = store.accounts(includeDisabled: true)
+        let accounts = store.accounts()
         let known = Set(accounts.map(\.id))
         let supports = store.fetch(FetchDescriptorFactorySupport.allSupports())
             .filter { known.contains($0.accountID) }
@@ -297,6 +310,26 @@ enum SupportAnalyzer {
                                         calendar: Calendar = SupportBilling.calendar) -> [PaymentSnapshot] {
         guard let range = previousMonthRange(before: date, calendar: calendar) else { return [] }
         return payments.filter { range.contains($0.paidAt) }
+    }
+
+    /// Newest payment per account × creator, keyed like `Support.key`. Accounts stay separate and records without a
+    /// creator are skipped. The newest charge is taken as it is (an upgrade difference charged after the monthly charge
+    /// wins, amounts are never summed); a record whose amount FANBOX did not report still gives the date.
+    static func lastPayments(_ payments: [PaymentSnapshot]) -> [String: LastPayment] {
+        var result: [String: LastPayment] = [:]
+        for p in payments {
+            guard let creatorID = p.creatorID, !creatorID.isEmpty else { continue }
+            let candidate = LastPayment(accountID: p.accountID, creatorID: creatorID, paidAt: p.paidAt,
+                                        amount: p.isAmountKnown ? p.amount : nil)
+            if let existing = result[candidate.key] {
+                // Same instant: a reported amount beats an unknown one, then the larger one (deterministic).
+                let newer = candidate.paidAt != existing.paidAt ? candidate.paidAt > existing.paidAt
+                    : (candidate.amount ?? -1) > (existing.amount ?? -1)
+                guard newer else { continue }
+            }
+            result[candidate.key] = candidate
+        }
+        return result
     }
 
     // MARK: Anomalies (SPEC §15)

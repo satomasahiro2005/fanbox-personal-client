@@ -32,50 +32,78 @@ struct VerificationLabel: View {
     }
 }
 
-/// "楽天カード / Visa •••• 1234 [確認済み]" — the payment method the user believes pays a support.
-struct AssignmentSummaryView: View {
-    let assignment: AssignmentSnapshot?
-    let profile: PaymentProfile?
-    /// Display-only guess (never stored as verified) when no assignment exists.
-    var inferredProfile: PaymentProfile? = nil
-    var reportedPaymentMethod: String? = nil
+/// One line of payment facts for a support, shared by every support row:
+/// `楽天Visa•••1234 [既定] 前回9/2 ¥500 次回10/1〜5予定`. Without a profile the card label is FANBOX's payment type in
+/// Japanese (カード / PayPal / コンビニ). When the line is too narrow it drops, in this order, the 前回 amount, the card
+/// icon, the 予定 suffix, the pill of the support's own link, 次回 and 前回; the card label truncates last. The 既定 and
+/// 推定 pills always stay: they tell an inherited default or a guess from the support's own link (SPEC §13).
+struct SupportPaymentLine: View {
+    let summary: SupportPaymentSummary
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            if let profile, let assignment, assignment.paymentProfileID != nil {
-                HStack(spacing: 6) {
-                    Image(systemName: "creditcard")
-                        .foregroundStyle(.secondary)
-                    Text(profile.nickname)
-                        .font(.subheadline)
-                        .foregroundStyle(SupportText.isFact(assignment.verificationState) ? .primary : .secondary)
-                        .italic(!SupportText.isFact(assignment.verificationState))
-                    Text(profile.displayDetail).font(.caption).foregroundStyle(.secondary)
-                }
-                VerificationLabel(state: assignment.verificationState, lastVerifiedAt: assignment.lastVerifiedAt)
-            } else if let inferredProfile {
-                HStack(spacing: 6) {
-                    Image(systemName: "creditcard")
-                        .foregroundStyle(.secondary)
-                    Text("\(inferredProfile.nickname)?")
-                        .font(.subheadline)
-                        .italic()
-                        .foregroundStyle(.secondary)
-                }
-                VerificationLabel(state: .inferred)
-            } else {
-                HStack(spacing: 6) {
-                    Image(systemName: "creditcard")
-                        .foregroundStyle(.tertiary)
-                    Text("支払い方法: 未設定").font(.subheadline).foregroundStyle(.secondary)
-                }
-                VerificationLabel(state: .unknown)
-            }
-            if let reportedPaymentMethod, !reportedPaymentMethod.isEmpty {
-                Text("FANBOX 上の支払い種別: \(reportedPaymentMethod)")
-                    .font(.caption2)
+        ViewThatFits(in: .horizontal) {
+            line(dropping: 0)
+            line(dropping: 1)
+            line(dropping: 2)
+            line(dropping: 3)
+            line(dropping: 4)
+            line(dropping: 5)
+            line(dropping: 6)
+        }
+        .font(.caption)
+        .accessibilityElement(children: .combine)
+    }
+
+    /// The line with the first `dropped` compaction steps applied.
+    private func line(dropping dropped: Int) -> some View {
+        let showsIcon = dropped < 2
+        let keepsPill = dropped < 4 || summary.resolution.source != .support
+        return HStack(spacing: showsIcon ? 6 : 4) {
+            if showsIcon {
+                Image(systemName: "creditcard")
                     .foregroundStyle(.secondary)
             }
+            Text(summary.resolution.source == .inferred ? "\(summary.cardLabel)?" : summary.cardLabel)
+                .foregroundStyle(SupportText.isFact(summary.resolution.verificationState) ? .primary : .secondary)
+                .italic(summary.resolution.source == .inferred)
+                .lineLimit(1)
+            if keepsPill {
+                SupportPaymentPill(resolution: summary.resolution)
+                    .fixedSize()
+            }
+            if let last = summary.lastPayment, dropped < 6 {
+                Text(SupportText.lastPaymentText(last, showsAmount: dropped < 1))
+                    .foregroundStyle(.secondary)
+                    .fixedSize()
+            }
+            if let next = summary.nextCharge, dropped < 5 {
+                Text(SupportText.nextChargeText(next, showsPlannedSuffix: dropped < 3))
+                    .foregroundStyle(.secondary)
+                    .fixedSize()
+            }
+        }
+    }
+}
+
+/// State pill of a resolved payment: the verification label of the support's own link or of a guess, and 既定 for an
+/// inherited account default (with 確認済み only when the user confirmed the default). Nothing when nothing resolved.
+struct SupportPaymentPill: View {
+    let resolution: ResolvedPayment
+
+    var body: some View {
+        switch resolution.source {
+        case .support, .inferred:
+            VerificationLabel(state: resolution.verificationState)
+        case .accountDefault:
+            HStack(spacing: 4) {
+                PillLabel(text: "既定", systemImage: "person.crop.circle", tint: .blue)
+                    .accessibilityIdentifier("paymentDefaultPill")
+                if resolution.verificationState == .verified {
+                    VerificationLabel(state: .verified)
+                }
+            }
+        case .none:
+            EmptyView()
         }
     }
 }

@@ -7,7 +7,7 @@ struct NewsletterDetailView: View {
 
     @Environment(AppEnvironment.self) private var env
     @Query private var rows: [Newsletter]
-    @Query(sort: [SortDescriptor(\Account.sortOrder), SortDescriptor(\Account.createdAt)]) private var accounts: [Account]
+    @Query(FetchDescriptorFactory.enabledAccounts()) private var accounts: [Account]
 
     @State private var isFetching = false
     @State private var fetchError: RemoteError?
@@ -83,7 +83,7 @@ struct NewsletterDetailView: View {
                 Text("受信")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                AccountBadgeRow(accountIDs: newsletter.accountIDs)
+                AccountBadgeRow(accountIDs: newsletter.accountIDs.filter { id in accounts.contains { $0.id == id } })
             }
         }
 
@@ -148,10 +148,9 @@ struct NewsletterDetailView: View {
 
     /// Accounts that received the newsletter first (the right session for the web page), then other enabled accounts.
     private var webAccounts: [Account] {
-        let enabled = accounts.filter(\.enabled)
         let receivers = newsletter?.accountIDs ?? []
-        let head = receivers.compactMap { id in enabled.first { $0.id == id } }
-        return head + enabled.filter { !receivers.contains($0.id) }
+        let head = receivers.compactMap { id in accounts.first { $0.id == id } }
+        return head + accounts.filter { !receivers.contains($0.id) }
     }
 
     private func markRead() {

@@ -145,12 +145,15 @@ struct PillLabel: View {
     }
 }
 
-/// Bell button with unread badge; opens the notification inbox.
+/// Bell button with unread badge; opens the notification inbox. Counts events of enabled accounts only.
 struct NotificationBellButton: View {
     @Environment(AppRouter.self) private var router
-    @Query(filter: #Predicate<NotificationEvent> { !$0.isRead }) private var unread: [NotificationEvent]
+    @Query(filter: #Predicate<NotificationEvent> { !$0.isRead }) private var unreadEvents: [NotificationEvent]
+    @Query(FetchDescriptorFactory.enabledAccounts()) private var accounts: [Account]
 
     var body: some View {
+        let enabled = Set(accounts.map(\.id))
+        let unread = unreadEvents.filter { $0.accountIDs.contains(where: enabled.contains) }
         Button {
             router.isNotificationInboxPresented = true
         } label: {

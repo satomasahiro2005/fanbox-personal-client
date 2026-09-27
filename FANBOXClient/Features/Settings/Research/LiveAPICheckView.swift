@@ -6,14 +6,14 @@ import UIKit
 /// whether the real service answered in the shape the app expects. The report can be shared (masked structure only).
 struct LiveAPICheckView: View {
     @Environment(AppEnvironment.self) private var env
-    @Query(sort: [SortDescriptor(\Account.sortOrder), SortDescriptor(\Account.createdAt)]) private var accounts: [Account]
+    @Query(FetchDescriptorFactory.enabledAccounts()) private var accounts: [Account]
     @State private var check: LiveAPICheck?
     @State private var selectedAccountID: String?
     @State private var reportURL: URL?
     @State private var detail: LiveAPICheck.Step?
 
     private var fanboxAccounts: [Account] {
-        accounts.filter { $0.kind == .fanbox && $0.enabled && $0.sessionState != .error }
+        accounts.filter { $0.kind == .fanbox && $0.sessionState != .error }
     }
 
     var body: some View {

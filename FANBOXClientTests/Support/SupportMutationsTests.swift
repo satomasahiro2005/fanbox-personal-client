@@ -122,8 +122,125 @@ final class SupportMutationsTests: XCTestCase {
             AssignmentSnapshot(accountID: "C", creatorID: "c9", paymentProfileID: "p"),
             AssignmentSnapshot(accountID: "A", creatorID: "c2", paymentProfileID: nil),
         ]
-        let counts = PaymentProfileUsage.counts(assignments: assignments, activeSupportKeys: ["A|c1", "B|c1", "A|c2"])
+        let supports = [
+            SupportSnapshot(accountID: "A", creatorID: "c1", creatorName: "C1", amount: 500),
+            SupportSnapshot(accountID: "B", creatorID: "c1", creatorName: "C1", amount: 500),
+            SupportSnapshot(accountID: "A", creatorID: "c2", creatorName: "C2", amount: 500),
+            SupportSnapshot(accountID: "C", creatorID: "c9", creatorName: "C9", amount: 500, status: .ended),
+        ]
+        let profiles = [PaymentProfileSnapshot(id: "p", nickname: "Card", type: .creditCard)]
+        let counts = PaymentProfileUsage.counts(supports: supports, assignments: assignments, profiles: profiles)
         XCTAssertEqual(counts, ["p": 2])
+    }
+
+    func testProfileUsageCountsInheritedSupports() {
+        let profiles = [PaymentProfileSnapshot(id: "visa", nickname: "Visa", type: .creditCard),
+                        PaymentProfileSnapshot(id: "pp", nickname: "PayPal", type: .paypal)]
+        let supports = [
+            SupportSnapshot(accountID: "A", creatorID: "c1", creatorName: "C1", amount: 500, reportedPaymentMethod: "card"),
+            SupportSnapshot(accountID: "A", creatorID: "c2", creatorName: "C2", amount: 500, reportedPaymentMethod: "card"),
+            SupportSnapshot(accountID: "A", creatorID: "c3", creatorName: "C3", amount: 500, reportedPaymentMethod: "paypal"),
+            SupportSnapshot(accountID: "A", creatorID: "c4", creatorName: "C4", amount: 500, reportedPaymentMethod: "card"),
+            SupportSnapshot(accountID: "B", creatorID: "c1", creatorName: "C1", amount: 500, reportedPaymentMethod: "paypal"),
+        ]
+        let assignments = [
+            AssignmentSnapshot(accountID: "A", creatorID: "c1"),                                 // placeholder ⇒ inherits
+            AssignmentSnapshot(accountID: "A", creatorID: "c4", paymentProfileID: "pp", verificationState: .manual),
+        ]
+        let defaults = [AccountPaymentDefault(accountID: "A", profileID: "visa")]
+        let counts = PaymentProfileUsage.counts(supports: supports, assignments: assignments, accountDefaults: defaults, profiles: profiles)
+        // A|c1, A|c2 inherit visa; A|c3 is PayPal on FANBOX (default skipped, the PayPal guess is not counted);
+        // A|c4 links pp itself; B has no default and B|c1's PayPal guess is not counted.
+        XCTAssertEqual(counts, ["visa": 2, "pp": 1])
+    }
+
+    // MARK: Account default
+
+    func testSetAndClearAccountDefault() throws {
+        let store = try makeStore()
+        let account = Account(id: "A", kind: .demo, displayName: "A")
+        store.context.insert(account)
+        store.save()
+        let t1 = Date(timeIntervalSince1970: 1_790_000_000)
+        let t2 = t1.addingTimeInterval(3_600)
+
+        XCTAssertTrue(SupportMutations.setAccountDefault(store: store, accountID: "A", profileID: "visa", now: t1))
+        XCTAssertEqual(account.defaultPaymentProfileID, "visa")
+        XCTAssertNil(account.defaultPaymentVerifiedAt, "choosing a default is not a confirmation")
+        XCTAssertFalse(SupportMutations.setAccountDefault(store: store, accountID: "A", profileID: "visa", now: t1), "no change")
+
+        XCTAssertTrue(SupportMutations.setAccountDefault(store: store, accountID: "A", profileID: "visa", verified: true, now: t1))
+        XCTAssertEqual(account.defaultPaymentVerifiedAt, t1)
+        XCTAssertFalse(SupportMutations.setAccountDefault(store: store, accountID: "A", profileID: "visa", verified: true, now: t2),
+                       "re-confirming keeps the first date")
+        XCTAssertEqual(account.defaultPaymentVerifiedAt, t1)
+
+        XCTAssertTrue(SupportMutations.setAccountDefault(store: store, accountID: "A", profileID: "mc", now: t2))
+        XCTAssertEqual(account.defaultPaymentProfileID, "mc")
+        XCTAssertNil(account.defaultPaymentVerifiedAt, "another profile drops the confirmation")
+
+        XCTAssertTrue(SupportMutations.setAccountDefault(store: store, accountID: "A", profileID: nil, verified: true, now: t2))
+        XCTAssertNil(account.defaultPaymentProfileID)
+        XCTAssertNil(account.defaultPaymentVerifiedAt, "nothing to confirm without a profile")
+        XCTAssertFalse(SupportMutations.setAccountDefault(store: store, accountID: "missing", profileID: "visa"))
+    }
+
+    func testDeletingAProfileClearsAccountDefaults() throws {
+        let store = try makeStore()
+        guard case .success(let card) = SupportMutations.saveProfile(PaymentProfileDraft(nickname: "Card", type: .creditCard), store: store),
+              case .success(let other) = SupportMutations.saveProfile(PaymentProfileDraft(nickname: "PayPal", type: .paypal), store: store) else {
+            return XCTFail()
+        }
+        let a = Account(id: "A", kind: .demo, displayName: "A")
+        let b = Account(id: "B", kind: .demo, displayName: "B", enabled: false)
+        let c = Account(id: "C", kind: .demo, displayName: "C")
+        [a, b, c].forEach(store.context.insert)
+        SupportMutations.setAccountDefault(store: store, accountID: "A", profileID: card.id, verified: true)
+        SupportMutations.setAccountDefault(store: store, accountID: "B", profileID: card.id)
+        SupportMutations.setAccountDefault(store: store, accountID: "C", profileID: other.id)
+
+        SupportMutations.deleteProfile(id: card.id, store: store)
+        XCTAssertNil(a.defaultPaymentProfileID)
+        XCTAssertNil(a.defaultPaymentVerifiedAt)
+        XCTAssertNil(b.defaultPaymentProfileID, "disabled accounts are cleared too")
+        XCTAssertEqual(c.defaultPaymentProfileID, other.id, "other profiles are untouched")
+    }
+
+    /// Resolution happens at render time: changing the default changes every support that inherits it, and a support
+    /// with its own profile keeps it.
+    func testChangingTheDefaultUpdatesEveryInheritingSupport() throws {
+        let store = try makeStore()
+        guard case .success(let visa) = SupportMutations.saveProfile(
+                PaymentProfileDraft(nickname: "楽天Visa", type: .creditCard, brand: "Visa", last4: "1234"), store: store),
+              case .success(let master) = SupportMutations.saveProfile(
+                PaymentProfileDraft(nickname: "三井住友", type: .creditCard, brand: "Mastercard", last4: "5678"), store: store) else {
+            return XCTFail()
+        }
+        let account = Account(id: "A", kind: .demo, displayName: "A")
+        store.context.insert(account)
+        for creator in ["c1", "c2", "c3"] {
+            let s = Support(accountID: "A", creatorID: creator, creatorName: creator, planID: "p-\(creator)", planTitle: "P", amount: 500)
+            s.reportedPaymentMethod = "card"
+            store.context.insert(s)
+        }
+        SupportMutations.setAssignment(store: store, accountID: "A", creatorID: "c3", planID: nil, profileID: master.id, state: .manual)
+
+        func labels() -> [String: String] {
+            let context = SupportPaymentContext(profiles: store.fetch(FetchDescriptor<PaymentProfile>()), accounts: store.accounts(),
+                                                payments: [])
+            let assignments = Dictionary(uniqueKeysWithValues: store.fetch(FetchDescriptor<SupportPaymentAssignment>()).map { ($0.key, $0) })
+            return Dictionary(uniqueKeysWithValues: store.fetch(FetchDescriptorFactorySupport.allSupports()).map { s in
+                (s.creatorID, context.summary(support: SupportSnapshot(s), assignment: assignments[s.key].map(AssignmentSnapshot.init)).cardLabel)
+            })
+        }
+
+        XCTAssertEqual(labels(), ["c1": "カード", "c2": "カード", "c3": "三井住友•••5678"])
+        SupportMutations.setAccountDefault(store: store, accountID: "A", profileID: visa.id)
+        XCTAssertEqual(labels(), ["c1": "楽天Visa•••1234", "c2": "楽天Visa•••1234", "c3": "三井住友•••5678"])
+        SupportMutations.setAccountDefault(store: store, accountID: "A", profileID: master.id)
+        XCTAssertEqual(labels(), ["c1": "三井住友•••5678", "c2": "三井住友•••5678", "c3": "三井住友•••5678"])
+        SupportMutations.setAccountDefault(store: store, accountID: "A", profileID: nil)
+        XCTAssertEqual(labels()["c1"], "カード")
     }
 }
 

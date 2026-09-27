@@ -11,7 +11,8 @@ struct SupportCreatorDetailView: View {
     @Query(sort: [SortDescriptor(\PaymentProfile.sortOrder), SortDescriptor(\PaymentProfile.createdAt)]) private var profiles: [PaymentProfile]
     @Query private var history: [SupportHistory]
     @Query private var creators: [Creator]
-    @Query(sort: [SortDescriptor(\Account.sortOrder), SortDescriptor(\Account.createdAt)]) private var accounts: [Account]
+    @Query private var payments: [PaymentRecord]
+    @Query(FetchDescriptorFactory.enabledAccounts()) private var accounts: [Account]
 
     @State private var editRequest: AssignmentEditRequest?
     @State private var flowRequest: PaymentFlowRequest?
@@ -27,6 +28,7 @@ struct SupportCreatorDetailView: View {
         historyDescriptor.fetchLimit = 30
         _history = Query(historyDescriptor)
         _creators = Query(filter: #Predicate<Creator> { $0.creatorID == creatorID })
+        _payments = Query(filter: #Predicate<PaymentRecord> { $0.creatorID == creatorID })
     }
 
     var body: some View {
@@ -34,9 +36,11 @@ struct SupportCreatorDetailView: View {
         let snapshots = supports.filter { known.contains($0.accountID) }.map(SupportSnapshot.init)
         let group = SupportAnalyzer.byCreator(supports: snapshots, assignments: assignments.map(AssignmentSnapshot.init),
                                               accountOrder: accounts.map(\.id), includeInactive: true).first
+        let visibleHistory = history.filter { known.contains($0.accountID) }
         let creator = creators.first
         let name = creator?.name ?? group?.creatorName ?? creatorID
-        let profileTuples = profiles.map { (id: $0.id, type: $0.type) }
+        let paymentContext = SupportPaymentContext(profiles: profiles, accounts: accounts,
+                                                   payments: payments.filter { known.contains($0.accountID) })
 
         List {
             if let refreshError {
@@ -74,11 +78,7 @@ struct SupportCreatorDetailView: View {
                             editRequest = AssignmentEditRequest(accountID: line.support.accountID, creatorID: creatorID,
                                                                 planID: line.support.planID)
                         } label: {
-                            SupportCreatorLineRow(
-                                line: line,
-                                profile: line.assignment?.paymentProfileID.flatMap { pid in profiles.first { $0.id == pid } },
-                                inferredProfile: inferredProfile(for: line, tuples: profileTuples)
-                            )
+                            SupportCreatorLineRow(line: line, payment: paymentContext.summary(for: line))
                         }
                         .buttonStyle(.plain)
                         .accessibilityIdentifier("supportCreatorLine-\(line.support.accountID)")
@@ -107,12 +107,12 @@ struct SupportCreatorDetailView: View {
             }
 
             Section {
-                if history.isEmpty {
+                if visibleHistory.isEmpty {
                     Text("まだ観測された変更はありません")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 } else {
-                    ForEach(history) { entry in
+                    ForEach(visibleHistory) { entry in
                         SupportHistoryRow(entry: entry, showsCreator: false)
                     }
                 }
@@ -126,8 +126,8 @@ struct SupportCreatorDetailView: View {
         .navigationTitle(name)
         .navigationBarTitleDisplayMode(.inline)
         .refreshable {
-            let ids = accounts.filter(\.enabled).map(\.id)
-            refreshError = await SupportSync.refresh(env: env, accountIDs: ids, includePayments: false)
+            let ids = accounts.map(\.id)
+            refreshError = await SupportSync.refresh(env: env, accountIDs: ids, includePayments: true)
         }
         .sheet(item: $editRequest, onDismiss: openPending) { request in
             AssignmentEditorSheet(request: request) { pending in
@@ -142,21 +142,12 @@ struct SupportCreatorDetailView: View {
         SupportSync.open(pendingWeb, env: env)
         pendingWeb = nil
     }
-
-    /// Display-only guess when the user has not assigned a profile (shown as "推定（未確認）").
-    private func inferredProfile(for line: SupportLine, tuples: [(id: String, type: PaymentProfileType)]) -> PaymentProfile? {
-        guard line.assignment?.paymentProfileID == nil,
-              let id = SupportAnalyzer.inferredProfileID(reportedPaymentMethod: line.support.reportedPaymentMethod, profiles: tuples)
-        else { return nil }
-        return profiles.first { $0.id == id }
-    }
 }
 
-/// Account line of the creator detail: plan title & fee, status and payment assignment.
+/// Account line of the creator detail: plan title & fee, status, and the payment line (card, 前回, 次回).
 struct SupportCreatorLineRow: View {
     let line: SupportLine
-    let profile: PaymentProfile?
-    var inferredProfile: PaymentProfile?
+    let payment: SupportPaymentSummary
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -181,8 +172,7 @@ struct SupportCreatorLineRow: View {
                     .foregroundStyle(line.support.isActive ? .primary : .secondary)
                     .strikethrough(!line.support.isActive)
             }
-            AssignmentSummaryView(assignment: line.assignment, profile: profile, inferredProfile: inferredProfile,
-                                  reportedPaymentMethod: line.support.reportedPaymentMethod)
+            SupportPaymentLine(summary: payment)
         }
         .padding(.vertical, 2)
         .contentShape(Rectangle())
@@ -192,7 +182,8 @@ struct SupportCreatorLineRow: View {
 // MARK: - Assignment editor (SPEC §13)
 
 /// Chooses which Payment Profile the user believes pays this support, and how sure they are.
-/// "Web で確認した" ⇒ `.verified` with `lastVerifiedAt = now`; otherwise `.manual`.
+/// "Webで確認した" ⇒ `.verified` with `lastVerifiedAt = now`; otherwise `.manual`. No profile of its own
+/// (アカウントの既定に従う) ⇒ the support inherits the account default when rendered.
 struct AssignmentEditorSheet: View {
     enum Confirmation: Hashable { case manual, verifiedInWeb }
 
@@ -204,6 +195,7 @@ struct AssignmentEditorSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Query(sort: [SortDescriptor(\PaymentProfile.sortOrder), SortDescriptor(\PaymentProfile.createdAt)]) private var profiles: [PaymentProfile]
     @Query private var supports: [Support]
+    @Query private var accountRows: [Account]
 
     @State private var selectedProfileID: String?
     @State private var confirmation: Confirmation = .manual
@@ -219,10 +211,15 @@ struct AssignmentEditorSheet: View {
         self.onOpenWeb = onOpenWeb
         let key = Support.key(accountID: request.accountID, creatorID: request.creatorID)
         _supports = Query(filter: #Predicate<Support> { $0.key == key })
+        let accountID = request.accountID
+        _accountRows = Query(filter: #Predicate<Account> { $0.id == accountID })
     }
 
     var body: some View {
         let support = supports.first
+        // Named only when the support line would show it (PaymentResolution skips a default FANBOX's type contradicts).
+        let accountDefault = accountRows.first?.defaultPaymentProfileID.flatMap { id in profiles.first { $0.id == id } }
+            .flatMap { PaymentResolution.contradicts($0.type, reportedPaymentMethod: support?.reportedPaymentMethod) ? nil : $0 }
         NavigationStack {
             Form {
                 Section {
@@ -246,7 +243,8 @@ struct AssignmentEditorSheet: View {
 
                 Section {
                     Picker("Payment Profile", selection: $selectedProfileID) {
-                        Text("未設定").tag(String?.none)
+                        Text(accountDefault.map { "アカウントの既定に従う（\(PaymentProfileSnapshot($0).shortLabel)）" } ?? "アカウントの既定に従う")
+                            .tag(String?.none)
                         ForEach(profiles) { p in
                             Text("\(p.nickname)  \(p.displayDetail)").tag(Optional(p.id))
                         }
@@ -257,7 +255,7 @@ struct AssignmentEditorSheet: View {
                     Button {
                         isAddingProfile = true
                     } label: {
-                        Label("Payment Profile を追加", systemImage: "plus")
+                        Label("Payment Profileを追加", systemImage: "plus")
                     }
                 } header: {
                     Text("支払い方法（Payment Profile）")
@@ -267,14 +265,14 @@ struct AssignmentEditorSheet: View {
                     Section {
                         Picker("確認状態", selection: $confirmation) {
                             Text("手動設定").tag(Confirmation.manual)
-                            Text("Web で確認した").tag(Confirmation.verifiedInWeb)
+                            Text("Webで確認した").tag(Confirmation.verifiedInWeb)
                         }
                         .pickerStyle(.segmented)
                         .accessibilityIdentifier("assignmentConfirmationPicker")
                     } header: {
                         Text("確認状態")
                     } footer: {
-                        Text("「Web で確認した」は FANBOX / pixiv のお支払い方法画面で実際に確認した場合のみ選んでください。確認日時が記録されます。")
+                        Text("「Webで確認した」はFANBOX / pixivのお支払い方法画面で実際に確認した場合のみ選んでください。確認日時が記録されます。")
                     }
                 }
 
@@ -298,13 +296,12 @@ struct AssignmentEditorSheet: View {
                     Button {
                         saveIfChanged(forcing: .manual)
                         saveStopMarkIfChanged()
-                        onOpenWeb(PendingWebOpen(accountID: request.accountID, destination: .paymentSettings, purpose: .payment))
+                        onOpenWeb(PendingWebOpen(accountID: request.accountID, destination: .creatorPlans(creatorID: request.creatorID),
+                                                 purpose: .payment))
                     } label: {
-                        Label("このアカウントのお支払い方法を Web で確認", systemImage: "safari")
+                        Label("このクリエイターのプランをWebで確認", systemImage: "safari")
                     }
-                    .accessibilityIdentifier("assignmentOpenPaymentSettings")
-                } footer: {
-                    Text("選択中の内容は「手動設定」として保存してから開きます。確認後、この画面で「Web で確認した」を選んでください。カード情報はアプリに保存されません。")
+                    .accessibilityIdentifier("assignmentOpenCreatorPlans")
                 }
             }
             .navigationTitle("支払い方法・停止予定")

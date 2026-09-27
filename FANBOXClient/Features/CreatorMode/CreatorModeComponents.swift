@@ -133,12 +133,12 @@ extension FanState {
 /// Resolves the Creator Mode account (enabled account with a creator page), shows the explanatory empty state when
 /// there is none, and passes the selected account + all creator accounts to `content`.
 struct CreatorAccountScope<Content: View>: View {
-    @Query(sort: [SortDescriptor(\Account.sortOrder), SortDescriptor(\Account.createdAt)]) private var accounts: [Account]
+    @Query(FetchDescriptorFactory.enabledAccounts()) private var accounts: [Account]
     @AppStorage(CreatorModeKeys.selectedAccountID) private var selectedID: String = ""
     @ViewBuilder var content: (Account, [Account]) -> Content
 
     var body: some View {
-        let creators = accounts.filter { $0.enabled && $0.creatorID != nil }
+        let creators = accounts.filter { $0.creatorID != nil }
         if let account = creators.first(where: { $0.id == selectedID }) ?? creators.first {
             content(account, creators)
                 .id(account.id)

@@ -76,7 +76,9 @@ struct CreatorPostsSection: View {
 
 struct CreatorPlansSection: View {
     let plans: [Plan]
+    /// Active supports of enabled accounts.
     let activeSupports: [Support]
+    /// Enabled account ids in display order.
     let accountOrder: [String]
     let onSupport: (Plan) -> Void
 
@@ -92,17 +94,12 @@ struct CreatorPlansSection: View {
             }
         } header: {
             Text("プラン")
-        } footer: {
-            if !plans.isEmpty {
-                Text("支援手続きはアカウントを選んで FANBOX / pixiv の決済画面で行います。カード情報はアプリに保存されません。")
-            }
         }
     }
 
     private func supporters(of plan: Plan) -> [String] {
         let ids = Set(activeSupports.filter { $0.planID == plan.planID }.map(\.accountID))
-        let ordered = accountOrder.filter(ids.contains)
-        return ordered + ids.subtracting(ordered).sorted()
+        return accountOrder.filter(ids.contains)
     }
 }
 
@@ -162,22 +159,28 @@ struct CreatorPlanRow: View {
 
 // MARK: - Support
 
-/// Creator-level support summary (SPEC §10.1) with the payment profile the user assigned (SPEC §13).
+/// Creator-level support summary (SPEC §10.1); each account line shows its card, 前回 and 次回 (`SupportPaymentLine`).
 struct CreatorSupportSection: View {
     let creatorID: String
     let summary: CreatorSupportSummary
 
+    @Query private var supports: [Support]
     @Query private var assignments: [SupportPaymentAssignment]
+    @Query private var payments: [PaymentRecord]
     @Query private var profiles: [PaymentProfile]
+    @Query(FetchDescriptorFactory.enabledAccounts()) private var accounts: [Account]
 
     init(creatorID: String, summary: CreatorSupportSummary) {
         self.creatorID = creatorID
         self.summary = summary
+        _supports = Query(filter: #Predicate<Support> { $0.creatorID == creatorID })
         _assignments = Query(filter: #Predicate<SupportPaymentAssignment> { $0.creatorID == creatorID })
+        _payments = Query(filter: #Predicate<PaymentRecord> { $0.creatorID == creatorID })
         _profiles = Query(sort: \PaymentProfile.sortOrder)
     }
 
     var body: some View {
+        let paymentContext = SupportPaymentContext(profiles: profiles, accounts: accounts, payments: payments)
         Section {
             HStack {
                 Text("合計月額")
@@ -198,7 +201,11 @@ struct CreatorSupportSection: View {
                     Text(line.planTitle)
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    paymentLine(accountID: line.accountID)
+                    if let support = supports.first(where: { $0.accountID == line.accountID }) {
+                        let assignment = assignments.first { $0.accountID == line.accountID }
+                        SupportPaymentLine(summary: paymentContext.summary(support: SupportSnapshot(support),
+                                                                           assignment: assignment.map(AssignmentSnapshot.init)))
+                    }
                 }
                 .padding(.vertical, 2)
             }
@@ -222,44 +229,6 @@ struct CreatorSupportSection: View {
                 Text("このクリエイターを支援しているアカウントはありません。")
             }
         }
-    }
-
-    @ViewBuilder
-    private func paymentLine(accountID: String) -> some View {
-        if let assignment = assignments.first(where: { $0.accountID == accountID }) {
-            let profile = assignment.paymentProfileID.flatMap { id in profiles.first { $0.id == id } }
-            HStack(spacing: 6) {
-                Image(systemName: "creditcard")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Text(profile?.nickname ?? "未設定")
-                    .font(.caption)
-                if let detail = profile?.displayDetail, detail != profile?.nickname {
-                    Text(detail).font(.caption2).foregroundStyle(.secondary)
-                }
-                CreatorVerificationPill(state: assignment.verificationState, lastVerifiedAt: assignment.lastVerifiedAt)
-            }
-        } else {
-            HStack(spacing: 6) {
-                Image(systemName: "creditcard")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Text("支払い方法: 未設定")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        }
-    }
-}
-
-/// SPEC §13: an inferred payment method MUST be labeled as a guess. Same labels, symbols and tints as the Support
-/// screens (`VerificationLabel` / `SupportText.verificationLabel`), so one assignment reads the same everywhere.
-struct CreatorVerificationPill: View {
-    let state: VerificationState
-    var lastVerifiedAt: Date? = nil
-
-    var body: some View {
-        VerificationLabel(state: state, lastVerifiedAt: lastVerifiedAt)
     }
 }
 

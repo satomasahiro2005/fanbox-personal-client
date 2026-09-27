@@ -36,6 +36,8 @@ enum AppRoute: Hashable {
     case notificationInbox
     case supportCreator(creatorID: String)
     case supportAccount(accountID: String)
+    /// Every observed payment of one account (all months).
+    case paymentRecords(accountID: String)
     case supportHistory
     case paymentProfiles
     case draft(draftID: String)
@@ -96,6 +98,7 @@ final class AppRouter {
         case "newsletter": return .newsletter(newsletterID: parts[1])
         case "supportCreator": return .supportCreator(creatorID: parts[1])
         case "supportAccount": return .supportAccount(accountID: parts[1])
+        case "paymentRecords": return .paymentRecords(accountID: parts[1])
         case "draft": return .draft(draftID: parts[1])
         case "plans": return .plans(creatorID: parts[1])
         case "search": return .search(query: parts[1])

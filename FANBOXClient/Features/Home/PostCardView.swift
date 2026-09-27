@@ -6,6 +6,8 @@ struct PostCardView: View {
     let post: Post
     /// Plans of the post's creator (for the "対象 Plan" label). Optional.
     var plans: [Plan] = []
+    /// 閲覧可能 lists enabled accounts only.
+    let enabledAccountIDs: Set<String>
 
     @Environment(AppEnvironment.self) private var env
 
@@ -31,11 +33,12 @@ struct PostCardView: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
                 }
-                if !post.accessAccountIDs.isEmpty {
-                    AccountBadgeRow(accountIDs: post.accessAccountIDs)
-                        .accessibilityLabel("閲覧可能: \(post.accessAccountIDs.count) アカウント")
+                let viewers = PostAccountLogic.viewerAccountIDs(post.accessAccountIDs, enabledAccountIDs: enabledAccountIDs)
+                if !viewers.isEmpty {
+                    AccountBadgeRow(accountIDs: viewers)
+                        .accessibilityLabel("閲覧可能: \(viewers.count)アカウント")
                 }
-                HomePostStatusPills(post: post, plans: plans)
+                HomePostStatusPills(post: post, plans: plans, enabledAccountIDs: enabledAccountIDs)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 

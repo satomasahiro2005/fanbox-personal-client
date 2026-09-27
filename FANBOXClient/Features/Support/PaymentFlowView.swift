@@ -30,7 +30,7 @@ struct PaymentFlowView: View {
     @Query private var plans: [Plan]
     @Query private var supports: [Support]
     @Query private var creators: [Creator]
-    @Query(sort: [SortDescriptor(\Account.sortOrder), SortDescriptor(\Account.createdAt)]) private var accounts: [Account]
+    @Query(FetchDescriptorFactory.enabledAccounts()) private var enabledAccounts: [Account]
     @Query(sort: [SortDescriptor(\PaymentProfile.sortOrder), SortDescriptor(\PaymentProfile.createdAt)]) private var profiles: [PaymentProfile]
 
     @State private var step: Step = .plan
@@ -55,8 +55,6 @@ struct PaymentFlowView: View {
     private var creatorName: String {
         creators.first?.name ?? supports.first?.creatorName ?? creatorID
     }
-
-    private var enabledAccounts: [Account] { accounts.filter(\.enabled) }
 
     var body: some View {
         NavigationStack {
@@ -131,7 +129,9 @@ struct PaymentFlowView: View {
                         selectedPlanID = plan.planID
                     } label: {
                         PlanChoiceRow(plan: plan, isSelected: selectedPlanID == plan.planID,
-                                      supportingAccountIDs: supports.filter { $0.isActive && $0.planID == plan.planID }.map(\.accountID))
+                                      supportingAccountIDs: enabledAccounts.map(\.id).filter { id in
+                                          supports.contains { $0.accountID == id && $0.isActive && $0.planID == plan.planID }
+                                      })
                     }
                     .buttonStyle(.plain)
                     .accessibilityIdentifier("paymentFlowPlan-\(plan.planID)")
@@ -216,7 +216,7 @@ struct PaymentFlowView: View {
                 Button {
                     isAddingProfile = true
                 } label: {
-                    Label("Payment Profile を追加", systemImage: "plus")
+                    Label("Payment Profileを追加", systemImage: "plus")
                 }
             } header: {
                 Text("3. Payment Profile（任意）")
@@ -375,18 +375,32 @@ struct PaymentFlowView: View {
         planLoadError = outcome.error
     }
 
+    /// The support's own profile, else the account default unless FANBOX reports a contradicting payment type; no
+    /// selection when the account has neither, so another account's card is never carried over.
     private func preselectProfile(for accountID: String?) {
-        guard let accountID,
-              let existing = SupportMutations.assignment(store: env.store, accountID: accountID, creatorID: creatorID),
-              let profileID = existing.paymentProfileID,
-              profiles.contains(where: { $0.id == profileID }) else { return }
-        selectedProfileID = profileID
+        guard let accountID else { return }
+        let own = SupportMutations.assignment(store: env.store, accountID: accountID, creatorID: creatorID)?.paymentProfileID
+        let reported = supports.first { $0.accountID == accountID && $0.isActive }?.reportedPaymentMethod
+        let inherited = inheritedDefaultID(for: accountID).flatMap { id in profiles.first { $0.id == id } }
+            .flatMap { PaymentResolution.contradicts($0.type, reportedPaymentMethod: reported) ? nil : $0.id }
+        let candidate = own ?? inherited
+        selectedProfileID = candidate.flatMap { id in profiles.contains { $0.id == id } ? id : nil }
+    }
+
+    /// The account default when this support has no profile of its own (it inherits the default).
+    private func inheritedDefaultID(for accountID: String) -> String? {
+        guard SupportMutations.assignment(store: env.store, accountID: accountID, creatorID: creatorID)?.paymentProfileID == nil else {
+            return nil
+        }
+        return enabledAccounts.first { $0.id == accountID }?.defaultPaymentProfileID
     }
 
     private func handOff() {
         guard let accountID = selectedAccountID else { return }
+        // Keeping the inherited default records no profile of its own, so a later change of the default still applies.
+        let profileID = selectedProfileID == inheritedDefaultID(for: accountID) ? nil : selectedProfileID
         SupportMutations.recordPaymentIntent(store: env.store, accountID: accountID, creatorID: creatorID,
-                                             planID: selectedPlanID, profileID: selectedProfileID)
+                                             planID: selectedPlanID, profileID: profileID)
         let destination: WebDestination = selectedPlanID.map { .plan(creatorID: creatorID, planID: $0) } ?? .creatorPlans(creatorID: creatorID)
         onHandoff(PendingWebOpen(accountID: accountID, destination: destination, purpose: .payment))
     }

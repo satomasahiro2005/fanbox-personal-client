@@ -47,6 +47,25 @@ final class MultiAccountSupportTests: XCTestCase {
         XCTAssertTrue(events.allSatisfy { $0.type == .supportChanged && $0.creatorID == "c1" })
     }
 
+    func testTwoAccountsOnTheSamePlanOfOneCreatorAreTwoSupports() async throws {
+        let h = try SyncHarness()
+        h.setClock(SyncFixtures.midMonthJST)
+        let a = h.addAccount("A", pixivUserID: "pA", isMain: true)
+        let b = h.addAccount("B", pixivUserID: "pB")
+        h.mock.update {
+            $0.supports[a.id] = [SyncFixtures.support("c1", plan: "p500", fee: 500)]
+            $0.supports[b.id] = [SyncFixtures.support("c1", plan: "p500", fee: 500)]
+        }
+        await h.engine.sync(.supports, accountID: a.id, reason: .appLaunch)
+        await h.engine.sync(.supports, accountID: b.id, reason: .appLaunch)
+        let snapshots = h.store.fetch(FetchDescriptorFactorySupport.allSupports()).map(SupportSnapshot.init)
+        let group = try XCTUnwrap(SupportAnalyzer.byCreator(supports: snapshots, accountOrder: [a.id, b.id]).first)
+        XCTAssertEqual(group.lines.map(\.support.accountID), [a.id, b.id], "one line per account on the same plan")
+        XCTAssertEqual(group.lines.map(\.support.planID), ["p500", "p500"])
+        XCTAssertEqual(group.total, 1000, "the same plan twice is counted twice")
+        XCTAssertEqual(SupportAnalyzer.summarize(supports: snapshots, payments: []).recurringMonthly, 1000)
+    }
+
     func testPaymentAttentionForTheSameCreatorIsOnePerAccount() throws {
         let h = try SyncHarness()
         let a = h.addAccount("A", pixivUserID: "pA", isMain: true)

@@ -112,6 +112,8 @@ final class AccountService {
     @ObservationIgnored let remote: RemoteDataSourceProvider
     /// Cancels an account's in-flight network work (native URLSession + WebView transport). Wired by AppEnvironment.
     @ObservationIgnored var sessionRevoker: SessionRevoking?
+    /// Called after the set of enabled accounts changed (enable / disable / remove), e.g. to refresh the app badge.
+    @ObservationIgnored var onEnabledAccountsChanged: (() -> Void)?
 
     /// Temporary credential keys used to verify a captured session before it is stored for an account.
     static let probeKeyPrefix = "login-probe-"
@@ -170,6 +172,7 @@ final class AccountService {
         guard let initial = store.account(id: accountID) else { throw AccountLoginError.accountNotFound }
         let webProfileID = initial.webProfileID
         let wasPlaceholder = Self.isPlaceholder(initial)
+        let wasEnabled = initial.enabled
         let boundUserID = initial.pixivUserID
         let expectedName = initial.displayName
 
@@ -278,6 +281,8 @@ final class AccountService {
 
         if loginInProgressAccountID == accountID { loginInProgressAccountID = nil }
         store.save()
+        // A re-login enables a disabled account again: its stored relations count again.
+        if !wasEnabled && !wasPlaceholder { enabledAccountsChanged() }
         AppLog.auth.info("login completed for account \(accountID, privacy: .public)")
     }
 
@@ -436,19 +441,20 @@ final class AccountService {
             job.updatedAt = .now
         }
 
-        // Denormalized account id arrays (filtered in memory: no #Predicate on arrays).
+        // Denormalized account id arrays (filtered in memory: no #Predicate on arrays). The flags count enabled accounts only.
+        let remaining = store.enabledAccountIDs().subtracting([accountID])
         var creatorFlags: [String: (followed: Bool, supported: Bool)] = [:]
         var ownedCreatorIDs: Set<String> = []
         for creator in store.fetch(FetchDescriptor<Creator>()) {
             var touched = false
             if creator.followedByAccountIDs.contains(accountID) {
                 creator.followedByAccountIDs.removeAll { $0 == accountID }
-                creator.isFollowed = !creator.followedByAccountIDs.isEmpty
+                creator.isFollowed = creator.followedByAccountIDs.contains(where: remaining.contains)
                 touched = true
             }
             if creator.supportedByAccountIDs.contains(accountID) {
                 creator.supportedByAccountIDs.removeAll { $0 == accountID }
-                creator.isSupported = !creator.supportedByAccountIDs.isEmpty
+                creator.isSupported = creator.supportedByAccountIDs.contains(where: remaining.contains)
                 touched = true
             }
             if creator.ownedByAccountID == accountID {
@@ -481,6 +487,7 @@ final class AccountService {
         identityWarnings[accountID] = nil
         if wasMain { assignMainIfNeeded() }
         store.save()
+        onEnabledAccountsChanged?()
         AppLog.auth.info("account removed \(accountID, privacy: .public)")
 
         // Secrets last (after the UI already reflects the removal).
@@ -510,13 +517,18 @@ final class AccountService {
 
     func setMain(accountID: String) {
         guard let target = store.account(id: accountID), !Self.isPlaceholder(target) else { return }
+        let wasEnabled = target.enabled
         target.enabled = true
         for a in store.accounts(includeDisabled: true) { a.isMain = (a.id == accountID) }
         store.save()
+        if !wasEnabled { enabledAccountsChanged() }
     }
 
+    /// A disabled account keeps its local data, but it is hidden from every screen (feeds, creators, supports and totals,
+    /// notifications, badge) until the account is enabled again; Settings → アカウント still lists it.
     func setEnabled(accountID: String, _ enabled: Bool) {
         guard let account = store.account(id: accountID), !Self.isPlaceholder(account) else { return }
+        let changed = account.enabled != enabled
         account.enabled = enabled
         if !enabled && account.isMain {
             account.isMain = false
@@ -525,6 +537,13 @@ final class AccountService {
             assignMainIfNeeded()
         }
         store.save()
+        if changed { enabledAccountsChanged() }
+    }
+
+    /// Re-derives the creator / feed relation flags (they count enabled accounts only) and notifies the observer.
+    private func enabledAccountsChanged() {
+        store.refreshRelationFlags()
+        onEnabledAccountsChanged?()
     }
 
     /// Ensures exactly one enabled account is main (prefers real accounts, then sort order).

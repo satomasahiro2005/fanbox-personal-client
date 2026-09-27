@@ -25,7 +25,7 @@ struct NotificationInboxView: View {
     /// Unread events only (small set): segment counts, "すべて既読" state.
     @Query(filter: #Predicate<NotificationEvent> { !$0.isRead }) private var unreadEvents: [NotificationEvent]
     @Query(sort: \Newsletter.createdAt, order: .reverse) private var newsletters: [Newsletter]
-    @Query(sort: [SortDescriptor(\Account.sortOrder), SortDescriptor(\Account.createdAt)]) private var accounts: [Account]
+    @Query(FetchDescriptorFactory.enabledAccounts()) private var accounts: [Account]
 
     @State private var segment: NotificationInboxSegment = .notifications
     @State private var filter = NotificationInboxFilter()
@@ -42,6 +42,18 @@ struct NotificationInboxView: View {
     init() {}
 
     private var isSheetHosted: Bool { latchedSheetHosted ?? env.router.isNotificationInboxPresented }
+
+    /// Items of disabled accounts never show, whatever the user's filter.
+    private var enabledOnly: NotificationInboxFilter { NotificationInboxFilter(enabledAccountIDs: Set(accounts.map(\.id))) }
+
+    /// The user's filter restricted to enabled accounts; a chosen account that has been disabled since counts as none.
+    private var effectiveFilter: NotificationInboxFilter {
+        var effective = filter
+        let enabled = Set(accounts.map(\.id))
+        effective.enabledAccountIDs = enabled
+        if let id = effective.accountID, !enabled.contains(id) { effective.accountID = nil }
+        return effective
+    }
 
     var body: some View {
         let hosted = isSheetHosted
@@ -66,7 +78,7 @@ struct NotificationInboxView: View {
         let accountsByID = Dictionary(accounts.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         switch segment {
         case .notifications:
-            InboxEventList(limit: eventLimit, filter: filter, syncError: syncError, lastSyncAt: lastSyncAt,
+            InboxEventList(limit: eventLimit, filter: effectiveFilter, syncError: syncError, lastSyncAt: lastSyncAt,
                            header: AnyView(header(showTypeChips: true, accountsByID: accountsByID)),
                            onOpen: open, onSetRead: setRead,
                            onShowMore: { eventLimit += Self.pageSize },
@@ -78,6 +90,7 @@ struct NotificationInboxView: View {
 
     private var newslettersList: some View {
         let accountsByID = Dictionary(accounts.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let filter = effectiveFilter
         let visible = newsletters.filter {
             filter.matches(type: .newsletter, accountIDs: $0.accountIDs, isRead: $0.isRead)
         }
@@ -91,7 +104,8 @@ struct NotificationInboxView: View {
                 }
                 ForEach(visible, id: \.newsletterID) { newsletter in
                     NavigationLink(value: AppRoute.newsletter(newsletterID: newsletter.newsletterID)) {
-                        NewsletterInboxRow(newsletter: newsletter, now: now)
+                        NewsletterInboxRow(newsletter: newsletter, now: now,
+                                           accountIDs: newsletter.accountIDs.filter { accountsByID[$0] != nil })
                     }
                     .swipeActions(edge: .leading, allowsFullSwipe: true) {
                         Button {
@@ -111,9 +125,11 @@ struct NotificationInboxView: View {
             .listStyle(.plain)
             .overlay {
                 if visible.isEmpty {
-                    EmptyStateView(title: newsletters.isEmpty ? "おたよりはありません" : "該当するおたよりはありません",
+                    // Items hidden only because their accounts are disabled are not a user filter.
+                    let noItems = newsletters.isEmpty || !filter.isActive
+                    EmptyStateView(title: noItems ? "おたよりはありません" : "該当するおたよりはありません",
                                    systemImage: "envelope",
-                                   message: newsletters.isEmpty ? "クリエイターからのおたよりがここに表示されます" : "フィルターを変更してください")
+                                   message: noItems ? "クリエイターからのおたよりがここに表示されます" : "フィルターを変更してください")
                 }
             }
             .safeAreaInset(edge: .top, spacing: 0) { header(showTypeChips: false, accountsByID: accountsByID) }
@@ -164,9 +180,13 @@ struct NotificationInboxView: View {
 
     private func segmentTitle(_ seg: NotificationInboxSegment) -> String {
         let unread: Int
+        let enabledOnly = self.enabledOnly
         switch seg {
-        case .notifications: unread = unreadEvents.count
-        case .newsletters: unread = newsletters.lazy.filter { !$0.isRead }.count
+        case .notifications: unread = unreadEvents.lazy.filter { enabledOnly.matches($0) }.count
+        case .newsletters:
+            unread = newsletters.lazy.filter {
+                !$0.isRead && enabledOnly.matches(type: .newsletter, accountIDs: $0.accountIDs, isRead: $0.isRead)
+            }.count
         }
         return unread > 0 ? "\(seg.title) (\(unread))" : seg.title
     }
@@ -180,9 +200,10 @@ struct NotificationInboxView: View {
                 }
             }
         } label: {
-            let name = filter.accountID.flatMap { accountsByID[$0]?.displayName }
+            let accountID = effectiveFilter.accountID
+            let name = accountID.flatMap { accountsByID[$0]?.displayName }
             InboxFilterChipLabel(title: name ?? "すべてのアカウント", systemImage: "person.crop.circle",
-                                 isSelected: filter.accountID != nil, showsChevron: true)
+                                 isSelected: accountID != nil, showsChevron: true)
         }
         .accessibilityIdentifier("notificationAccountFilter")
     }
@@ -205,6 +226,7 @@ struct NotificationInboxView: View {
     }
 
     private var hasUnreadInCurrentView: Bool {
+        let filter = effectiveFilter
         switch segment {
         case .notifications:
             return unreadEvents.contains { filter.matches($0) }
@@ -228,6 +250,7 @@ struct NotificationInboxView: View {
     /// "すべて既読" applies to what matches the current filter (all unread rows when no filter is active), including rows
     /// beyond the locally shown page.
     private func markAllRead() {
+        let filter = effectiveFilter
         switch segment {
         case .notifications: NotificationReadActions.markAllRead(unreadEvents, filter: filter, store: env.store)
         case .newsletters: NotificationReadActions.markAllRead(newsletters, filter: filter, store: env.store)
@@ -327,7 +350,8 @@ private struct InboxEventList: View {
                     Button {
                         onOpen(event)
                     } label: {
-                        NotificationInboxRow(event: event, text: text)
+                        NotificationInboxRow(event: event, text: text,
+                                             accountIDs: event.accountIDs.filter { filter.enabledAccountIDs?.contains($0) ?? true })
                     }
                     .buttonStyle(.plain)
                     .swipeActions(edge: .leading, allowsFullSwipe: true) {
@@ -350,7 +374,8 @@ private struct InboxEventList: View {
             .listStyle(.plain)
             .overlay {
                 if visible.isEmpty && !hasMore {
-                    if page.isEmpty {
+                    // Items hidden only because their accounts are disabled are not a user filter.
+                    if page.isEmpty || !filter.isActive {
                         EmptyStateView(title: "通知はありません", systemImage: "bell",
                                        message: "新しいコメント・投稿・おたよりなどがここに表示されます")
                     } else {
@@ -410,6 +435,8 @@ struct NotificationInboxRouteDestinations: ViewModifier {
 struct NotificationInboxRow: View {
     let event: NotificationEvent
     let text: NotificationRowText
+    /// Receiving accounts to show (enabled ones).
+    let accountIDs: [String]
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
@@ -440,7 +467,7 @@ struct NotificationInboxRow: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
                 }
-                AccountBadgeRow(accountIDs: event.accountIDs)
+                AccountBadgeRow(accountIDs: accountIDs)
                 HStack(spacing: 6) {
                     Text(text.relativeTime)
                         .font(.caption2)
@@ -466,6 +493,8 @@ struct NotificationInboxRow: View {
 struct NewsletterInboxRow: View {
     let newsletter: Newsletter
     let now: Date
+    /// Receiving accounts to show (enabled ones).
+    let accountIDs: [String]
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
@@ -494,7 +523,7 @@ struct NewsletterInboxRow: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
-                AccountBadgeRow(accountIDs: newsletter.accountIDs)
+                AccountBadgeRow(accountIDs: accountIDs)
             }
         }
         .padding(.vertical, 4)

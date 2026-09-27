@@ -82,6 +82,74 @@ final class AccountServiceTests: XCTestCase {
         XCTAssertFalse(c.isMain)
     }
 
+    /// A disabled account keeps its local data, but its supports / follows no longer count: the creator and feed flags are
+    /// re-derived from the enabled accounts, and enabling it again restores them.
+    func testSetEnabledRecomputesRelationFlagsAndKeepsTheData() throws {
+        let a = service.addDemoAccount(name: "A")
+        let b = service.addDemoAccount(name: "B")
+        store.applySupports([SyncFixtures.support("shared", plan: "p1", fee: 500)], account: a.context, source: .sync, isBaseline: true)
+        store.applySupports([SyncFixtures.support("shared", plan: "p2", fee: 1000), SyncFixtures.support("onlyB", plan: "p3", fee: 300)],
+                            account: b.context, source: .sync, isBaseline: true)
+        store.applyFollowing([RemoteCreator(creatorID: "followedByB", name: "Followed by B")], account: b.context)
+        store.upsertPostSummaries([SyncFixtures.summary("s1", creator: "shared"), SyncFixtures.summary("b1", creator: "onlyB"),
+                                   SyncFixtures.summary("f1", creator: "followedByB")], account: b.context, source: .creator)
+        let shared = try XCTUnwrap(store.creator(id: "shared"))
+        let onlyB = try XCTUnwrap(store.creator(id: "onlyB"))
+        let followed = try XCTUnwrap(store.creator(id: "followedByB"))
+        XCTAssertTrue(onlyB.isSupported)
+        XCTAssertTrue(followed.isFollowed)
+        XCTAssertEqual(store.post(id: "b1")?.isFromSupportedCreator, true)
+        var notified = 0
+        service.onEnabledAccountsChanged = { notified += 1 }
+
+        service.setEnabled(accountID: b.id, false)
+        XCTAssertEqual(notified, 1, "the badge observer hears about it")
+        XCTAssertTrue(shared.isSupported, "A still supports it")
+        XCTAssertFalse(onlyB.isSupported)
+        XCTAssertFalse(followed.isFollowed)
+        XCTAssertEqual(store.post(id: "s1")?.isFromSupportedCreator, true)
+        XCTAssertEqual(store.post(id: "b1")?.isFromSupportedCreator, false)
+        XCTAssertEqual(store.post(id: "f1")?.isFromFollowedCreator, false)
+        XCTAssertEqual(onlyB.supportedByAccountIDs, [b.id], "the relation stays stored")
+        XCTAssertEqual(store.supports(accountID: b.id).count, 2, "local data is kept")
+        service.setEnabled(accountID: b.id, false)
+        XCTAssertEqual(notified, 1, "no change, no notification")
+
+        service.setEnabled(accountID: b.id, true)
+        XCTAssertEqual(notified, 2)
+        XCTAssertTrue(onlyB.isSupported)
+        XCTAssertTrue(followed.isFollowed)
+        XCTAssertEqual(store.post(id: "b1")?.isFromSupportedCreator, true)
+        XCTAssertEqual(store.post(id: "f1")?.isFromFollowedCreator, true)
+
+        // A sync of the enabled account does not bring the disabled account's relations back.
+        service.setEnabled(accountID: b.id, false)
+        store.applySupports([SyncFixtures.support("shared", plan: "p1", fee: 500), SyncFixtures.support("onlyB", plan: "p4", fee: 100)],
+                            account: a.context, source: .sync)
+        XCTAssertTrue(onlyB.isSupported, "now A supports it too")
+        store.applySupports([SyncFixtures.support("shared", plan: "p1", fee: 500)], account: a.context, source: .sync)
+        XCTAssertFalse(onlyB.isSupported, "only the disabled B is left")
+    }
+
+    /// The app badge counts unread events of enabled accounts only (an event left without accounts counts nowhere).
+    func testUnreadBadgeCountsEnabledAccountsOnly() {
+        let a = service.addDemoAccount(name: "A")
+        let b = service.addDemoAccount(name: "B")
+        let events = [
+            NotificationEvent(id: "e1", type: .newPost, accountIDs: [a.id], title: "", message: "", timestamp: .now),
+            NotificationEvent(id: "e2", type: .newPost, accountIDs: [b.id], title: "", message: "", timestamp: .now),
+            NotificationEvent(id: "e3", type: .newPost, accountIDs: [a.id, b.id], title: "", message: "", timestamp: .now),
+            NotificationEvent(id: "e4", type: .newPost, accountIDs: [], title: "", message: "", timestamp: .now),
+        ]
+        events.forEach(store.context.insert)
+        store.save()
+        XCTAssertEqual(store.unreadNotificationEventCount(), 3)
+        service.setEnabled(accountID: b.id, false)
+        XCTAssertEqual(store.unreadNotificationEventCount(), 2)
+        service.setEnabled(accountID: b.id, true)
+        XCTAssertEqual(store.unreadNotificationEventCount(), 3)
+    }
+
     func testReorderAndPaletteAssignment() {
         let a = service.addDemoAccount(name: "A")
         let b = service.addDemoAccount(name: "B")

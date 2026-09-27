@@ -86,7 +86,8 @@ extension LocalStore {
             if followed { if !set.contains(account.accountID) { set.append(account.accountID) } } else { set.removeAll { $0 == account.accountID } }
             if set != row.followedByAccountIDs { row.followedByAccountIDs = set }
             let wasFollowed = row.isFollowed
-            row.isFollowed = !set.isEmpty
+            let enabled = enabledAccountIDs()
+            row.isFollowed = set.contains(where: enabled.contains)
             if wasFollowed != row.isFollowed { refreshPostFeedFlags(creatorIDs: [row.creatorID]) }
         }
         save()
@@ -96,6 +97,7 @@ extension LocalStore {
     func applyFollowing(_ creators: [RemoteCreator], account: AccountContext) {
         let accountID = account.accountID
         let followedIDs = Set(creators.map(\.creatorID))
+        let enabled = enabledAccountIDs()
         var changedFollow: Set<String> = []
 
         for remote in creators {
@@ -104,17 +106,34 @@ extension LocalStore {
             if !row.followedByAccountIDs.contains(accountID) {
                 row.followedByAccountIDs.append(accountID)
             }
-            if !row.isFollowed { row.isFollowed = true; changedFollow.insert(row.creatorID) }
+            let now = row.followedByAccountIDs.contains(where: enabled.contains)
+            if now != row.isFollowed { row.isFollowed = now; changedFollow.insert(row.creatorID) }
         }
         // `isSupported && isStopped` → 停止予定 on this account's Support rows (SPEC §10.3 来月予定).
         applyStopObservations(creators, account: account)
         // Creators this account no longer follows (array property → filter in memory).
         for row in fetch(FetchDescriptor<Creator>()) where !followedIDs.contains(row.creatorID) && row.followedByAccountIDs.contains(accountID) {
             row.followedByAccountIDs.removeAll { $0 == accountID }
-            let now = !row.followedByAccountIDs.isEmpty
+            let now = row.followedByAccountIDs.contains(where: enabled.contains)
             if now != row.isFollowed { row.isFollowed = now; changedFollow.insert(row.creatorID) }
         }
         if !changedFollow.isEmpty { refreshPostFeedFlags(creatorIDs: changedFollow) }
+        save()
+    }
+
+    /// Re-derives `Creator.isSupported` / `isFollowed` from the account id arrays, counting enabled accounts only, and the
+    /// feed flags of the posts of every creator whose flags changed. Called at launch and when an account is enabled or
+    /// disabled: the disabled account's relations stay stored (re-enabling shows them again) but no longer count anywhere.
+    func refreshRelationFlags() {
+        let enabled = enabledAccountIDs()
+        var changed: Set<String> = []
+        for creator in fetch(FetchDescriptor<Creator>()) {
+            let supported = creator.supportedByAccountIDs.contains(where: enabled.contains)
+            let followed = creator.followedByAccountIDs.contains(where: enabled.contains)
+            if creator.isSupported != supported { creator.isSupported = supported; changed.insert(creator.creatorID) }
+            if creator.isFollowed != followed { creator.isFollowed = followed; changed.insert(creator.creatorID) }
+        }
+        if !changed.isEmpty { refreshPostFeedFlags(creatorIDs: changed) }
         save()
     }
 
@@ -298,7 +317,9 @@ extension LocalStore {
         }
 
         // Denormalize supportedByAccountIDs / isSupported on Creator and the per-account plan fee on PostAccess.
+        // isSupported counts enabled accounts only (a disabled account's supports stay stored but hidden).
         let affected = Set(existing.keys).union(remoteByCreator.keys)
+        let enabled = enabledAccountIDs()
         var supportFlagChanged: Set<String> = []
         for creatorID in affected {
             let isActive = existing[creatorID]?.status == .active || remoteByCreator[creatorID] != nil
@@ -307,7 +328,7 @@ extension LocalStore {
             var set = creator.supportedByAccountIDs
             if isActive { if !set.contains(accountID) { set.append(accountID) } } else { set.removeAll { $0 == accountID } }
             if set != creator.supportedByAccountIDs { creator.supportedByAccountIDs = set }
-            let supported = !set.isEmpty
+            let supported = set.contains(where: enabled.contains)
             if creator.isSupported != supported { creator.isSupported = supported; supportFlagChanged.insert(creatorID) }
         }
         let feeChanged = Set(diff.observedCreatorIDs)

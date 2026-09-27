@@ -33,10 +33,16 @@ final class HomeAccountLogicTests: XCTestCase {
     }
 
     func testRestricted() {
-        XCTAssertTrue(PostAccountLogic.isRestricted(feeRequired: 500, accessAccountIDs: [], hasBlocks: false))
-        XCTAssertFalse(PostAccountLogic.isRestricted(feeRequired: 500, accessAccountIDs: ["A"], hasBlocks: false))
-        XCTAssertFalse(PostAccountLogic.isRestricted(feeRequired: 0, accessAccountIDs: [], hasBlocks: false))
-        XCTAssertFalse(PostAccountLogic.isRestricted(feeRequired: 500, accessAccountIDs: [], hasBlocks: true), "cached body wins")
+        let enabled: Set<String> = ["A"]
+        XCTAssertTrue(PostAccountLogic.isRestricted(feeRequired: 500, accessAccountIDs: [], enabledAccountIDs: enabled, hasBlocks: false))
+        XCTAssertFalse(PostAccountLogic.isRestricted(feeRequired: 500, accessAccountIDs: ["A"], enabledAccountIDs: enabled, hasBlocks: false))
+        XCTAssertFalse(PostAccountLogic.isRestricted(feeRequired: 0, accessAccountIDs: [], enabledAccountIDs: enabled, hasBlocks: false))
+        XCTAssertFalse(PostAccountLogic.isRestricted(feeRequired: 500, accessAccountIDs: [], enabledAccountIDs: enabled, hasBlocks: true),
+                       "cached body wins")
+        // Only a disabled account can view it: restricted, and that account is not listed as 閲覧可能.
+        XCTAssertTrue(PostAccountLogic.isRestricted(feeRequired: 500, accessAccountIDs: ["B"], enabledAccountIDs: enabled, hasBlocks: false))
+        XCTAssertEqual(PostAccountLogic.viewerAccountIDs(["B", "A"], enabledAccountIDs: enabled), ["A"])
+        XCTAssertEqual(PostAccountLogic.viewerAccountIDs(["B"], enabledAccountIDs: enabled), [])
     }
 
     func testOptions() {
@@ -92,11 +98,20 @@ final class HomeAccountLogicTests: XCTestCase {
         let enabled = store.accounts().map(\.id)
         XCTAssertEqual(PostAccountLogic.effectiveAccountID(override: nil, best: best, enabledAccountIDs: enabled), "B")
         XCTAssertEqual(PostAccountLogic.effectiveAccountID(override: "A", best: best, enabledAccountIDs: enabled), "A")
+        XCTAssertEqual(PostAccountLogic.viewerAccountIDs(["B"], enabledAccountIDs: store.enabledAccountIDs()), ["B"])
         b.enabled = false
         store.save()
         XCTAssertEqual(PostAccountLogic.effectiveAccountID(override: "B", best: AccountSelector.bestAccount(postID: "p", store: store),
                                                            enabledAccountIDs: store.accounts().map(\.id)), "A",
                        "override of a disabled account falls back")
+        // The disabled viewer is neither listed as 閲覧可能 nor lifts the paid-post restriction marker.
+        XCTAssertEqual(PostAccountLogic.viewerAccountIDs(["B"], enabledAccountIDs: store.enabledAccountIDs()), [])
+        XCTAssertTrue(PostAccountLogic.isRestricted(feeRequired: 500, accessAccountIDs: ["B"], enabledAccountIDs: store.enabledAccountIDs(),
+                                                    hasBlocks: false))
+        b.enabled = true
+        store.save()
+        XCTAssertFalse(PostAccountLogic.isRestricted(feeRequired: 500, accessAccountIDs: ["B"], enabledAccountIDs: store.enabledAccountIDs(),
+                                                     hasBlocks: false), "re-enabled: the account's access counts again")
     }
 
     func testEmbedLinks() {

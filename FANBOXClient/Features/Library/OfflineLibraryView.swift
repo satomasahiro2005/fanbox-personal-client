@@ -534,13 +534,18 @@ private struct OfflineCreatorPicker: View {
     @Environment(\.dismiss) private var dismiss
     @Query(filter: #Predicate<Creator> { $0.isFollowed || $0.isSupported || $0.hasKnownPosts }, sort: \Creator.name)
     private var candidates: [Creator]
+    @Query(FetchDescriptorFactory.enabledAccounts()) private var accounts: [Account]
     @State private var filter = ""
 
     var body: some View {
         NavigationStack {
             List {
+                // `hasKnownPosts` also comes from a disabled account's feeds: creators related only to disabled accounts
+                // stay hidden, as in the creator list.
+                let enabled = Set(accounts.map(\.id))
                 let visible = candidates.filter {
                     $0.offlineRecentCount == 0 && (filter.isEmpty || $0.name.localizedStandardContains(filter))
+                        && !CreatorFilterFacts.isOnlyRelatedToDisabledAccounts($0, enabledAccountIDs: enabled)
                 }
                 if visible.isEmpty {
                     Text("追加できるクリエイターがいません").foregroundStyle(.secondary)

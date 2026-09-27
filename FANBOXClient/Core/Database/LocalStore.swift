@@ -64,6 +64,9 @@ final class LocalStore {
 
     func account(id: String) -> Account? { first(#Predicate<Account> { $0.id == id }) }
 
+    /// Ids of the enabled accounts. Data of a disabled account stays stored but is hidden everywhere (lists, totals, badge).
+    func enabledAccountIDs() -> Set<String> { Set(accounts().map(\.id)) }
+
     func mainAccount() -> Account? { accounts().first(where: \.isMain) ?? accounts().first }
 
     // MARK: - Lookups

@@ -76,9 +76,14 @@ enum PostAccountLogic {
         }
     }
 
-    /// Nobody among my accounts can view the paid body (→ "支援が必要です").
-    static func isRestricted(feeRequired: Int, accessAccountIDs: [String], hasBlocks: Bool) -> Bool {
-        feeRequired > 0 && accessAccountIDs.isEmpty && !hasBlocks
+    /// The enabled accounts among `accessAccountIDs` (閲覧可能). A disabled account's access is not shown or counted.
+    static func viewerAccountIDs(_ accessAccountIDs: [String], enabledAccountIDs: Set<String>) -> [String] {
+        accessAccountIDs.filter(enabledAccountIDs.contains)
+    }
+
+    /// Nobody among my enabled accounts can view the paid body (→ "支援が必要です").
+    static func isRestricted(feeRequired: Int, accessAccountIDs: [String], enabledAccountIDs: Set<String>, hasBlocks: Bool) -> Bool {
+        feeRequired > 0 && viewerAccountIDs(accessAccountIDs, enabledAccountIDs: enabledAccountIDs).isEmpty && !hasBlocks
     }
 
     /// Menu rows, in account order.

@@ -21,4 +21,11 @@ enum FetchDescriptorFactory {
         d.fetchLimit = limit
         return d
     }
+
+    /// Enabled accounts in display order, for every screen except Settings → アカウント: a disabled account (and a
+    /// login placeholder) and its data are hidden until it is enabled again. `@Query(FetchDescriptorFactory.enabledAccounts())`.
+    static func enabledAccounts() -> FetchDescriptor<Account> {
+        FetchDescriptor<Account>(predicate: #Predicate<Account> { $0.enabled },
+                                 sortBy: [SortDescriptor(\.sortOrder), SortDescriptor(\.createdAt)])
+    }
 }

@@ -1,3 +1,4 @@
+import SwiftData
 import XCTest
 @testable import FANBOXClient
 
@@ -142,6 +143,57 @@ final class FixSupportDashboardTests: XCTestCase {
         XCTAssertEqual(SupportText.paymentStateUnknown, "決済状態を確認できません")
         XCTAssertFalse(SupportText.assertsCause(SupportText.paymentStateUnknown))
         XCTAssertFalse(SupportText.assertsCause(SupportText.paymentStateUnknownDetail))
+    }
+
+    /// A disabled account is left out of the dashboard (定常月額 / 今月実請求 / 来月予定, counts, 要確認) and of the
+    /// Creator別 lines; enabling it again brings everything back. Local rows are kept either way.
+    @MainActor
+    func testDisabledAccountsAreLeftOutOfTheDashboard() throws {
+        let store = LocalStore(container: try PersistenceController.makeContainer(inMemory: true))
+        let a = Account(id: "A", kind: .demo, displayName: "A", isMain: true, sortOrder: 0)
+        let b = Account(id: "B", kind: .demo, displayName: "B", sortOrder: 1)
+        b.hasUnpaidPayments = true
+        [a, b].forEach(store.context.insert)
+        store.context.insert(Support(accountID: "A", creatorID: "c1", creatorName: "C1", planID: "p1", planTitle: "P", amount: 500))
+        store.context.insert(Support(accountID: "B", creatorID: "c1", creatorName: "C1", planID: "p2", planTitle: "P", amount: 1_000))
+        let stopping = Support(accountID: "B", creatorID: "c2", creatorName: "C2", planID: "p3", planTitle: "P", amount: 300)
+        stopping.stoppingObservedAt = jst(2026, 9, 2)
+        store.context.insert(stopping)
+        let missing = Support(accountID: "B", creatorID: "c3", creatorName: "C3", planID: "p4", planTitle: "P", amount: 700, status: .missing)
+        missing.needsAttention = true
+        store.context.insert(missing)
+        store.context.insert(PaymentRecord(paymentID: "pay-b", accountID: "B", creatorID: "c1", creatorName: "C1", amount: 1_000,
+                                           paidAt: jst(2026, 9, 1, 9)))
+        b.enabled = false
+        store.save()
+        let now = jst(2026, 9, 10)
+
+        func creatorLines() -> [String: [String]] {
+            let enabled = store.enabledAccountIDs()
+            let snapshots = store.fetch(FetchDescriptorFactorySupport.allSupports()).filter { enabled.contains($0.accountID) }
+                .map(SupportSnapshot.init)
+            let groups = SupportAnalyzer.byCreator(supports: snapshots, accountOrder: store.accounts().map(\.id))
+            return Dictionary(uniqueKeysWithValues: groups.map { ($0.creatorID, $0.lines.map(\.support.accountID)) })
+        }
+
+        let disabled = SupportAnalyzer.summary(store: store, now: now)
+        XCTAssertEqual(disabled.recurringMonthly, 500)
+        XCTAssertEqual(disabled.nextMonthPlanned, 500)
+        XCTAssertNil(disabled.actualThisMonth, "B's payment is hidden and A has none")
+        XCTAssertEqual(disabled.creatorCount, 1)
+        XCTAssertEqual(disabled.accountCount, 1)
+        XCTAssertEqual(disabled.attentionCount, 0, "neither B's anomaly nor B's unpaid flag")
+        XCTAssertEqual(creatorLines(), ["c1": ["A"]])
+
+        b.enabled = true
+        store.save()
+        let enabled = SupportAnalyzer.summary(store: store, now: now)
+        XCTAssertEqual(enabled.recurringMonthly, 1_800)
+        XCTAssertEqual(enabled.nextMonthPlanned, 1_500)
+        XCTAssertEqual(enabled.actualThisMonth, 1_000)
+        XCTAssertEqual(enabled.accountCount, 2)
+        XCTAssertEqual(enabled.attentionCount, 2)
+        XCTAssertEqual(creatorLines(), ["c1": ["A", "B"], "c2": ["B"]])
     }
 
     func testStopLabelsSeparateObservedFromUserEntered() {

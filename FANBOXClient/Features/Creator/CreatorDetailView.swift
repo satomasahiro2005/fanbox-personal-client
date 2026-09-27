@@ -26,7 +26,8 @@ struct CreatorDetailView: View {
     @Query private var supportRows: [Support]
     @Query private var plans: [Plan]
     @Query private var posts: [Post]
-    @Query(sort: [SortDescriptor(\Account.sortOrder), SortDescriptor(\Account.createdAt)]) private var accounts: [Account]
+    /// Enabled accounts only: supports, follows and ownership of a disabled account are not shown.
+    @Query(FetchDescriptorFactory.enabledAccounts()) private var accounts: [Account]
 
     @State private var section: CreatorDetailSection = .posts
     @State private var refreshError: RemoteError?
@@ -62,7 +63,7 @@ struct CreatorDetailView: View {
         let accountsByID = Dictionary(accounts.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         let followingIDs = accounts.map(\.id).filter { (creator?.followedByAccountIDs ?? []).contains($0) }
         let ownerIDs = accounts.filter { $0.creatorID == creatorID || $0.id == creator?.ownedByAccountID }.map(\.id)
-        let webAccounts = CreatorAccountOrdering.preferred(accounts.filter(\.enabled), first: ownerIDs + summary.accountIDs + followingIDs)
+        let webAccounts = CreatorAccountOrdering.preferred(accounts, first: ownerIDs + summary.accountIDs + followingIDs)
 
         List {
             if let refreshError {
@@ -96,7 +97,8 @@ struct CreatorDetailView: View {
             case .posts:
                 CreatorPostsSection(creatorID: creatorID, posts: posts, accountsByID: accountsByID)
             case .plans:
-                CreatorPlansSection(plans: plans, activeSupports: supportRows.filter(\.isActive), accountOrder: accounts.map(\.id)) { plan in
+                CreatorPlansSection(plans: plans, activeSupports: supportRows.filter { $0.isActive && knownAccountIDs.contains($0.accountID) },
+                                    accountOrder: accounts.map(\.id)) { plan in
                     paymentRequest = PaymentFlowRequest(creatorID: creatorID, planID: plan.planID)
                 }
             case .support:

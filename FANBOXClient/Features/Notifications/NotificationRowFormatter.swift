@@ -181,10 +181,15 @@ struct NotificationInboxFilter: Equatable, Sendable {
     /// nil = all accounts.
     var accountID: String? = nil
     var unreadOnly: Bool = false
+    /// Set by the inbox from the enabled accounts: an item shows only when one of its receiving accounts is enabled, so
+    /// items of disabled accounts (and items left without any account after a removal) are hidden. nil = no restriction.
+    var enabledAccountIDs: Set<String>? = nil
 
+    /// A filter the user chose (the enabled-account restriction is not a user choice).
     var isActive: Bool { type != nil || accountID != nil || unreadOnly }
 
     func matches(type eventType: NotificationEventType, accountIDs: [String], isRead: Bool) -> Bool {
+        if let enabledAccountIDs, !accountIDs.contains(where: enabledAccountIDs.contains) { return false }
         if let type, type != eventType { return false }
         if let accountID, !accountIDs.contains(accountID) { return false }
         if unreadOnly && isRead { return false }

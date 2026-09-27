@@ -15,31 +15,52 @@ struct CreatorFilterFacts: Sendable, Equatable {
     var latestPostAt: Date? = nil
     /// Sum of active support amounts (JPY / month) across my accounts.
     var monthlySupportTotal: Int = 0
+    /// Supported, followed or owned only by disabled accounts: hidden from the list (every chip, すべて included).
+    var isOnlyRelatedToDisabledAccounts: Bool = false
 }
 
 extension CreatorFilterFacts {
-    /// Builds facts from the SwiftData row plus cross-table knowledge.
+    /// Builds facts from the SwiftData row plus cross-table knowledge. Only enabled accounts count: relations of a
+    /// disabled account stay stored but are ignored, and a creator related to disabled accounts only is hidden.
     /// - Parameters:
-    ///   - activeSupportTotals: creatorID → sum of ACTIVE `Support.amount` (see `CreatorSupportSummary.totalsByCreator`).
-    ///   - ownCreatorIDs: `Account.creatorID` of my accounts (a creator page I own counts even if sync hasn't set `ownedByAccountID`).
+    ///   - activeSupportTotals: creatorID → sum of ACTIVE `Support.amount` of enabled accounts
+    ///     (see `CreatorSupportSummary.totalsByCreator`).
+    ///   - ownCreatorIDs: `Account.creatorID` of my enabled accounts (a creator page I own counts even if sync hasn't set
+    ///     `ownedByAccountID`).
+    ///   - enabledAccountIDs: ids of the enabled accounts.
     ///   - localLatestPostAt: creatorID → newest local `Post.publishedAt` (fallback when `latestPostAt` is not denormalized yet).
     @MainActor
-    init(creator: Creator, activeSupportTotals: [String: Int], ownCreatorIDs: Set<String>, localLatestPostAt: [String: Date] = [:]) {
+    init(creator: Creator, activeSupportTotals: [String: Int], ownCreatorIDs: Set<String>, enabledAccountIDs: Set<String>,
+         localLatestPostAt: [String: Date] = [:]) {
         let total = activeSupportTotals[creator.creatorID]
         let latest = [creator.latestPostAt, localLatestPostAt[creator.creatorID]].compactMap { $0 }.max()
+        let supported = creator.supportedByAccountIDs.contains(where: enabledAccountIDs.contains) || total != nil
+        let followed = creator.followedByAccountIDs.contains(where: enabledAccountIDs.contains)
+        let owned = creator.ownedByAccountID.map(enabledAccountIDs.contains) == true || ownCreatorIDs.contains(creator.creatorID)
+        let hasRelation = !creator.supportedByAccountIDs.isEmpty || !creator.followedByAccountIDs.isEmpty
+            || creator.ownedByAccountID != nil
         self.init(
             creatorID: creator.creatorID,
             name: creator.name,
             memo: creator.memo,
             profileText: creator.profileText,
-            isSupported: creator.isSupported || !creator.supportedByAccountIDs.isEmpty || total != nil,
-            isFollowed: creator.isFollowed || !creator.followedByAccountIDs.isEmpty,
+            isSupported: supported,
+            isFollowed: followed,
             hasPosts: creator.hasKnownPosts || latest != nil,
             isFavorite: creator.isFavorite,
-            isOwnCreator: creator.ownedByAccountID != nil || ownCreatorIDs.contains(creator.creatorID),
+            isOwnCreator: owned,
             latestPostAt: latest,
-            monthlySupportTotal: total ?? 0
+            monthlySupportTotal: total ?? 0,
+            isOnlyRelatedToDisabledAccounts: hasRelation && !supported && !followed && !owned
         )
+    }
+
+    /// True when the creator's stored relations (support, follow, ownership) exist and all belong to accounts outside
+    /// `enabledAccountIDs`. For lists that hide such creators without building the full facts (offline creator picker).
+    @MainActor
+    static func isOnlyRelatedToDisabledAccounts(_ creator: Creator, enabledAccountIDs: Set<String>) -> Bool {
+        let related = creator.supportedByAccountIDs + creator.followedByAccountIDs + [creator.ownedByAccountID].compactMap { $0 }
+        return !related.isEmpty && !related.contains(where: enabledAccountIDs.contains)
     }
 }
 
@@ -77,6 +98,7 @@ enum CreatorListFilter: String, CaseIterable, Identifiable, Sendable {
     }
 
     func matches(_ facts: CreatorFilterFacts) -> Bool {
+        if facts.isOnlyRelatedToDisabledAccounts { return false }
         switch self {
         case .all: return true
         case .supporting: return facts.isSupported

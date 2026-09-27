@@ -60,6 +60,20 @@ final class ScreenTourUITests: XCTestCase {
     func testSupportScreens() {
         expect("supportHistoryList", in: launch(["-initialTab", "support", "-openRoute", "supportHistory"]))
         expect("paymentProfilesList", in: launch(["-initialTab", "support", "-openRoute", "paymentProfiles"]))
+        // Once the demo supports and payments have synced, the creator rows show each account's card and last payment.
+        let app = launch(["-initialTab", "support"])
+        expect("supportDashboard", in: app)
+        let list = app.descendants(matching: .any)["supportRootList"].firstMatch
+        let lastPayment = app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "前回")).firstMatch
+        // The rows sit below the dashboard (and the demo's 要確認 card): scroll until one is on screen.
+        var found = lastPayment.waitForExistence(timeout: 15)
+        for _ in 0..<5 where !found {
+            list.swipeUp()
+            found = lastPayment.waitForExistence(timeout: 5)
+        }
+        XCTAssertTrue(found, "no support row shows 前回")
+        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "カード")).firstMatch.exists,
+                      "no support row shows a card label")
     }
 
     func testCreatorModeScreens() {

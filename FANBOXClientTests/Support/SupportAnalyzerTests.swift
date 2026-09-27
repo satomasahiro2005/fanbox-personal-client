@@ -87,6 +87,71 @@ final class SupportAnalyzerTests: XCTestCase {
         XCTAssertEqual(SupportAnalyzer.paymentsInMonth(payments, containing: date(2026, 1, 20), calendar: tokyo).map(\.amount), [400])
     }
 
+    // MARK: lastPayments (前回)
+
+    func testLastPaymentIsTheNewestPerAccountAndCreator() {
+        let payments = [
+            PaymentSnapshot(accountID: "A", creatorID: "c1", amount: 500, paidAt: date(2026, 8, 2, 9)),
+            PaymentSnapshot(accountID: "A", creatorID: "c1", amount: 500, paidAt: date(2026, 9, 2, 9)),
+            PaymentSnapshot(accountID: "A", creatorID: "c1", amount: 500, paidAt: date(2026, 7, 2, 9)),
+            PaymentSnapshot(accountID: "A", creatorID: "c2", amount: 1_000, paidAt: date(2026, 9, 3, 9)),
+        ]
+        let last = SupportAnalyzer.lastPayments(payments)
+        XCTAssertEqual(Set(last.keys), ["A|c1", "A|c2"])
+        XCTAssertEqual(last["A|c1"]?.paidAt, date(2026, 9, 2, 9))
+        XCTAssertEqual(last["A|c1"]?.amount, 500)
+        XCTAssertEqual(last["A|c2"]?.paidAt, date(2026, 9, 3, 9))
+        XCTAssertEqual(last["A|c2"]?.amount, 1_000)
+    }
+
+    func testLastPaymentKeepsAccountsSeparate() {
+        let payments = [
+            PaymentSnapshot(accountID: "A", creatorID: "c1", amount: 500, paidAt: date(2026, 9, 2, 9)),
+            PaymentSnapshot(accountID: "B", creatorID: "c1", amount: 1_000, paidAt: date(2026, 9, 4, 9)),
+        ]
+        let last = SupportAnalyzer.lastPayments(payments)
+        XCTAssertEqual(last["A|c1"]?.paidAt, date(2026, 9, 2, 9), "B's newer payment is not A's")
+        XCTAssertEqual(last["A|c1"]?.amount, 500)
+        XCTAssertEqual(last["B|c1"]?.paidAt, date(2026, 9, 4, 9))
+        XCTAssertEqual(last["B|c1"]?.amount, 1_000)
+    }
+
+    func testLastPaymentSkipsRecordsWithoutCreator() {
+        let payments = [
+            PaymentSnapshot(accountID: "A", creatorID: nil, amount: 9_999, paidAt: date(2026, 9, 20)),
+            PaymentSnapshot(accountID: "A", creatorID: "", amount: 9_999, paidAt: date(2026, 9, 21)),
+            PaymentSnapshot(accountID: "A", creatorID: "c1", amount: 500, paidAt: date(2026, 9, 2)),
+        ]
+        let last = SupportAnalyzer.lastPayments(payments)
+        XCTAssertEqual(Array(last.keys), ["A|c1"])
+        XCTAssertEqual(last["A|c1"]?.amount, 500)
+    }
+
+    func testSameMonthUpgradePaymentIsTheLastPayment() throws {
+        // Monthly ¥500 charge on 9/2, then an upgrade to ¥3,000 on 9/15 charges the ¥2,500 difference at once.
+        let payments = [
+            PaymentSnapshot(accountID: "A", creatorID: "c1", amount: 500, paidAt: date(2026, 9, 2, 9)),
+            PaymentSnapshot(accountID: "A", creatorID: "c1", amount: 2_500, paidAt: date(2026, 9, 15, 21)),
+        ]
+        let last = try XCTUnwrap(SupportAnalyzer.lastPayments(payments)["A|c1"])
+        XCTAssertEqual(last.paidAt, date(2026, 9, 15, 21))
+        XCTAssertEqual(last.amount, 2_500, "the newest charge as it is, never summed with the monthly one")
+    }
+
+    func testUnknownAmountStillGivesTheDate() throws {
+        let payments = [
+            PaymentSnapshot(accountID: "A", creatorID: "c1", amount: 500, paidAt: date(2026, 8, 2)),
+            PaymentSnapshot(accountID: "A", creatorID: "c1", amount: 0, paidAt: date(2026, 9, 2, 9), isAmountKnown: false),
+        ]
+        let last = try XCTUnwrap(SupportAnalyzer.lastPayments(payments)["A|c1"])
+        XCTAssertEqual(last.paidAt, date(2026, 9, 2, 9))
+        XCTAssertNil(last.amount, "never shown as ¥0")
+        XCTAssertEqual(SupportText.lastPaymentText(last, now: date(2026, 9, 24), calendar: tokyo), "前回9/2")
+        let known = LastPayment(accountID: "A", creatorID: "c1", paidAt: date(2026, 9, 2, 9), amount: 500)
+        XCTAssertEqual(SupportText.lastPaymentText(known, now: date(2026, 9, 24), calendar: tokyo), "前回9/2 ¥500")
+        XCTAssertEqual(SupportText.lastPaymentText(known, showsAmount: false, now: date(2026, 9, 24), calendar: tokyo), "前回9/2")
+    }
+
     func testMonthLabel() {
         XCTAssertEqual(SupportAnalyzer.monthLabel(date(2026, 9, 24), calendar: tokyo), "9月")
         XCTAssertEqual(SupportAnalyzer.monthKey(date(2026, 1, 2), calendar: tokyo), "2026-01")
@@ -188,10 +253,17 @@ final class SupportAnalyzerTests: XCTestCase {
         store.save()
 
         let s = SupportAnalyzer.summary(store: store, now: date(2026, 9, 20), calendar: tokyo)
-        XCTAssertEqual(s.recurringMonthly, 1_500, "disabled accounts still pay; unknown accounts are ignored")
+        XCTAssertEqual(s.recurringMonthly, 500, "disabled and unknown accounts are left out")
         XCTAssertEqual(s.actualThisMonth, 500)
-        XCTAssertEqual(s.creatorCount, 2)
-        XCTAssertEqual(s.accountCount, 2)
+        XCTAssertEqual(s.creatorCount, 1)
+        XCTAssertEqual(s.accountCount, 1)
         XCTAssertEqual(s.attentionCount, 1)
+
+        // Re-enabling brings the account's supports back into the totals.
+        b.enabled = true
+        store.save()
+        let enabled = SupportAnalyzer.summary(store: store, now: date(2026, 9, 20), calendar: tokyo)
+        XCTAssertEqual(enabled.recurringMonthly, 1_500)
+        XCTAssertEqual(enabled.accountCount, 2)
     }
 }

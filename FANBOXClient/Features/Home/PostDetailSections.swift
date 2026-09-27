@@ -4,6 +4,8 @@ import SwiftUI
 struct PostDetailHeader: View {
     let post: Post
     var plans: [Plan] = []
+    /// 閲覧可能 lists enabled accounts only.
+    let enabledAccountIDs: Set<String>
     var localTags: [String] = []
     var editTags: () -> Void
 
@@ -31,13 +33,14 @@ struct PostDetailHeader: View {
             .buttonStyle(.plain)
             .accessibilityIdentifier("postCreatorLink")
 
-            if !post.accessAccountIDs.isEmpty {
+            let viewers = PostAccountLogic.viewerAccountIDs(post.accessAccountIDs, enabledAccountIDs: enabledAccountIDs)
+            if !viewers.isEmpty {
                 HStack(spacing: 6) {
                     Text("閲覧可能").font(.caption).foregroundStyle(.secondary)
-                    AccountBadgeRow(accountIDs: post.accessAccountIDs)
+                    AccountBadgeRow(accountIDs: viewers)
                 }
             }
-            HomePostStatusPills(post: post, plans: plans)
+            HomePostStatusPills(post: post, plans: plans, enabledAccountIDs: enabledAccountIDs)
 
             if !post.fanboxTags.isEmpty {
                 HomeFlowLayout(spacing: 6, lineSpacing: 6) {
