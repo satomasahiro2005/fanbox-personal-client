@@ -37,9 +37,6 @@ struct OfflineLibraryView: View {
                 StorageUsageSummaryView(usage: env.media.usage, capacity: env.settings.cacheCapacity)
                 Toggle("閲覧した投稿を自動保存", isOn: $settings.autoSaveViewedPosts)
                     .accessibilityIdentifier("offlineAutoSaveToggle")
-            } footer: {
-                Text("保存単位: この投稿 / Creator の最近 N 件 / 今後閲覧した投稿。過去履歴の無制限な取得は行いません。"
-                     + "保存したメディアは容量を超えたときに最後に削除され、その投稿の保存は解除されます。")
             }
 
             Section {
@@ -60,7 +57,7 @@ struct OfflineLibraryView: View {
             }
         }
         .listStyle(.insetGrouped)
-        .navigationTitle("Offline ライブラリ")
+        .navigationTitle("Offlineライブラリ")
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Menu {
@@ -107,7 +104,7 @@ private struct OfflinePostsSection: View {
         Section {
             if posts.isEmpty {
                 EmptyStateView(title: "保存した投稿はありません", systemImage: "arrow.down.circle",
-                               message: "投稿詳細の「Offline 保存」で本文と画像を端末に保存できます。")
+                               message: "投稿詳細の「Offline保存」で本文と画像を端末に保存できます。")
             }
             ForEach(posts) { post in
                 NavigationLink(value: AppRoute.post(postID: post.postID)) {
@@ -129,7 +126,7 @@ private struct OfflinePostsSection: View {
                     Button("再保存", systemImage: "arrow.clockwise") {
                         Task { await env.offline.save(postID: post.postID) }
                     }
-                    Button("Offline 保存を解除", systemImage: "arrow.down.circle.dotted") {
+                    Button("Offline保存を解除", systemImage: "arrow.down.circle.dotted") {
                         env.offline.remove(postID: post.postID)
                     }
                     Button("キャッシュ削除", systemImage: "trash", role: .destructive) {
@@ -138,7 +135,7 @@ private struct OfflinePostsSection: View {
                 }
             }
         } header: {
-            Text("保存済みの投稿 \(posts.count) 件")
+            Text("保存済みの投稿\(posts.count)件")
         }
     }
 }
@@ -200,12 +197,12 @@ private struct OfflinePostStatusLine: View {
                         .foregroundStyle(.orange)
                 }
                 if mediaBytes > 0 {
-                    Text("メディア \(Formatters.bytes(mediaBytes))").font(.caption2).foregroundStyle(.tertiary)
+                    Text("メディア\(Formatters.bytes(mediaBytes))").font(.caption2).foregroundStyle(.tertiary)
                 } else if hasBody {
                     Text("テキストのみ").font(.caption2).foregroundStyle(.tertiary)
                 }
                 if let summary = env.offline.lastSummaries[postID], summary.mediaBlocked > 0 {
-                    Text("通信モードにより \(summary.mediaBlocked) 件未取得")
+                    Text("通信モードにより\(summary.mediaBlocked)件未取得")
                         .font(.caption2)
                         .foregroundStyle(.orange)
                 }
@@ -224,21 +221,13 @@ private struct OfflineCreatorsSection: View {
 
     var body: some View {
         Section {
-            if creators.isEmpty {
-                Text("クリエイターごとに「最近 N 件」を自動で保存できます。")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
             ForEach(creators) { creator in
                 OfflineCreatorRuleRow(creator: creator)
             }
             Button("クリエイターを追加", systemImage: "plus.circle") { isPickingCreator = true }
                 .accessibilityIdentifier("offlineAddCreator")
         } header: {
-            Text("Creator の最近 N 件")
-        } footer: {
-            Text("同期で見つかった新しい投稿は自動で保存され、最近 N 件から外れた投稿は保存が解除されます。"
-                 + "引っ張って更新すると、各クリエイターの最新ページを1回だけ取得して再適用します。")
+            Text("Creatorの最近N件")
         }
     }
 }
@@ -335,7 +324,7 @@ struct OfflineImagesSection: View {
                     .accessibilityIdentifier("offlineImagesLoadMore")
             }
         } header: {
-            Text("画像 \(items.count) 枚")
+            Text("画像\(items.count)枚")
         }
     }
 
@@ -405,7 +394,7 @@ private struct OfflineFilesSection: View {
         Section {
             if items.isEmpty {
                 EmptyStateView(title: "保存済みのファイルはありません", systemImage: "doc",
-                               message: "Offline 保存した投稿の添付ファイル・音声・動画がここに表示されます。")
+                               message: "Offline保存した投稿の添付ファイル・音声・動画がここに表示されます。")
             }
             ForEach(items) { item in
                 let row = OfflineFileRow(item: item, displayName: Self.displayName(item, names: index.names),
@@ -425,7 +414,7 @@ private struct OfflineFilesSection: View {
                 }
             }
         } header: {
-            Text("ファイル \(items.count) 件")
+            Text("ファイル\(items.count)件")
         }
     }
 
@@ -454,7 +443,7 @@ private struct OfflineCreatorRuleRow: View {
             AvatarView(url: creator.iconURL, size: 36)
             VStack(alignment: .leading, spacing: 2) {
                 Text(creator.name).font(.subheadline.weight(.medium)).lineLimit(1)
-                Text("最近 \(creator.offlineRecentCount) 件を保存")
+                Text("最近\(creator.offlineRecentCount)件を保存")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -464,7 +453,7 @@ private struct OfflineCreatorRuleRow: View {
             }
             Menu {
                 ForEach(Self.choices, id: \.self) { n in
-                    Button("\(n) 件") { run(count: n) }
+                    Button("\(n)件") { run(count: n) }
                 }
                 Button("今すぐ保存", systemImage: "arrow.down.circle") { run(count: creator.offlineRecentCount) }
                 Divider()
@@ -563,7 +552,7 @@ private struct OfflineCreatorPicker: View {
                 }
             }
             .searchable(text: $filter, prompt: Text("クリエイター名"))
-            .navigationTitle("最近 \(env.settings.creatorRecentCount) 件を保存")
+            .navigationTitle("最近\(env.settings.creatorRecentCount)件を保存")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("閉じる") { dismiss() } }

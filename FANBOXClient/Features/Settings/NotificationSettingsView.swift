@@ -31,7 +31,7 @@ struct NotificationSettingsSection: View {
                 Button {
                     openSystemSettings()
                 } label: {
-                    Label("iOS の設定で通知を許可", systemImage: "gear")
+                    Label("iOSの設定で通知を許可", systemImage: "gear")
                 }
             }
 
@@ -49,7 +49,7 @@ struct NotificationSettingsSection: View {
                 Button {
                     openSystemSettings()
                 } label: {
-                    Label("iOS の設定を開く", systemImage: "gear")
+                    Label("iOSの設定を開く", systemImage: "gear")
                 }
             }
 
@@ -61,9 +61,6 @@ struct NotificationSettingsSection: View {
             .accessibilityIdentifier("remoteRelayLink")
         } header: {
             Text("通知")
-        } footer: {
-            Text("通知は起動時の更新・起動中の定期確認・Background App Refresh で検出し、本文やコメントを先に取得してから通知します。"
-                 + "バックグラウンドの実行時刻は iOS が決めるため、即時の検出は保証されません。")
         }
         .task { await refreshStatus() }
         .task {
@@ -115,15 +112,7 @@ struct RemoteRelaySettingsView: View {
                                                            token: deviceToken, lastError: lastError)
         Form {
             Section {
-                Text("APNs Relay は任意の機能です。使わなくても、起動時・起動中の定期確認・Background App Refresh で通知を検出できます。")
-                Text("Relay は「アカウントのどれかに何かが起きた」という内容のない (content-free) サイレント通知を送るだけです。"
-                     + "通知を受け取ったアプリが、自分のセッションで FANBOX から直接取得します。")
-                    .foregroundStyle(.secondary)
-            }
-            .font(.callout)
-
-            Section {
-                Toggle("APNs Relay を使う", isOn: $settings.remoteRelayEnabled)
+                Toggle("APNs Relayを使う", isOn: $settings.remoteRelayEnabled)
                     .accessibilityIdentifier("remoteRelayToggle")
                 TextField("https://relay.example.com", text: $urlDraft)
                     .keyboardType(.URL)
@@ -135,18 +124,16 @@ struct RemoteRelaySettingsView: View {
                 if !urlDraft.isEmpty || settings.remoteRelayEnabled, let message = RelaySettingsSupport.validationMessage(validation) {
                     Text(message).font(.caption).foregroundStyle(.orange)
                 }
-                Button("URL を保存") { commitURL() }
+                Button("URLを保存") { commitURL() }
                     .disabled(urlDraft == settings.remoteRelayURL || !(validation.isValid || urlDraft.isEmpty))
             } header: {
                 Text("Relay")
-            } footer: {
-                Text("自分で運用する Relay の URL を入力します。https のみ使用できます。")
             }
 
             Section {
                 LabeledContent("状態", value: RelaySettingsSupport.registrationText(state))
                     .accessibilityIdentifier("remoteRelayState")
-                LabeledContent("APNs デバイストークン", value: RelaySettingsSupport.tokenHint(deviceToken))
+                LabeledContent("APNsデバイストークン", value: RelaySettingsSupport.tokenHint(deviceToken))
                 if let lastError, !lastError.isEmpty {
                     LabeledContent("登録エラー") {
                         Text(ResearchLogFormatter.safe(lastError)).font(.caption).multilineTextAlignment(.trailing)
@@ -155,19 +142,17 @@ struct RemoteRelaySettingsView: View {
                 Button {
                     registerIfReady()
                 } label: {
-                    Label("APNs に登録", systemImage: "antenna.radiowaves.left.and.right")
+                    Label("APNsに登録", systemImage: "antenna.radiowaves.left.and.right")
                 }
                 .disabled(!settings.remoteRelayEnabled || !RelaySettingsSupport.validate(settings.remoteRelayURL).isValid)
             } header: {
                 Text("登録状態")
-            } footer: {
-                Text("デバイストークンは先頭のみ表示します。v1.0 には Relay サーバは含まれていません（設計: docs/NOTIFICATION_RELAY.md）。")
             }
 
-            Section("Relay に渡すもの") {
-                RelayDataRow(text: "APNs デバイストークン", allowed: true)
+            Section("Relayに渡すもの") {
+                RelayDataRow(text: "APNsデバイストークン", allowed: true)
                 RelayDataRow(text: "アカウントを区別する不透明なヒント（ランダム値）", allowed: true)
-                RelayDataRow(text: "FANBOX の Cookie / FANBOXSESSID / CSRF Token", allowed: false)
+                RelayDataRow(text: "FANBOXのCookie / FANBOXSESSID / CSRF Token", allowed: false)
                 RelayDataRow(text: "投稿本文・コメント・おたより", allowed: false)
                 RelayDataRow(text: "支援者・支援状態・決済の情報", allowed: false)
             }

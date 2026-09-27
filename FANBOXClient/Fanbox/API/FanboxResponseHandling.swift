@@ -21,13 +21,13 @@ enum FanboxResponseHandling {
         do {
             envelope = try decoder.decode(Envelope.self, from: data)
         } catch {
-            throw RemoteError.decoding(endpoint: endpointKey, detail: "レスポンスが JSON オブジェクトではありません")
+            throw RemoteError.decoding(endpoint: endpointKey, detail: "レスポンスがJSONオブジェクトではありません")
         }
         if let code = envelope.error, !envelope.hasBody {
             throw mapErrorCode(code, statusCode: statusCode)
         }
         guard envelope.hasBody else {
-            throw RemoteError.decoding(endpoint: endpointKey, detail: "body がありません")
+            throw RemoteError.decoding(endpoint: endpointKey, detail: "bodyがありません")
         }
         do {
             return try decoder.decode(BodyWrapper<Body>.self, from: data).body
@@ -60,7 +60,7 @@ enum FanboxResponseHandling {
     static func mapErrorCode(_ code: String, statusCode: Int) -> RemoteError {
         if (200..<300).contains(statusCode) || statusCode == 0 {
             // Error envelope with a success status: treat as a rejected request.
-            return .invalidRequest("FANBOX がリクエストを拒否しました (\(code.prefix(40)))")
+            return .invalidRequest("FANBOXがリクエストを拒否しました（\(code.prefix(40))）")
         }
         return map(statusCode: statusCode, headers: [:], errorCode: code)
     }
@@ -74,10 +74,10 @@ enum FanboxResponseHandling {
         switch statusCode {
         case 300..<400:
             // Redirects are never followed for writes (and capped for reads): a 3xx here is a refusal.
-            return .invalidRequest("FANBOX がリダイレクトを返しました (\(statusCode))")
+            return .invalidRequest("FANBOXがリダイレクトを返しました（\(statusCode)）")
         case 400:
             // Missing Origin, bad parameters, or (on some endpoints) a logged-out session.
-            return .invalidRequest("FANBOX がリクエストを拒否しました (400\(errorCode.map { " \($0.prefix(40))" } ?? ""))")
+            return .invalidRequest("FANBOXがリクエストを拒否しました（400\(errorCode.map { " \($0.prefix(40))" } ?? "")）")
         case 401:
             return .unauthorized
         case 403:
@@ -141,7 +141,7 @@ enum FanboxMetadataParser {
 
     static func parse(html: String) throws -> FanboxMetadataDTO {
         guard let json = metadataJSON(fromHTML: html) else {
-            throw RemoteError.decoding(endpoint: "www.metadata", detail: "metadata が見つかりません")
+            throw RemoteError.decoding(endpoint: "www.metadata", detail: "metadataが見つかりません")
         }
         do {
             return try JSONDecoder().decode(FanboxMetadataDTO.self, from: Data(json.utf8))

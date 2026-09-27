@@ -154,7 +154,7 @@ final class FixSupportSyncTests: XCTestCase {
         XCTAssertEqual(SyncEngine.supportObservedSource(reason: .notification, kind: .fanbox), .notification)
         XCTAssertEqual(SyncEngine.supportObservedSource(reason: .userRefresh, kind: .fanbox), .sync)
         XCTAssertEqual(SyncEngine.supportObservedSource(reason: .afterWrite, kind: .demo), .demo)
-        XCTAssertEqual(SupportText.observedSourceLabel(.webBridge), "Web 操作後に観測")
+        XCTAssertEqual(SupportText.observedSourceLabel(.webBridge), "Web操作後に観測")
     }
 
     func testAfterPaymentResyncLabelsHistoryAsWebBridge() async throws {

@@ -203,7 +203,7 @@ struct CreatorListRow: View {
                         PillLabel(text: "フォロー中", tint: .teal)
                     }
                     if let latest = facts.latestPostAt {
-                        Text("最新投稿 \(Formatters.shortDate(latest))")
+                        Text("最新投稿\(Formatters.shortDate(latest))")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)

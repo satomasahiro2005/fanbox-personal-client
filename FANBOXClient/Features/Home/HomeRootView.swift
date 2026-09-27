@@ -187,7 +187,7 @@ private struct HomeFeedList: View {
             ContentUnavailableView {
                 Label("アカウントがありません", systemImage: "person.crop.circle.badge.plus")
             } description: {
-                Text("設定 → アカウント から FANBOX アカウントを追加すると、ここに投稿が表示されます。")
+                Text("「設定」→「アカウント」からFANBOXアカウントを追加すると、ここに投稿が表示されます。")
             } actions: {
                 Button("設定を開く") { env.router.isSettingsPresented = true }
                     .buttonStyle(.borderedProminent)
@@ -197,7 +197,7 @@ private struct HomeFeedList: View {
             ContentUnavailableView {
                 Label("まだ投稿がありません", systemImage: "tray")
             } description: {
-                Text("下に引っ張って更新してください。表示されない場合は 設定 → アカウント でログイン状態を確認してください。")
+                Text("下に引っ張って更新してください。表示されない場合は「設定」→「アカウント」でログイン状態を確認してください。")
             } actions: {
                 Button("設定を開く") { env.router.isSettingsPresented = true }
                     .accessibilityIdentifier("homeOpenSettings")

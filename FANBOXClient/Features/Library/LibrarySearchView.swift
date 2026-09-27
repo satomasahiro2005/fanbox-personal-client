@@ -49,14 +49,8 @@ struct LibrarySearchResultsSections: View {
     private var firstTerm: String? { results?.query.terms.first }
 
     var body: some View {
-        if let results {
-            if results.query.isEmpty {
-                Section {
-                    Text("キーワードまたは #タグ で、端末内の投稿・クリエイター・コメント・下書きを検索します。")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-            } else if results.isEmpty {
+        if let results, !results.query.isEmpty {
+            if results.isEmpty {
                 ContentUnavailableView.search(text: query)
                     .listRowBackground(Color.clear)
                     .accessibilityIdentifier("librarySearchEmpty")
@@ -67,11 +61,11 @@ struct LibrarySearchResultsSections: View {
                             ForEach(results.query.tags, id: \.self) { TagChip(name: $0, isSelected: true) }
                         }
                     } footer: {
-                        Text("タグで絞り込み中（タグはこの端末だけのメタデータです）")
+                        Text("タグで絞り込み中")
                     }
                 }
                 if !results.creators.isEmpty {
-                    Section("クリエイター (\(results.creators.count))") {
+                    Section("クリエイター（\(results.creators.count)）") {
                         ForEach(results.creators) { creator in
                             NavigationLink(value: AppRoute.creator(creatorID: creator.creatorID)) {
                                 LibraryCreatorRow(creator: creator,
@@ -82,7 +76,7 @@ struct LibrarySearchResultsSections: View {
                     }
                 }
                 if !results.posts.isEmpty {
-                    Section("投稿 (\(results.posts.count))") {
+                    Section("投稿（\(results.posts.count)）") {
                         ForEach(results.posts) { post in
                             NavigationLink(value: AppRoute.post(postID: post.postID)) {
                                 LibraryPostRow(post: post, snippet: postSnippet(post))
@@ -91,7 +85,7 @@ struct LibrarySearchResultsSections: View {
                     }
                 }
                 if !results.comments.isEmpty {
-                    Section("コメント (\(results.comments.count))") {
+                    Section("コメント（\(results.comments.count)）") {
                         ForEach(results.comments) { comment in
                             NavigationLink(value: AppRoute.comments(postID: comment.postID, focusCommentID: comment.commentID)) {
                                 LibraryCommentRow(comment: comment, snippet: LibrarySnippet.make(comment.body, term: firstTerm))
@@ -100,7 +94,7 @@ struct LibrarySearchResultsSections: View {
                     }
                 }
                 if !results.drafts.isEmpty {
-                    Section("下書き (\(results.drafts.count))") {
+                    Section("下書き（\(results.drafts.count)）") {
                         ForEach(results.drafts) { draft in
                             NavigationLink(value: AppRoute.draft(draftID: draft.id)) {
                                 VStack(alignment: .leading, spacing: 2) {

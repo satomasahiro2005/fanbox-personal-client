@@ -457,7 +457,7 @@ final class SyncEngine {
                 let user = try await ds.currentUser(account: context)
                 if context.kind == .fanbox, let known = store.account(id: accountID)?.pixivUserID, known != user.pixivUserID {
                     await onIdentityMismatch?(accountID, user.pixivUserID)
-                    throw RemoteError.invalidRequest("このアカウントとは別の pixiv ユーザーのセッションでした")
+                    throw RemoteError.invalidRequest("このアカウントとは別のpixivユーザーのセッションでした")
                 }
                 applyCurrentUser(user, accountID: accountID)
 
@@ -508,7 +508,7 @@ final class SyncEngine {
                 }
 
             case .plans:
-                guard !scope.isEmpty else { throw RemoteError.invalidRequest("creatorID が必要です") }
+                guard !scope.isEmpty else { throw RemoteError.invalidRequest("creatorIDが必要です") }
                 let plans = try await ds.creatorPlans(creatorID: scope, account: context)
                 store.upsertPlans(plans, creatorID: scope)
 
@@ -545,7 +545,7 @@ final class SyncEngine {
                 deliver += deliverable(created, isFirstSync: isFirstSync && !notificationsKnown)
 
             case .comments:
-                guard !scope.isEmpty else { throw RemoteError.invalidRequest("postID が必要です") }
+                guard !scope.isEmpty else { throw RemoteError.invalidRequest("postIDが必要です") }
                 newIDs = try await syncComments(postID: scope, ds: ds, context: context, state: state)
 
             case .creatorDashboard:

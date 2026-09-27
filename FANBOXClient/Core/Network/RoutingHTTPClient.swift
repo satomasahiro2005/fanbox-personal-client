@@ -34,8 +34,8 @@ enum TransportOverride: String, CaseIterable, Identifiable, Sendable {
     var displayName: String {
         switch self {
         case .automatic: return "自動"
-        case .nativeOnly: return "Native のみ"
-        case .webViewOnly: return "WebView のみ"
+        case .nativeOnly: return "Nativeのみ"
+        case .webViewOnly: return "WebViewのみ"
         }
     }
 }

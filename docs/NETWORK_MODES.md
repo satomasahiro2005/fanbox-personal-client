@@ -67,6 +67,7 @@ scheduler runs it at `mediaPrefetch`, behind every other request. Explicit saves
 | `OfflineLibraryService`, auto-save of viewed posts (off by default) | Display images of a post when it is opened | Prefetch policy |
 | `OfflineLibraryService`, "recent N" rules | Media of the posts a rule newly covers | After a foreground timeline / creator sync, with the prefetch policy; "今すぐ保存" (save now) runs as a manual action and includes attachments |
 | `OfflineLibraryService`, saving one post | Thumbnails, display images and attachments of the post | When the user saves it; a manual action at foregroundMedia, so it also runs in Extreme (not in Offline) |
+| Image viewer, "写真に保存" (save to Photos) | The original of the shown image when it is not cached yet | When the user taps it; a manual action at foregroundMedia (not in Offline). When the load is blocked or fails, the best cached variant is saved instead |
 
 `MediaPrefetcher` never prefetches originals, video or attachments. `MediaPrefetcher` and the "recent N" rules do not
 run in a background launch (§35). After a notification's text is ready, `NotificationService` also asks for a few

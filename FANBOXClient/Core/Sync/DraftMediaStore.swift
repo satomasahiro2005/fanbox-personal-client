@@ -28,7 +28,7 @@ enum DraftMediaError: Error, Equatable, LocalizedError {
         case .unreadableImage: return "画像を読み込めませんでした"
         case .encodingFailed: return "画像を変換できませんでした"
         case .unreadableFile: return "ファイルを読み込めませんでした"
-        case .io(let detail): return "ファイルを保存できませんでした (\(detail))"
+        case .io(let detail): return "ファイルを保存できませんでした（\(detail)）"
         }
     }
 }

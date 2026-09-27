@@ -62,7 +62,9 @@ struct ResearchLogListView: View {
             Section {
                 Toggle("エラーのみ", isOn: $problemsOnly)
             } footer: {
-                Text("最新 \(Self.fetchLimit) 件まで表示します。")
+                if logs.count >= Self.fetchLimit {
+                    Text("最新\(Self.fetchLimit)件を表示しています")
+                }
             }
             if visible.isEmpty {
                 EmptyStateView(title: "ログがありません", systemImage: "list.bullet.rectangle")
@@ -200,7 +202,7 @@ struct ResearchLogDetailView: View {
                 }
                 if !rendering.hasBody && !env.settings.researchModeEnabled {
                     Section {
-                        Text("Research Mode がオフの間はレスポンス本文を記録しません。").font(.caption).foregroundStyle(.secondary)
+                        Text("Research Modeがオフの間はレスポンス本文を記録しません。").font(.caption).foregroundStyle(.secondary)
                     }
                 }
             } else if isMissing {
@@ -245,7 +247,7 @@ struct ResearchLogDetailView: View {
         let body = (prettyJSON ? rendering.prettyBody : nil) ?? rendering.plainBody
         return Section {
             if rendering.prettyBody != nil {
-                Toggle("JSON を整形", isOn: $prettyJSON)
+                Toggle("JSONを整形", isOn: $prettyJSON)
             }
             ForEach(body.chunks) { chunk in
                 BlockText(text: chunk.text)
@@ -254,7 +256,7 @@ struct ResearchLogDetailView: View {
             Text(ResearchLogRendering.bodyLabel)
         } footer: {
             if body.truncatedCount > 0 {
-                Text("… (\(body.truncatedCount) 文字省略)")
+                Text("…（\(body.truncatedCount)文字省略）")
             }
         }
     }

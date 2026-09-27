@@ -38,7 +38,7 @@ enum CreatorCommentGrouping {
     static func byPost(_ comments: [Comment], titles: [String: String]) -> [Group] {
         Dictionary(grouping: comments, by: \.postID).map { postID, items in
             let sorted = items.sorted { $0.createdAt > $1.createdAt }
-            return Group(postID: postID, title: titles[postID].flatMap { $0.isEmpty ? nil : $0 } ?? "投稿 \(postID)",
+            return Group(postID: postID, title: titles[postID].flatMap { $0.isEmpty ? nil : $0 } ?? "投稿\(postID)",
                          commentIDs: sorted.map(\.commentID), unreadCount: items.filter { !$0.isRead && !$0.isOwn }.count,
                          latestAt: sorted.first?.createdAt ?? .distantPast)
         }
@@ -105,7 +105,7 @@ private struct CreatorCommentsList: View {
             Section {
                 Picker("表示", selection: $segment) {
                     ForEach(CreatorCommentSegment.allCases) { s in
-                        Text(s == .unread && !unreadComments.isEmpty ? "未読 (\(unreadComments.count))" : s.title).tag(s)
+                        Text(s == .unread && !unreadComments.isEmpty ? "未読（\(unreadComments.count)）" : s.title).tag(s)
                     }
                 }
                 .pickerStyle(.segmented)
@@ -114,7 +114,7 @@ private struct CreatorCommentsList: View {
                     SyncStatusBanner(error: syncError, lastSync: syncStates.first?.lastSuccessfulSync)
                 }
                 if waitingReplies > 0 {
-                    Label("送信待ちの返信 \(waitingReplies) 件", systemImage: "clock.arrow.circlepath")
+                    Label("送信待ちの返信\(waitingReplies)件", systemImage: "clock.arrow.circlepath")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -180,7 +180,7 @@ private struct CreatorCommentsList: View {
             webFallbackPost = nil
         } })) {
             if let target = webFallbackPost {
-                Button("Web で開く") {
+                Button("Webで開く") {
                     env.web.openWeb(account: accountID, destination: .post(creatorID: target.creatorID, postID: target.postID),
                                     purpose: .fallback(reason: "コメントの削除"))
                 }
@@ -237,7 +237,7 @@ private struct CreatorCommentsList: View {
                 // creator account is the fallback.
                 if PostAccountLogic.commentOperationOffersWeb(error), let creatorID {
                     webFallbackPost = (postID, creatorID)
-                    errorMessage = "アプリから削除できませんでした（\(error.userMessage)）。Web で開いて、このアカウントで操作できます。"
+                    errorMessage = "アプリから削除できませんでした（\(error.userMessage)）。Webで開いて、このアカウントで操作できます。"
                 } else {
                     errorMessage = "削除できませんでした: \(error.userMessage)"
                 }
@@ -312,8 +312,6 @@ struct CreatorQuickReplySheet: View {
                     .focused($focused)
                     .accessibilityIdentifier("creatorReplyField")
                 AccountBadge(accountID: accountID)
-            } footer: {
-                Text("オフラインでも送信キューに保存され、接続後に送信されます。")
             }
         }
         .navigationTitle("返信")

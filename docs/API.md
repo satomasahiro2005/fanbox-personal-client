@@ -254,6 +254,7 @@ Redirects: do not follow redirects on POST, and cap GET redirects at 5 (fankt). 
 | `fanbox.pixiv.net/images/post/...`, `/files/post/...`, `/images/entry/...` | — | — | Legacy host. In legacy `entry` HTML, `<a href>` points to the original and `<img src>` to the `/w/1200/` thumbnail. gallery-dl also reads `data-src-original`. |
 
 - Use media URLs **exactly as the API returns them**. Do not rebuild them (fankt spec). The table above exists for recognising URLs and choosing sizes, not for constructing them.
+- One exception in the app: the full-screen image viewer uses the un-resized pximg form (the `/c/<size>/` segment dropped, `FanboxMediaURL.pximgOriginal`) as the original of icons and creator / post / plan covers. It is loaded as the original variant, so the network mode applies, and when it fails the resized URL the API returned stays in use.
 - There is no field named `coverImageFeedUrl` in any source.
 
 ### 1.10 2026 envelope changes and decoding policy

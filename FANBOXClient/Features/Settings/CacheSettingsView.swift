@@ -36,7 +36,7 @@ struct CacheSettingsSection: View {
                 .accessibilityIdentifier("autoSaveViewedPostsToggle")
 
             Stepper(value: $settings.creatorRecentCount, in: SettingsChoices.creatorRecentCountRange) {
-                LabeledContent("Creator の最近 N 件", value: "\(settings.creatorRecentCount) 件")
+                LabeledContent("Creatorの最近N件", value: "\(settings.creatorRecentCount)件")
             }
             .accessibilityIdentifier("creatorRecentCountStepper")
 
@@ -55,10 +55,6 @@ struct CacheSettingsSection: View {
             .accessibilityIdentifier("clearAllCacheButton")
         } header: {
             Text("オフライン / キャッシュ")
-        } footer: {
-            Text("容量を超えると、保存していないもの → 古いもの → Original → Display → Thumbnail の順に削除します。"
-                 + "保存済みのメディアは最後に削除され、その投稿の Offline 保存は解除されます。"
-                 + "本文・タイトル・Creator 情報などの軽量データは削除しません。")
         }
         .task { env.media.refreshUsage() }
         .onChange(of: settings.cacheCapacity) { _, _ in
@@ -144,7 +140,7 @@ struct CacheUsageDetailView: View {
                 LabeledContent("ファイル数", value: "\(usage.fileCount)")
                 LabeledContent("保存済み", value: Formatters.bytes(usage.pinnedBytes))
                 if CacheUsageText.savedExceedsCapacity(usage: usage, capacity: env.settings.cacheCapacity) {
-                    Label("保存済みのメディアがキャッシュ容量を超えています。古いものから削除され、その投稿の Offline 保存は解除されます。",
+                    Label("保存済みのメディアがキャッシュ容量を超えています。古いものから削除され、その投稿のOffline保存は解除されます。",
                           systemImage: "exclamationmark.triangle")
                         .font(.caption)
                         .foregroundStyle(.orange)
@@ -152,8 +148,6 @@ struct CacheUsageDetailView: View {
                 }
             } header: {
                 Text("合計")
-            } footer: {
-                Text("保存済み（この投稿・Creator の最近 N 件・自動保存）は、容量を超えたときに最後に削除されます。")
             }
             Section("種類別") {
                 ForEach(MediaVariant.allCases.sorted(by: >), id: \.self) { variant in

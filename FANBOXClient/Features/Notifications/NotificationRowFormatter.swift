@@ -42,7 +42,7 @@ struct NotificationPrefetchBadge: Equatable, Sendable {
 
 /// Text for one inbox row (SPEC §27):
 ///
-///     ● user123 がコメントしました
+///     ● user123がコメントしました
 ///       Creator Account
 ///       1分前
 struct NotificationRowText: Equatable, Sendable {
@@ -61,22 +61,22 @@ enum NotificationRowFormatter {
                                    badge: prefetchBadge(for: input.prefetchState, type: input.type))
     }
 
-    /// "user123 がコメントしました" / "Creator A が投稿しました" / "Creator B からおたより".
+    /// "user123がコメントしました" / "Creator Aが投稿しました" / "Creator Bからおたより".
     static func headline(for input: NotificationRowInput) -> String {
         let actor = clean(input.actorName)
         let creator = clean(input.creatorName)
         let title = clean(input.title)
         switch input.type {
         case .comment:
-            if let actor { return "\(actor) がコメントしました" }
+            if let actor { return "\(actor)がコメントしました" }
         case .commentReply:
-            if let actor { return "\(actor) が返信しました" }
+            if let actor { return "\(actor)が返信しました" }
         case .newPost:
-            if let name = creator ?? actor { return "\(name) が投稿しました" }
+            if let name = creator ?? actor { return "\(name)が投稿しました" }
         case .newsletter:
-            if let name = creator ?? actor { return "\(name) からおたより" }
+            if let name = creator ?? actor { return "\(name)からおたより" }
         case .newSupporter:
-            if let actor { return "\(actor) が支援を開始しました" }
+            if let actor { return "\(actor)が支援を開始しました" }
         case .supportChanged, .paymentAttention, .other:
             break
         }
@@ -92,7 +92,7 @@ enum NotificationRowFormatter {
         case .supportChanged: return "支援状態が変わりました"
         case .paymentAttention: return "決済の確認が必要です"
         case .newSupporter: return "新しい支援がありました"
-        case .other: return "FANBOX からのお知らせ"
+        case .other: return "FANBOXからのお知らせ"
         }
     }
 

@@ -19,14 +19,12 @@ struct ResearchModeView: View {
                 Toggle("Research Mode", isOn: $settings.researchModeEnabled)
                     .accessibilityIdentifier("researchModeInnerToggle")
                 if !settings.researchModeEnabled {
-                    Label("Research Mode がオフのため、メタデータ（メソッド・endpoint・ステータス・時間）だけを記録しています。"
+                    Label("Research Modeがオフのため、メタデータ（メソッド・endpoint・ステータス・時間）だけを記録しています。"
                           + "レスポンス本文は保存されません。", systemImage: "info.circle")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .accessibilityIdentifier("researchMetadataOnlyNote")
                 }
-            } footer: {
-                Text("表示するすべての値は、保存時と表示時の 2 回 Secret を伏せています（Cookie / FANBOXSESSID / Authorization / CSRF Token / パスワード / カード情報）。")
             }
 
             Section("通信") {
@@ -59,11 +57,9 @@ struct ResearchModeView: View {
                 NavigationLink {
                     LiveAPICheckView()
                 } label: {
-                    Label("Live API チェック（実際の FANBOX で確認）", systemImage: "checklist.checked")
+                    Label("Live APIチェック（実際のFANBOXで確認）", systemImage: "checklist.checked")
                 }
                 .accessibilityIdentifier("researchLiveCheckLink")
-            } footer: {
-                Text("docs/API.md は他のクライアントの実装と FANBOX の Web コードのアーカイブから作ったものです。ここで自分のアカウントで実際のレスポンス構造を確認できます。")
             }
 
             Section {
@@ -85,7 +81,7 @@ struct ResearchModeView: View {
                 Text("API Inspector")
             } footer: {
                 if changed > 0 {
-                    Text("Schema Change Detection: 未知のフィールドを含む schema が \(changed) 件あります。")
+                    Text("Schema Change Detection: 未知のフィールドを含むschemaが\(changed)件あります。")
                 }
             }
 
@@ -119,7 +115,7 @@ struct ResearchModeView: View {
                 Button {
                     prepareExport()
                 } label: {
-                    Label(isExporting ? "書き出し中…" : "ログを書き出す（Secret は伏せ字）", systemImage: "doc.text")
+                    Label(isExporting ? "書き出し中…" : "ログを書き出す（Secretは伏せ字）", systemImage: "doc.text")
                 }
                 .disabled(isExporting)
                 .accessibilityIdentifier("researchPrepareExportButton")
@@ -138,12 +134,10 @@ struct ResearchModeView: View {
                 Button(role: .destructive) {
                     confirmResetSchema = true
                 } label: {
-                    Label("API Schema の記録をリセット", systemImage: "arrow.counterclockwise")
+                    Label("API Schemaの記録をリセット", systemImage: "arrow.counterclockwise")
                 }
             } header: {
                 Text("操作")
-            } footer: {
-                Text("書き出しには最新 \(ResearchExportBuilder.maxEntries) 件までを含めます。本文は 1 件あたり \(ResearchLogFormatter.exportBodyLimit) 文字までです。")
             }
         }
         .navigationTitle("Research Mode")
@@ -157,7 +151,7 @@ struct ResearchModeView: View {
             env.research.flush()
             counts = ResearchLogCounts.load(store: env.store)
         }
-        .confirmationDialog("Research ログを削除しますか？", isPresented: $confirmClearLogs, titleVisibility: .visible) {
+        .confirmationDialog("Researchログを削除しますか？", isPresented: $confirmClearLogs, titleVisibility: .visible) {
             Button("ログを削除", role: .destructive) {
                 env.research.clearAll()
                 ResearchExportBuilder.removeExports()
@@ -167,11 +161,11 @@ struct ResearchModeView: View {
             .accessibilityIdentifier("researchConfirmClearLogsButton")
             Button("キャンセル", role: .cancel) {}
         }
-        .confirmationDialog("API Schema の記録をリセットしますか？", isPresented: $confirmResetSchema, titleVisibility: .visible) {
+        .confirmationDialog("API Schemaの記録をリセットしますか？", isPresented: $confirmResetSchema, titleVisibility: .visible) {
             Button("リセット", role: .destructive) { ResearchMaintenance.resetSchemaSnapshots(store: env.store) }
             Button("キャンセル", role: .cancel) {}
         } message: {
-            Text("次に API のレスポンスを受け取ったときに、あらためて記録されます。")
+            Text("次にAPIのレスポンスを受け取ったときに、あらためて記録されます。")
         }
     }
 

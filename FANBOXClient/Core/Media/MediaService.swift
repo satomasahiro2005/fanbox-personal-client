@@ -433,7 +433,7 @@ final class MediaService {
         } else {
             guard let remoteURL = URL(string: request.url), let scheme = remoteURL.scheme?.lowercased(),
                   scheme == "https" || scheme == "http" else {
-                throw RemoteError.invalidRequest("対応していないメディア URL です")
+                throw RemoteError.invalidRequest("対応していないメディアURLです")
             }
             let httpRequest = HTTPRequest(url: remoteURL, timeout: 60, priority: request.priority,
                                           endpointKey: "media.\(request.variant.rawValue)")

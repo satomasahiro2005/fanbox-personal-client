@@ -75,7 +75,7 @@ final class FixSecurityResearchEventsTests: XCTestCase {
         } catch {}
         let row = try XCTUnwrap(rows(.error).first)
         XCTAssertEqual(row.endpoint, "www.metadata")
-        XCTAssertTrue(row.errorDescription?.contains("metadata が見つかりません") ?? false)
+        XCTAssertTrue(row.errorDescription?.contains("metadataが見つかりません") ?? false)
     }
 
     func testSuccessfulResponsesRecordNoErrorEvent() async throws {

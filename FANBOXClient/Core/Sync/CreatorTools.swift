@@ -183,7 +183,7 @@ final class UploadQueue {
 
     /// Re-queues jobs that were paused only because the draft had no FANBOX post yet (never jobs the creator paused).
     func resumeAwaitingPost(draftID: String, autoStart: Bool = false) {
-        let waiting = jobs(draftID: draftID).filter { $0.state == .paused && $0.lastError == Self.awaitingPostMessage }
+        let waiting = jobs(draftID: draftID).filter(Self.isAwaitingPost)
         guard !waiting.isEmpty else { return }
         for job in waiting {
             job.state = .queued
@@ -433,11 +433,19 @@ final class UploadQueue {
     }
 
     /// Shown on jobs of accounts that upload in the web editor.
-    static let webOnlyMessage = "Web エディタで追加してください"
+    static let webOnlyMessage = "Webエディタで追加してください"
     /// Shown on jobs of a new post whose uploads need the FANBOX post first (created by the send).
-    static let awaitingPostMessage = "送信時に FANBOX の下書きを作成してからアップロードします"
+    static let awaitingPostMessage = "送信時にFANBOXの下書きを作成してからアップロードします"
+    /// Earlier spellings of `awaitingPostMessage` still stored in `UploadJob.lastError`.
+    static let legacyAwaitingPostMessages: Set<String> = ["送信時に FANBOX の下書きを作成してからアップロードします"]
+
+    /// True for a job paused only because its draft has no FANBOX post yet (the reason is stored and recognised by value).
+    static func isAwaitingPost(_ job: UploadJob) -> Bool {
+        guard job.state == .paused, let reason = job.lastError else { return false }
+        return reason == awaitingPostMessage || legacyAwaitingPostMessages.contains(reason)
+    }
     /// Shown on jobs of a draft whose FANBOX post was changed elsewhere since it was imported / last sent.
-    static let conflictMessage = "FANBOX 側で投稿が更新されているため、上書きしないようアップロードを止めました。ローカル下書きを削除して「編集」から読み込み直すか、Web エディタで編集してください。"
+    static let conflictMessage = "FANBOX側で投稿が更新されているため、上書きしないようアップロードを止めました。ローカル下書きを削除して「編集」から読み込み直すか、Webエディタで編集してください。"
 
     /// A running send checked the draft's post (`DraftService.send` step 1, or it just created it) and re-reads its revision
     /// afterwards: the queue skips its own check for the draft until `endSendCheck`.
@@ -453,7 +461,7 @@ final class UploadQueue {
         let type = draft.remotePostType
         if let allowed = capabilities.allowedKinds(in: type), !allowed.contains(blockKind) {
             let media = kind == .image ? "画像" : "ファイル"
-            return ("「\(type.creatorLabel)」形式の投稿には\(media)を保存できません。削除するか、Web エディタで編集してください。", false)
+            return ("「\(type.creatorLabel)」形式の投稿には\(media)を保存できません。削除するか、Webエディタで編集してください。", false)
         }
         return nil
     }
@@ -599,7 +607,7 @@ final class DraftService {
         guard !stale.isEmpty else { return }
         for draft in stale {
             draft.status = .failed
-            draft.lastError = "前回の送信が中断されました。FANBOX 側の状態を確認してから再送してください。"
+            draft.lastError = "前回の送信が中断されました。FANBOX側の状態を確認してから再送してください。"
         }
         store.save()
     }
@@ -662,7 +670,7 @@ final class DraftService {
                 _ = try await addImage(data: data, to: draftID)
                 report.added += 1
             } catch {
-                report.failures.append("画像 \(index + 1): \((error as? LocalizedError)?.errorDescription ?? "読み込めませんでした")")
+                report.failures.append("画像\(index + 1): \((error as? LocalizedError)?.errorDescription ?? "読み込めませんでした")")
             }
             importProgress = DraftImportProgress(draftID: draftID, completed: index + 1, total: items.count)
         }
@@ -829,7 +837,7 @@ final class DraftService {
         let missing = missingLocalMedia(in: draft)
         guard !missing.isEmpty else { return }
         let names = missing.prefix(3).map { $0.originalFileName ?? DraftSendPlanner.kindLabel($0.kind) }.joined(separator: "、")
-        let message = "端末内の画像・ファイルが見つかりません（\(names)\(missing.count > 3 ? " ほか" : "")）。ブロックを削除して追加し直してください。"
+        let message = "端末内の画像・ファイルが見つかりません（\(names)\(missing.count > 3 ? "ほか" : "")）。ブロックを削除して追加し直してください。"
         plan.validationError = .invalidRequest(message)
         plan.blockers.append(message)
     }
@@ -916,10 +924,10 @@ final class DraftService {
     static func nativeUpdateBlocker(editable: RemoteEditablePost, unsupportedBlocks: [String], capabilities: DraftCapabilities) -> String? {
         if editable.status == .scheduled { return DraftSendPlanner.scheduledBlocker }
         if editable.postType != .article && !capabilities.updates(editable.postType) {
-            return "「\(editable.postType.creatorLabel)」形式の投稿はアプリから更新できません（本文が記事形式に変わってしまうため）。Web エディタで編集してください。"
+            return "「\(editable.postType.creatorLabel)」形式の投稿はアプリから更新できません（本文が記事形式に変わってしまうため）。Webエディタで編集してください。"
         }
         if !unsupportedBlocks.isEmpty {
-            return "アプリで扱えない内容があります（\(unsupportedBlocks.joined(separator: "、"))）。内容を失わないよう、Web エディタで編集してください。"
+            return "アプリで扱えない内容があります（\(unsupportedBlocks.joined(separator: "、"))）。内容を失わないよう、Webエディタで編集してください。"
         }
         return nil
     }
@@ -943,7 +951,7 @@ final class DraftService {
         await send(draftID: draftID, publish: publish).map(\.postID)
     }
 
-    static let conflictMessage = "FANBOX 側で投稿が更新されています（Web エディタなど）。上書きしないよう送信を中止しました。ローカル下書きを削除して「編集」から読み込み直すか、Web エディタで編集してください。"
+    static let conflictMessage = "FANBOX側で投稿が更新されています（Webエディタなど）。上書きしないよう送信を中止しました。ローカル下書きを削除して「編集」から読み込み直すか、Webエディタで編集してください。"
 
     /// Sends the draft: uploads pending media (when the account can), then creates or updates the FANBOX post.
     ///
@@ -974,7 +982,7 @@ final class DraftService {
             return fail(draft, .invalidRequest("アカウントが見つかりません"))
         }
         guard account.creatorID != nil else {
-            return fail(draft, .invalidRequest("このアカウントには Creator ページがありません"))
+            return fail(draft, .invalidRequest("このアカウントにはCreatorページがありません"))
         }
         let context = account.context
         let source = remote.dataSource(for: context)
@@ -1009,7 +1017,7 @@ final class DraftService {
                 return fail(draft, .invalidRequest(Self.conflictMessage))
             }
             if let known, known != .unknown, known != current.status {
-                return fail(draft, .invalidRequest("FANBOX 側で公開状態が「\(current.status.creatorLabel)」に変わっています。内容を確認してから送信し直してください。"))
+                return fail(draft, .invalidRequest("FANBOX側で公開状態が「\(current.status.creatorLabel)」に変わっています。内容を確認してから送信し直してください。"))
             }
             // The revision just checked is this send's baseline (a post created by an earlier attempt may have had none).
             if let now = current.updatedAt { draft.remoteUpdatedAt = now }
@@ -1131,7 +1139,7 @@ final class DraftService {
             // A post this app just created has no comment setting of the creator's to preserve.
             if draft.commentPermission == nil { draft.commentPermission = .default(feeRequired: draft.feeRequired) }
             let failure: Result<DraftSendReceipt, RemoteError> = fail(draft, partial.underlying,
-                message: "FANBOX に下書きを作成しましたが、内容の保存に失敗しました（\(partial.underlying.userMessage)）。再送すると同じ下書きを更新します。")
+                message: "FANBOXに下書きを作成しましたが、内容の保存に失敗しました（\(partial.underlying.userMessage)）。再送すると同じ下書きを更新します。")
             // Baseline of the post just created, so an edit of it elsewhere before the retry is detected.
             await adoptRevision(draftID: draftID, postID: partial.postID, source: source, context: context)
             return failure
@@ -1140,7 +1148,7 @@ final class DraftService {
             AppLog.creator.error("publish failed: \(remoteError.userMessage, privacy: .public)")
             guard let draft = store.draft(id: draftID) else { return .failure(remoteError) }
             if continuation == Self.createdDraftNote {
-                return await settled(fail(draft, remoteError, message: "FANBOX に下書きを作成してメディアを送信しましたが、内容の保存に失敗しました（\(remoteError.userMessage)）。再送すると同じ下書きを更新します（送信済みのメディアは再送しません）。"))
+                return await settled(fail(draft, remoteError, message: "FANBOXに下書きを作成してメディアを送信しましたが、内容の保存に失敗しました（\(remoteError.userMessage)）。再送すると同じ下書きを更新します（送信済みのメディアは再送しません）。"))
             }
             return await settled(fail(draft, remoteError))
         }
@@ -1156,7 +1164,7 @@ final class DraftService {
         store.save()
     }
 
-    static let createdDraftNote = "FANBOX に下書きを作成済みです。再送すると同じ下書きに続きから送信します（完了した項目は再送しません）。"
+    static let createdDraftNote = "FANBOXに下書きを作成済みです。再送すると同じ下書きに続きから送信します（完了した項目は再送しません）。"
     static let continueNote = "完了した項目は再送しません。再送すると残りだけを送信します。"
 
     /// True when the draft has media to upload or new link cards to register (both are stored into a FANBOX post).
@@ -1223,7 +1231,7 @@ final class DraftService {
         }
         guard failures > 0, let lastError else { return nil }
         guard let draft = store.draft(id: draftID) else { return .failure(lastError) }
-        let summary = "リンクカードを登録できませんでした（\(failures) 件）"
+        let summary = "リンクカードを登録できませんでした（\(failures)件）"
         return fail(draft, .invalidRequest(summary), message: "\(summary): \(lastError.userMessage)" + (note.map { "\n" + $0 } ?? ""))
     }
 
@@ -1262,7 +1270,7 @@ final class DraftService {
         let unfinished = uploads.unfinishedJobs(draftID: draftID)
         let failedCount = unfinished.filter { $0.state == .failed }.count
         if failedCount > 0 {
-            let summary = "アップロードに失敗した項目があります（\(failedCount) 件）"
+            let summary = "アップロードに失敗した項目があります（\(failedCount)件）"
             return fail(draft, .invalidRequest(summary), message: note.map { summary + "\n" + $0 })
         }
         if !unfinished.isEmpty {

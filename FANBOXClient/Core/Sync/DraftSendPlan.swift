@@ -59,7 +59,7 @@ enum DraftSendPlanner {
         let status = isExisting ? (overrideStatus ?? draft.remoteStatus) : nil
 
         if !capabilities.nativeWrites {
-            plan.blockers.append("このアカウントの投稿はアプリから送信できません。Web エディタを使ってください。")
+            plan.blockers.append("このアカウントの投稿はアプリから送信できません。Webエディタを使ってください。")
         }
         if isExisting, let reason = draft.nativeUpdateBlocker {
             plan.blockers.append(reason)
@@ -86,27 +86,27 @@ enum DraftSendPlanner {
         plan.unpublishes = isExisting && !sendsPublished && (status == .published || status == .unknown)
 
         if let payload, !payload.formattingLossBlockIDs.isEmpty {
-            plan.warnings.append("編集した段落 \(payload.formattingLossBlockIDs.count) 件で、太字・リンクなどの書式の一部が失われます。")
+            plan.warnings.append("編集した段落\(payload.formattingLossBlockIDs.count)件で、太字・リンクなどの書式の一部が失われます。")
         }
         if isExisting && draft.tagsUnverified {
             let count = DraftPostMapping.normalizedTags(draft.tags).count
             plan.warnings.append(count == 0
-                ? "FANBOX 上のタグを読み取れませんでした。このまま更新するとタグが消える可能性があります。"
-                : "FANBOX 上のタグを読み取れませんでした。端末内のタグ（\(count) 個）で上書きします。")
+                ? "FANBOX上のタグを読み取れませんでした。このまま更新するとタグが消える可能性があります。"
+                : "FANBOX上のタグを読み取れませんでした。端末内のタグ（\(count)個）で上書きします。")
         }
         if isExisting && capabilities.sendsCommentPermission && draft.commentPermission == nil {
-            plan.warnings.append("コメントできる人の設定を FANBOX から読み取れませんでした。既定値（有料なら支援者のみ、無料なら全員）で送信されます。")
+            plan.warnings.append("コメントできる人の設定をFANBOXから読み取れませんでした。既定値（有料なら支援者のみ、無料なら全員）で送信されます。")
         }
 
         if capabilities.uploadsNeedPost, let payload {
             let uploads = payload.pendingUploadBlockIDs.count
             let links = payload.pendingLinkCardBlockIDs.count
-            let steps = [uploads > 0 ? "画像・ファイル \(uploads) 件のアップロード" : nil, links > 0 ? "リンクカード \(links) 件の登録" : nil]
+            let steps = [uploads > 0 ? "画像・ファイル\(uploads)件のアップロード" : nil, links > 0 ? "リンクカード\(links)件の登録" : nil]
                 .compactMap { $0 }.joined(separator: "と")
             if !steps.isEmpty {
                 plan.notes.append(isExisting
                     ? "\(steps)をこの投稿に対して行ってから、本文を保存します。完了した項目は再送しません。"
-                    : "先に FANBOX に下書きを作成し、\(steps)を行ってから本文を保存します。途中で失敗しても作成した下書きは残り、再送すると同じ下書きに続きから送信します（完了した項目は再送しません）。")
+                    : "先にFANBOXに下書きを作成し、\(steps)を行ってから本文を保存します。途中で失敗しても作成した下書きは残り、再送すると同じ下書きに続きから送信します（完了した項目は再送しません）。")
             }
         }
         let draftType = draft.remotePostType
@@ -114,11 +114,11 @@ enum DraftSendPlanner {
             plan.notes.append("「\(draftType.creatorLabel)」形式の投稿として保存します（\(draftType == .image ? "画像" : "ファイル")はブロックの順、テキストは段落ごとに空行で区切った本文になります）。")
         }
         if !plan.webItems.isEmpty {
-            plan.notes.append("\(summary(of: plan.webItems))はアプリから送信できません。本文を先に FANBOX に保存し、残りは Web エディタで追加します。")
+            plan.notes.append("\(summary(of: plan.webItems))はアプリから送信できません。本文を先にFANBOXに保存し、残りはWebエディタで追加します。")
             if publish && !sendsPublished {
-                plan.notes.append("未完成のまま公開しないよう、FANBOX には下書きとして保存します。仕上げたら Web エディタで公開してください。")
+                plan.notes.append("未完成のまま公開しないよう、FANBOXには下書きとして保存します。仕上げたらWebエディタで公開してください。")
             } else if sendsPublished && isExisting {
-                plan.notes.append("公開中の投稿は本文が先に更新されます。残りの項目は Web エディタで追加するまで表示されません。")
+                plan.notes.append("公開中の投稿は本文が先に更新されます。残りの項目はWebエディタで追加するまで表示されません。")
             }
         }
         if isExisting, let old = draft.remoteFeeRequired, old != draft.feeRequired {
@@ -126,16 +126,16 @@ enum DraftSendPlanner {
         }
         if plan.unpublishes {
             plan.notes.append(status == .unknown
-                ? "FANBOX で公開中の場合、非公開（下書き）に戻ります。読者からは見えなくなります。"
+                ? "FANBOXで公開中の場合、非公開（下書き）に戻ります。読者からは見えなくなります。"
                 : "公開中の投稿を非公開（下書き）に戻します。読者からは見えなくなります。")
         }
         return plan
     }
 
-    static let scheduledBlocker = "予約投稿はアプリから更新できません（予約日時を保てないため）。Web エディタで編集してください。"
+    static let scheduledBlocker = "予約投稿はアプリから更新できません（予約日時を保てないため）。Webエディタで編集してください。"
 
     static func feeLabel(_ fee: Int) -> String {
-        fee > 0 ? "\(fee) 円以上" : "全体公開"
+        fee > 0 ? "\(fee)円以上" : "全体公開"
     }
 
     static func kindLabel(_ kind: DraftBlockKind) -> String {
@@ -149,12 +149,12 @@ enum DraftSendPlanner {
         }
     }
 
-    /// "画像 2 件・リンクカード 1 件"
+    /// "画像2件・リンクカード1件"
     static func summary(of items: [DraftWebItem]) -> String {
         let order: [DraftBlockKind] = [.image, .file, .url, .embed]
         return order.compactMap { kind -> String? in
             let count = items.filter { $0.kind == kind }.count
-            return count > 0 ? "\(kindLabel(kind)) \(count) 件" : nil
+            return count > 0 ? "\(kindLabel(kind))\(count)件" : nil
         }.joined(separator: "・")
     }
 
@@ -184,10 +184,10 @@ enum DraftSendPlanner {
             return line.count > 24 ? "「\(line.prefix(24))…」" : "「\(line)」"
         case .image, .file:
             guard block.remoteMediaID != nil else { return nil }
-            return "\(kindLabel(block.kind))（\(block.originalFileName ?? "FANBOX 上")）"
+            return "\(kindLabel(block.kind))（\(block.originalFileName ?? "FANBOX上")）"
         case .url, .embed:
             guard block.remoteMediaID != nil else { return nil }
-            return "\(kindLabel(block.kind))（\(block.url ?? "FANBOX 上")）"
+            return "\(kindLabel(block.kind))（\(block.url ?? "FANBOX上")）"
         }
     }
 

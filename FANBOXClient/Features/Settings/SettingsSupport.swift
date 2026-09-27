@@ -58,7 +58,7 @@ enum SystemStatusText {
     static func backgroundRefresh(_ status: UIBackgroundRefreshStatus) -> String {
         switch status {
         case .available: return "利用可能"
-        case .denied: return "オフ（iOS の設定）"
+        case .denied: return "オフ（iOSの設定）"
         case .restricted: return "制限されています"
         @unknown default: return "不明"
         }
@@ -70,11 +70,11 @@ enum SystemStatusText {
 
     static func sessionState(_ state: SessionState) -> String {
         switch state {
-        case .unknown: return "未確認 (unknown)"
-        case .valid: return "有効 (valid)"
-        case .expired: return "期限切れ (expired)"
-        case .loggedOut: return "ログアウト (loggedOut)"
-        case .error: return "エラー (error)"
+        case .unknown: return "未確認（unknown）"
+        case .valid: return "有効（valid）"
+        case .expired: return "期限切れ（expired）"
+        case .loggedOut: return "ログアウト（loggedOut）"
+        case .error: return "エラー（error）"
         }
     }
 
@@ -107,17 +107,17 @@ enum RelaySettingsSupport {
 
     static func validationMessage(_ validation: URLValidation) -> String? {
         switch validation {
-        case .empty: return "Relay の URL が未設定です"
+        case .empty: return "RelayのURLが未設定です"
         case .valid: return nil
-        case .notHTTPS: return "https:// の URL のみ使用できます"
-        case .invalid: return "URL の形式が正しくありません（ユーザー名やパスワードを URL に含めないでください）"
+        case .notHTTPS: return "https://のURLのみ使用できます"
+        case .invalid: return "URLの形式が正しくありません（ユーザー名やパスワードをURLに含めないでください）"
         }
     }
 
     /// Only a short prefix of the APNs device token is ever shown.
     static func tokenHint(_ token: String?) -> String {
         guard let token, !token.isEmpty else { return "未取得" }
-        return "\(token.prefix(8))… (\(token.count) 桁)"
+        return "\(token.prefix(8))…（\(token.count)桁）"
     }
 
     enum RegistrationState: Equatable, Sendable {
@@ -139,9 +139,9 @@ enum RelaySettingsSupport {
     static func registrationText(_ state: RegistrationState) -> String {
         switch state {
         case .disabled: return "オフ"
-        case .urlMissing: return "Relay URL を設定してください"
-        case .waitingForToken: return "APNs デバイストークン待ち"
-        case .failed: return "APNs 登録に失敗しました"
+        case .urlMissing: return "Relay URLを設定してください"
+        case .waitingForToken: return "APNsデバイストークン待ち"
+        case .failed: return "APNs登録に失敗しました"
         case .tokenReady: return "デバイストークン取得済み"
         }
     }

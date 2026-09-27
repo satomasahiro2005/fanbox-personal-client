@@ -77,7 +77,7 @@ struct ReplyAttentionBanner: View {
             } label: {
                 HStack(spacing: 8) {
                     Image(systemName: "exclamationmark.bubble.fill")
-                    Text("確認が必要な返信が \(count) 件あります")
+                    Text("確認が必要な返信が\(count)件あります")
                         .font(.footnote.weight(.semibold))
                     Spacer(minLength: 4)
                     Text("確認").font(.footnote)

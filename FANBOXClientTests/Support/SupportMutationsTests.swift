@@ -247,11 +247,11 @@ final class SupportMutationsTests: XCTestCase {
 final class SupportTextTests: XCTestCase {
     func testHistoryTexts() {
         XCTAssertEqual(SupportText.historyText(kind: .planChanged, oldAmount: 500, newAmount: 1_000), "¥500 → ¥1,000")
-        XCTAssertEqual(SupportText.historyText(kind: .started, oldAmount: nil, newAmount: 3_000), "支援開始 ¥3,000")
+        XCTAssertEqual(SupportText.historyText(kind: .started, oldAmount: nil, newAmount: 3_000), "支援開始¥3,000")
         XCTAssertEqual(SupportText.historyText(kind: .ended, oldAmount: 500, newAmount: nil), "支援終了")
         XCTAssertEqual(SupportText.historyText(kind: .disappeared, oldAmount: 500, newAmount: nil), "支援中一覧から消えました")
         XCTAssertEqual(SupportText.historyText(kind: .restored, oldAmount: nil, newAmount: 500), "再び確認されました")
-        XCTAssertEqual(SupportText.historyText(kind: .planChanged, oldAmount: nil, newAmount: nil, oldPlan: "A", newPlan: "B"), "プラン変更 A → B")
+        XCTAssertEqual(SupportText.historyText(kind: .planChanged, oldAmount: nil, newAmount: nil, oldPlan: "A", newPlan: "B"), "プラン変更（A → B）")
     }
 
     func testVerificationLabelsNeverLookLikeFacts() {

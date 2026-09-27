@@ -140,7 +140,7 @@ enum FanboxPostUpdateForm {
             throw RemoteError.invalidRequest("タイトルを入力してください")
         }
         guard draft.tags.count <= DraftPostMapping.maxTags else {
-            throw RemoteError.invalidRequest("タグは \(DraftPostMapping.maxTags) 個までです")
+            throw RemoteError.invalidRequest("タグは\(DraftPostMapping.maxTags)個までです")
         }
     }
 

@@ -29,7 +29,7 @@ extension DemoWorld {
         let createdAt = max(Date(), anchor).addingTimeInterval(Double(number) * 0.001)
         let letter = RemoteNewsletter(
             id: id, creatorID: creator.id, creatorName: creator.name, creatorIconURL: creator.iconURL,
-            title: title ?? "Demo おたより #\(number)",
+            title: title ?? "Demoおたより#\(number)",
             body: body ?? "支援者の皆さまへ。\n\nデモ用に生成されたおたよりです（#\(number)）。実在のサービスとは関係ありません。",
             createdAt: createdAt, isRead: false)
         dynamicNewsletters.append(DemoDynamicNewsletter(audience: audience, letter: letter))

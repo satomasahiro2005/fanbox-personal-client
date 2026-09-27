@@ -93,7 +93,7 @@ struct FanboxRemoteDataSource: RemoteDataSource {
         if index == 0 { pageURL = allURLs.first }
         guard let pageURL else { return RemotePage(items: []) }
         guard let endpoint = FanboxEndpoint.followURL(pageURL, key: "post.listCreator", expectedPath: "/post.listCreator") else {
-            throw RemoteError.decoding(endpoint: "post.paginateCreator", detail: "想定外のページ URL")
+            throw RemoteError.decoding(endpoint: "post.paginateCreator", detail: "想定外のページURL")
         }
         let body = try await api.send(endpoint, as: FanboxCreatorPostListBody.self, accountID: account.accountID)
         let items = FanboxAdapter.postSummaries(body.items, fallbackCreatorID: creatorID)
@@ -105,7 +105,7 @@ struct FanboxRemoteDataSource: RemoteDataSource {
     func post(id: String, account: AccountContext) async throws -> RemotePostDetail {
         let body = try await api.send(.postInfo(postID: id), as: FanboxPostInfoBody.self, accountID: account.accountID)
         guard let detail = FanboxAdapter.postDetail(body.post) else {
-            throw RemoteError.decoding(endpoint: "post.info", detail: "id がありません")
+            throw RemoteError.decoding(endpoint: "post.info", detail: "idがありません")
         }
         return detail
     }
@@ -250,7 +250,7 @@ struct FanboxRemoteDataSource: RemoteDataSource {
         // The save needs the token: make sure there is one before anything is created.
         guard let token = try await api.csrfToken(accountID: account.accountID), !token.isEmpty else { throw RemoteError.unauthorized }
         let created = try await api.send(.postCreate(type: "article"), as: FanboxPostCreateBody.self, accountID: account.accountID)
-        guard let postID = created.postId else { throw RemoteError.decoding(endpoint: "post.create", detail: "postId がありません") }
+        guard let postID = created.postId else { throw RemoteError.decoding(endpoint: "post.create", detail: "postIdがありません") }
         do {
             try await sendUpdate(postID: postID, draft: draft, existing: FanboxPostUpdateForm.ExistingMedia(), currentStatus: "draft",
                                  account: account)
@@ -307,7 +307,7 @@ struct FanboxRemoteDataSource: RemoteDataSource {
         _ = try requireCreator(account)
         let created = try await api.send(.postCreate(type: "article"), as: FanboxPostCreateBody.self, accountID: account.accountID)
         guard let postID = created.postId, !postID.isEmpty else {
-            throw RemoteError.decoding(endpoint: "post.create", detail: "postId がありません")
+            throw RemoteError.decoding(endpoint: "post.create", detail: "postIdがありません")
         }
         return postID
     }

@@ -89,7 +89,7 @@ struct MultipartFormData: Sendable {
     /// in the Keychain or in memory only); send such a form with `streamedBody()`.
     func writeToTemporaryFile(directory: URL = FileManager.default.temporaryDirectory) throws -> URL {
         guard !carriesCSRFField else {
-            throw RemoteError.invalidRequest("CSRF トークンを含むフォームはファイルに書き出せません")
+            throw RemoteError.invalidRequest("CSRFトークンを含むフォームはファイルに書き出せません")
         }
         let url = directory.appendingPathComponent("\(Self.temporaryFilePrefix)\(UUID().uuidString).body")
         guard FileManager.default.createFile(atPath: url.path, contents: nil,

@@ -195,7 +195,7 @@ final class SettingsModuleTests: XCTestCase {
         }
         XCTAssertEqual(NetworkPathText.describe(pathSatisfied: false, isOnWiFi: true, isConstrained: false, isExpensive: false), "未接続")
         XCTAssertEqual(NetworkPathText.describe(pathSatisfied: true, isOnWiFi: false, isConstrained: true, isExpensive: true),
-                       "Wi-Fi 以外 / 省データモード / 従量制")
+                       "Wi-Fi以外 / 省データモード / 従量制")
     }
 
     func testSettingsChoices() {

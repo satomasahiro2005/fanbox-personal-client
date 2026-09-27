@@ -16,7 +16,7 @@ struct AccountsSettingsView: View {
             Section {
                 if accounts.isEmpty {
                     EmptyStateView(title: "アカウントがありません", systemImage: "person.crop.circle.badge.plus",
-                                   message: "「アカウントを追加」から pixiv / FANBOX にログインしてください。")
+                                   message: "「アカウントを追加」からpixiv / FANBOXにログインしてください。")
                 }
                 ForEach(accounts) { account in
                     NavigationLink {
@@ -64,8 +64,6 @@ struct AccountsSettingsView: View {
                 }
             } header: {
                 Text("アカウント")
-            } footer: {
-                Text("各アカウントの Cookie / Web セッション / API セッションは完全に分離されています。★ はメインアカウントです。")
             }
             .accessibilityIdentifier("accountsList")
 
@@ -136,7 +134,7 @@ struct AccountsSettingsView: View {
 
     private var deletionMessage: String {
         let name = accounts.first { $0.id == pendingDeletionID }?.displayName ?? "このアカウント"
-        return "「\(name)」のセッション（Keychain）、Web データ、支援・同期情報が削除されます。取得済みの投稿本文やコメントは残ります。"
+        return "「\(name)」のセッション（Keychain）、Webデータ、支援・同期情報が削除されます。取得済みの投稿本文やコメントは残ります。"
     }
 }
 
@@ -181,7 +179,7 @@ struct AccountSettingsRow: View {
             Toggle("有効", isOn: Binding(get: { account.enabled }, set: { onToggleEnabled($0) }))
                 .labelsHidden()
                 .fixedSize()
-                .accessibilityLabel("\(account.displayName) を有効にする")
+                .accessibilityLabel("\(account.displayName)を有効にする")
         }
         .opacity(account.enabled ? 1 : 0.55)
         .padding(.vertical, 2)

@@ -11,6 +11,7 @@ struct LiveAPICheckView: View {
     @State private var selectedAccountID: String?
     @State private var reportURL: URL?
     @State private var detail: LiveAPICheck.Step?
+    @State private var confirmsRun = false
 
     private var fanboxAccounts: [Account] {
         accounts.filter { $0.kind == .fanbox && $0.sessionState != .error }
@@ -20,7 +21,7 @@ struct LiveAPICheckView: View {
         List {
             Section {
                 if fanboxAccounts.isEmpty {
-                    Label("FANBOX アカウントがありません。設定 → アカウントからログインしてください（デモアカウントは対象外です）。",
+                    Label("FANBOXアカウントがありません。「設定」→「アカウント」からログインしてください（デモアカウントは対象外です）。",
                           systemImage: "person.crop.circle.badge.questionmark")
                         .foregroundStyle(.secondary)
                 } else {
@@ -31,20 +32,22 @@ struct LiveAPICheckView: View {
                     }
                     .accessibilityIdentifier("liveCheckAccountPicker")
                     Button {
-                        startCheck()
+                        confirmsRun = true
                     } label: {
                         Label(check?.isRunning == true ? "実行中…" : "実行", systemImage: "play.circle")
                     }
                     .disabled(check?.isRunning == true || selectedAccountID == nil || env.networkMode.effectiveMode == .offline)
                     .accessibilityIdentifier("liveCheckRunButton")
+                    .confirmationDialog("実際のFANBOXに送信します", isPresented: $confirmsRun, titleVisibility: .visible) {
+                        Button("実行") { startCheck() }
+                        Button("キャンセル", role: .cancel) {}
+                    } message: {
+                        Text("読み取りAPIを約20回、2秒間隔で送ります（書き込みはしません）。")
+                    }
                     if check?.isRunning == true {
                         Button("中止", role: .destructive) { check?.cancel() }
                     }
                 }
-            } footer: {
-                Text("アプリが使う読み取り API を、選んだアカウントで実際の FANBOX に 1 回ずつ送ります（書き込みはしません）。"
-                     + "約 20 リクエストを 2 秒間隔で、アプリと同じ通信経路（Cloudflare 対策・通信量制限を含む）で実行します。"
-                     + "結果は、アプリの想定（docs/API.md）と実際のレスポンス構造の差分です。")
             }
 
             if let check, !check.steps.isEmpty {
@@ -74,14 +77,11 @@ struct LiveAPICheckView: View {
                         }
                     } header: {
                         Text("レポート")
-                    } footer: {
-                        Text("レポートには構造だけが入ります: フィールド名・型・日付形式・件数・差分。名前・本文・ID・Cookie・トークンは含まれません"
-                             + "（ID はレポート内だけで一貫した仮の値に置き換えます）。")
                     }
                 }
             }
         }
-        .navigationTitle("Live API チェック")
+        .navigationTitle("Live APIチェック")
         .navigationBarTitleDisplayMode(.inline)
         .sheet(item: $detail) { step in
             NavigationStack {
@@ -128,8 +128,8 @@ private struct LiveCheckStepRow: View {
                 let missingCount = step.missingFields.values.reduce(0) { $0 + $1.count }
                 if newCount + missingCount > 0 {
                     HStack(spacing: 6) {
-                        if missingCount > 0 { PillLabel(text: "欠落 \(missingCount)", systemImage: "minus.circle", tint: .orange) }
-                        if newCount > 0 { PillLabel(text: "未知 \(newCount)", systemImage: "sparkles", tint: .blue) }
+                        if missingCount > 0 { PillLabel(text: "欠落\(missingCount)", systemImage: "minus.circle", tint: .orange) }
+                        if newCount > 0 { PillLabel(text: "未知\(newCount)", systemImage: "sparkles", tint: .blue) }
                     }
                 }
             }
@@ -168,8 +168,8 @@ private struct LiveCheckStepDetailView: View {
             ForEach(step.endpointKeys, id: \.self) { key in
                 let result = endpoints.first { $0.endpointKey == key }
                 Section(key) {
-                    fieldList("DTO が知っているのに無かったフィールド（改名・廃止の可能性）", step.missingFields, tint: .orange)
-                    fieldList("DTO が知らないフィールド（新規）", step.newFields, tint: .blue)
+                    fieldList("DTOが知っているのに無かったフィールド（改名・廃止の可能性）", step.missingFields, tint: .orange)
+                    fieldList("DTOが知らないフィールド（新規）", step.newFields, tint: .blue)
                     if let shape = result?.shapeJSON, !shape.isEmpty {
                         NavigationLink("レスポンス構造（伏せ字済み）") {
                             ScrollView([.vertical, .horizontal]) {

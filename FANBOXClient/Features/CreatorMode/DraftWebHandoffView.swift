@@ -22,32 +22,20 @@ struct DraftWebHandoffView: View {
     var body: some View {
         List {
             Section {
-                Label(draft.remotePostID == nil
-                      ? "送信すると本文を FANBOX に保存し、次の項目を Web エディタで追加します。"
-                      : "本文は FANBOX に保存済みです。次の項目を Web エディタで、上から順に追加してください。",
-                      systemImage: "info.circle")
-                    .font(.subheadline)
-            }
-
-            Section {
                 if items.isEmpty {
-                    Text("Web で追加する項目はありません").foregroundStyle(.secondary)
+                    Text("Webで追加する項目はありません").foregroundStyle(.secondary)
                 }
                 ForEach(items) { item in
                     itemRow(item)
                 }
             } header: {
-                Text("Web で追加する項目（\(checked.intersection(items.map(\.id)).count)/\(items.count)）")
-            } footer: {
-                if !exportedFiles.isEmpty {
-                    Text("画像・ファイルは「ファイル」に保存すると、Web エディタのファイル選択（「ブラウズ」）から選べます。写真に保存することもできます。")
-                }
+                Text("Webで追加する項目（\(checked.intersection(items.map(\.id)).count)/\(items.count)）")
             }
 
             if !exportedFiles.isEmpty {
                 Section {
                     ShareLink(items: exportedFiles) {
-                        Label("画像・ファイルをまとめて書き出す（\(exportedFiles.count) 件）", systemImage: "square.and.arrow.up.on.square")
+                        Label("画像・ファイルをまとめて書き出す（\(exportedFiles.count)件）", systemImage: "square.and.arrow.up.on.square")
                     }
                     .accessibilityIdentifier("handoffExportAll")
                 }
@@ -57,29 +45,27 @@ struct DraftWebHandoffView: View {
                 Button {
                     openWeb()
                 } label: {
-                    Label("Web エディタを開く", systemImage: "safari")
+                    Label("Webエディタを開く", systemImage: "safari")
                 }
                 .disabled(draft.remotePostID == nil)
                 .accessibilityIdentifier("handoffOpenWebButton")
             } footer: {
                 if draft.remotePostID == nil {
-                    Text("先に「送信」から本文を FANBOX に保存してください。保存した投稿を Web エディタで開きます。")
+                    Text("先に「送信」から本文をFANBOXに保存してください")
                 }
             }
 
             if draft.remotePostID != nil {
                 Section {
-                    Button("Web で公開した") { complete(.published) }
-                    Button("Web で下書き保存した") { complete(.savedAsDraft) }
+                    Button("Webで公開した") { complete(.published) }
+                    Button("Webで下書き保存した") { complete(.savedAsDraft) }
                     Button("ローカル下書きを削除", role: .destructive) { confirmDelete = true }
                 } header: {
-                    Text("Web で仕上げたら")
-                } footer: {
-                    Text("仕上げた後は FANBOX 上の投稿が最新です。ローカル下書きから再送すると Web での変更を上書きしてしまうため、再送はできなくなります（「編集」から読み込み直せます）。")
+                    Text("Webで仕上げたら")
                 }
             }
         }
-        .navigationTitle("Web で仕上げる")
+        .navigationTitle("Webで仕上げる")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
@@ -89,7 +75,7 @@ struct DraftWebHandoffView: View {
         .confirmationDialog("ローカル下書きを削除しますか？", isPresented: $confirmDelete, titleVisibility: .visible) {
             Button("削除", role: .destructive) { complete(nil) }
         } message: {
-            Text("FANBOX 上の投稿は削除されません。")
+            Text("FANBOX上の投稿は削除されません。")
         }
         .task(id: items.map(\.id)) {
             exported = env.drafts.exportWebItemFiles(draftID: draft.id, items: items)
@@ -119,7 +105,7 @@ struct DraftWebHandoffView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text("\(item.position). \(item.kindLabel)").font(.caption).foregroundStyle(.secondary)
                 Text(item.title).font(.subheadline).lineLimit(2)
-                Text(item.afterLabel.map { "\($0) の後に追加" } ?? "本文の先頭に追加")
+                Text(item.afterLabel.map { "\($0)の後に追加" } ?? "本文の先頭に追加")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 HStack(spacing: 12) {
@@ -133,7 +119,7 @@ struct DraftWebHandoffView: View {
                             UIPasteboard.general.string = value
                             copiedID = item.id
                         } label: {
-                            Label(copiedID == item.id ? "コピーしました" : "URL をコピー", systemImage: "doc.on.doc")
+                            Label(copiedID == item.id ? "コピーしました" : "URLをコピー", systemImage: "doc.on.doc")
                         }
                         .buttonStyle(.borderless)
                     }

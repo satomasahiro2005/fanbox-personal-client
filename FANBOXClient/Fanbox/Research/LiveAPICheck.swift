@@ -99,7 +99,7 @@ final class LiveAPICheck {
         }
 
         guard account.kind == .fanbox, let fanbox = remote.dataSource(for: account) as? FanboxRemoteDataSource else {
-            for i in steps.indices { steps[i].status = .skipped; steps[i].summary = "FANBOX アカウントではありません" }
+            for i in steps.indices { steps[i].status = .skipped; steps[i].summary = "FANBOXアカウントではありません" }
             return
         }
 
@@ -261,7 +261,7 @@ final class LiveAPICheck {
         return Int(c.seconds * 1000 + c.attoseconds / 1_000_000_000_000_000)
     }
 
-    private static func count<T>(_ items: [T], _ label: String) -> String { "\(label) \(items.count) 件" }
+    private static func count<T>(_ items: [T], _ label: String) -> String { "\(label)\(items.count)件" }
 
     private static func kinds(_ blocks: [RemoteBlock]) -> String {
         var counts: [String: Int] = [:]
@@ -280,14 +280,14 @@ final class LiveAPICheck {
         },
         StepSpec(id: "bell.countUnread", title: "通知の未読数（bell.countUnread）", creatorOnly: false) { ds, account, _ in
             let n = try await ds.unreadNotificationCount(account: account)
-            return "未読 \(n.map(String.init) ?? "取得不可")"
+            return "未読\(n.map(String.init) ?? "取得不可")"
         },
         StepSpec(id: "bell.list", title: "通知一覧（bell.list）", creatorOnly: false) { ds, account, _ in
             let batch = try await ds.notificationBatch(account: account, cursor: nil)
             var types: [String: Int] = [:]
             for n in batch.page.items { types[n.rawType, default: 0] += 1 }
             let typeText = types.sorted { $0.key < $1.key }.map { "\($0.key)×\($0.value)" }.joined(separator: " ")
-            return "\(batch.page.items.count) 件（\(typeText.isEmpty ? "なし" : typeText)）/ 埋め込み投稿 \(batch.posts.count)"
+            return "\(batch.page.items.count)件（\(typeText.isEmpty ? "なし" : typeText)）/ 埋め込み投稿\(batch.posts.count)"
         },
         StepSpec(id: "newsletter.list", title: "おたより一覧（newsletter.list）", creatorOnly: false) { ds, account, _ in
             LiveAPICheck.count(try await ds.newsletters(account: account), "おたより")
@@ -297,7 +297,7 @@ final class LiveAPICheck {
             ctx.postID = ctx.postID ?? page.items.first?.id
             ctx.viewablePostID = ctx.viewablePostID ?? page.items.first { !$0.isRestricted }?.id
             ctx.creatorID = ctx.creatorID ?? page.items.first?.creatorID
-            return "\(page.items.count) 件（閲覧不可 \(page.items.filter(\.isRestricted).count)）/ 次ページ: \(page.nextCursor == nil ? "なし" : "あり")"
+            return "\(page.items.count)件（閲覧不可\(page.items.filter(\.isRestricted).count)）/ 次ページ: \(page.nextCursor == nil ? "なし" : "あり")"
         },
         StepSpec(id: "post.listSupporting", title: "支援中タイムライン（post.listSupporting）", creatorOnly: false) { ds, account, ctx in
             let page = try await ds.supportingTimeline(account: account, cursor: nil)
@@ -306,7 +306,7 @@ final class LiveAPICheck {
                 ctx.creatorID = viewable.creatorID
             }
             ctx.postID = ctx.postID ?? page.items.first?.id
-            return "\(page.items.count) 件（閲覧不可 \(page.items.filter(\.isRestricted).count)）"
+            return "\(page.items.count)件（閲覧不可\(page.items.filter(\.isRestricted).count)）"
         },
         StepSpec(id: "creator.listFollowing", title: "フォロー中クリエイター（creator.listFollowing）", creatorOnly: false) { ds, account, ctx in
             let creators = try await ds.followingCreators(account: account)
@@ -317,15 +317,15 @@ final class LiveAPICheck {
             let listing = try await ds.supportingPlanListing(account: account)
             ctx.creatorID = ctx.creatorID ?? listing.supports.first?.creatorID
             let methods = Set(listing.supports.compactMap(\.paymentMethod)).sorted().joined(separator: ",")
-            return "\(listing.supports.count) 件 / 完全: \(listing.isComplete ? "yes" : "no（\(listing.problem ?? "")）") / paymentMethod: \(methods.isEmpty ? "-" : methods)"
+            return "\(listing.supports.count)件 / 完全: \(listing.isComplete ? "yes" : "no（\(listing.problem ?? "")）") / paymentMethod: \(methods.isEmpty ? "-" : methods)"
         },
         StepSpec(id: "payment.listPaid", title: "支払い履歴（payment.listPaid）", creatorOnly: false) { ds, account, _ in
             let payments = try await ds.paidRecords(account: account)
-            return "\(payments.count) 件 / 金額あり \(payments.filter { $0.amount > 0 }.count)"
+            return "\(payments.count)件 / 金額あり\(payments.filter { $0.amount > 0 }.count)"
         },
         StepSpec(id: "payment.status", title: "未払い（payment.listUnpaid）", creatorOnly: false) { ds, account, _ in
             let status = try await ds.paymentStatus(account: account)
-            return "未払い: \(status?.indicatesUnpaid.map { $0 ? "あり" : "なし" } ?? "不明") / 件数 \(status?.unpaidRecords?.count.description ?? "?")"
+            return "未払い: \(status?.indicatesUnpaid.map { $0 ? "あり" : "なし" } ?? "不明") / 件数\(status?.unpaidRecords?.count.description ?? "?")"
         },
         StepSpec(id: "post.info", title: "投稿本文（post.info）", creatorOnly: false) { ds, account, ctx in
             guard let id = ctx.viewablePostID ?? ctx.postID else { return nil }
@@ -335,18 +335,18 @@ final class LiveAPICheck {
         StepSpec(id: "post.get", title: "投稿メタデータ（post.get）", creatorOnly: false) { ds, account, ctx in
             guard let id = ctx.viewablePostID ?? ctx.postID else { return nil }
             let summary = try await ds.postMetadata(id: id, account: account)
-            return "type: \(summary.type.rawValue) / コメント数 \(summary.commentCount)"
+            return "type: \(summary.type.rawValue) / コメント数\(summary.commentCount)"
         },
         StepSpec(id: "post.getComments", title: "コメント（post.getComments）", creatorOnly: false) { ds, account, ctx in
             guard let id = ctx.viewablePostID ?? ctx.postID else { return nil }
             let page = try await ds.comments(postID: id, account: account, cursor: nil)
             let all = page.items.flatMap(\.flattened)
-            return "ルート \(page.items.count) 件 / 返信込み \(all.count) 件"
+            return "ルート\(page.items.count)件 / 返信込み\(all.count)件"
         },
         StepSpec(id: "creator.get", title: "クリエイター（creator.get）", creatorOnly: false) { ds, account, ctx in
             guard let id = ctx.creatorID else { return nil }
             let c = try await ds.creator(id: id, account: account)
-            return "リンク \(c.profileLinks.count) / フォロー: \(c.isFollowed.map { $0 ? "yes" : "no" } ?? "?") / 支援: \(c.isSupported.map { $0 ? "yes" : "no" } ?? "?")"
+            return "リンク\(c.profileLinks.count) / フォロー: \(c.isFollowed.map { $0 ? "yes" : "no" } ?? "?") / 支援: \(c.isSupported.map { $0 ? "yes" : "no" } ?? "?")"
         },
         StepSpec(id: "plan.listCreator", title: "クリエイターのプラン（plan.listCreator）", creatorOnly: false) { ds, account, ctx in
             guard let id = ctx.creatorID else { return nil }
@@ -355,14 +355,14 @@ final class LiveAPICheck {
         StepSpec(id: "post.listCreator", title: "クリエイターの投稿（post.paginateCreator → post.listCreator）", creatorOnly: false) { ds, account, ctx in
             guard let id = ctx.creatorID else { return nil }
             let page = try await ds.creatorPosts(creatorID: id, account: account, cursor: nil)
-            return "\(page.items.count) 件 / 次ページ: \(page.nextCursor == nil ? "なし" : "あり")"
+            return "\(page.items.count)件 / 次ページ: \(page.nextCursor == nil ? "なし" : "あり")"
         },
         StepSpec(id: "post.listManaged", title: "自分の投稿（post.listManaged）", creatorOnly: true) { ds, account, ctx in
             let page = try await ds.managedPosts(account: account, cursor: nil)
             ctx.managedPostID = page.items.first?.id
             var statuses: [String: Int] = [:]
             for p in page.items { statuses[p.remoteStatus?.rawValue ?? "?", default: 0] += 1 }
-            return "\(page.items.count) 件（\(statuses.sorted { $0.key < $1.key }.map { "\($0.key)×\($0.value)" }.joined(separator: " "))）"
+            return "\(page.items.count)件（\(statuses.sorted { $0.key < $1.key }.map { "\($0.key)×\($0.value)" }.joined(separator: " "))）"
         },
         StepSpec(id: "post.getEditable", title: "編集用の投稿（post.getEditable）", creatorOnly: true) { ds, account, ctx in
             guard let id = ctx.managedPostID else { return nil }

@@ -21,16 +21,16 @@ final class NotificationRowFormatterTests: XCTestCase {
     // MARK: Headline (SPEC §27 examples)
 
     func testSpecExampleHeadlines() {
-        XCTAssertEqual(NotificationRowFormatter.headline(for: input(.comment, actor: "user123")), "user123 がコメントしました")
-        XCTAssertEqual(NotificationRowFormatter.headline(for: input(.newPost, creator: "Creator A")), "Creator A が投稿しました")
-        XCTAssertEqual(NotificationRowFormatter.headline(for: input(.newsletter, creator: "Creator B")), "Creator B からおたより")
+        XCTAssertEqual(NotificationRowFormatter.headline(for: input(.comment, actor: "user123")), "user123がコメントしました")
+        XCTAssertEqual(NotificationRowFormatter.headline(for: input(.newPost, creator: "Creator A")), "Creator Aが投稿しました")
+        XCTAssertEqual(NotificationRowFormatter.headline(for: input(.newsletter, creator: "Creator B")), "Creator Bからおたより")
     }
 
     func testHeadlinePerTypeAndFallbacks() {
-        XCTAssertEqual(NotificationRowFormatter.headline(for: input(.commentReply, actor: "u")), "u が返信しました")
-        XCTAssertEqual(NotificationRowFormatter.headline(for: input(.newSupporter, actor: "fan")), "fan が支援を開始しました")
+        XCTAssertEqual(NotificationRowFormatter.headline(for: input(.commentReply, actor: "u")), "uが返信しました")
+        XCTAssertEqual(NotificationRowFormatter.headline(for: input(.newSupporter, actor: "fan")), "fanが支援を開始しました")
         // newPost falls back to the actor when the creator is not known locally.
-        XCTAssertEqual(NotificationRowFormatter.headline(for: input(.newPost, actor: "Actor")), "Actor が投稿しました")
+        XCTAssertEqual(NotificationRowFormatter.headline(for: input(.newPost, actor: "Actor")), "Actorが投稿しました")
         // Types without an actor sentence use the FANBOX title.
         XCTAssertEqual(NotificationRowFormatter.headline(for: input(.paymentAttention, actor: "x", title: "お支払いを確認してください")),
                        "お支払いを確認してください")
@@ -43,7 +43,7 @@ final class NotificationRowFormatterTests: XCTestCase {
     func testDetailsAreDeduplicatedAndCollapsed() {
         let text = NotificationRowFormatter.format(input(.comment, actor: "user123", title: "投稿タイトル", message: "すごい！\n\n最高です"),
                                                    now: now, calendar: tokyo)
-        XCTAssertEqual(text.headline, "user123 がコメントしました")
+        XCTAssertEqual(text.headline, "user123がコメントしました")
         XCTAssertEqual(text.details, ["投稿タイトル", "すごい！ 最高です"])
 
         // Title already used as the headline is not repeated.
@@ -153,12 +153,12 @@ final class NotificationRowFormatterTests: XCTestCase {
         store.save()
 
         let row1 = NotificationRowFormatter.format(NotificationRowInput(event: e1, creatorName: nil), now: now, calendar: tokyo)
-        XCTAssertEqual(row1.headline, "user123 がコメントしました")
+        XCTAssertEqual(row1.headline, "user123がコメントしました")
         XCTAssertEqual(row1.relativeTime, "1分前")
         XCTAssertEqual(row1.badge?.text, "コメント取得済")
 
         let row2 = NotificationRowFormatter.format(NotificationRowInput(event: e2, creatorName: "Creator A"), now: now, calendar: tokyo)
-        XCTAssertEqual(row2.headline, "Creator A が投稿しました")
+        XCTAssertEqual(row2.headline, "Creator Aが投稿しました")
         XCTAssertEqual(row2.relativeTime, "3分前")
 
         let all = store.fetch(FetchDescriptorFactory.notificationsNewestFirst())

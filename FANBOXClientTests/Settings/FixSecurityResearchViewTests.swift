@@ -140,7 +140,7 @@ final class FixSecurityResearchViewTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(outcome.createdEvents, 1, outcome.message)
         let request = try XCTUnwrap(h.poster.requests.first { $0.content.categoryIdentifier == NotificationService.postCategoryID },
                                     "requests: \(h.poster.requests.map(\.content.title))")
-        XCTAssertTrue(request.content.body.contains("Demo 新着投稿"), request.content.body)
+        XCTAssertTrue(request.content.body.contains("Demo新着投稿"), request.content.body)
         let eventID = try XCTUnwrap(request.content.userInfo[NotificationService.eventIDKey] as? String)
         let event = try XCTUnwrap(h.store.notificationEvent(id: eventID))
         XCTAssertEqual(event.type, .newPost)
@@ -159,7 +159,7 @@ final class FixSecurityResearchViewTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(outcome.createdEvents, 1, outcome.message)
         let request = try XCTUnwrap(h.poster.requests.first { $0.content.title.contains("おたより") },
                                     "requests: \(h.poster.requests.map(\.content.title))")
-        XCTAssertTrue(request.content.subtitle.contains("Demo おたより"), request.content.subtitle)
+        XCTAssertTrue(request.content.subtitle.contains("Demoおたより"), request.content.subtitle)
         XCTAssertTrue(request.content.body.contains("デモ用に生成されたおたより"), request.content.body)
         let letters = h.store.fetch(FetchDescriptor<Newsletter>()).filter { $0.newsletterID.hasPrefix("demo-nl-live-") }
         XCTAssertEqual(letters.count, 1)

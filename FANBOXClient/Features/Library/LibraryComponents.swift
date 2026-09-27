@@ -130,7 +130,7 @@ struct LibraryPostRow: View {
                     switch post.offlineState {
                     case .saved: PillLabel(text: "Offline", systemImage: "arrow.down.circle.fill", tint: .green)
                     case .autoSaved: PillLabel(text: "自動保存", systemImage: "arrow.down.circle", tint: .teal)
-                    case .ruleSaved: PillLabel(text: "最近 N 件", systemImage: "arrow.down.circle", tint: .mint)
+                    case .ruleSaved: PillLabel(text: "最近N件", systemImage: "arrow.down.circle", tint: .mint)
                     case .none: EmptyView()
                     }
                 }
@@ -269,7 +269,7 @@ struct StorageUsageSummaryView: View {
                     usageItem("表示用", usage.bytesByVariant[.display] ?? 0)
                     usageItem("サムネイル", usage.bytesByVariant[.thumbnail] ?? 0)
                 }
-                Text("\(usage.fileCount) ファイル・本文やメタデータはキャッシュ削除の対象外です")
+                Text("\(usage.fileCount)ファイル")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             }

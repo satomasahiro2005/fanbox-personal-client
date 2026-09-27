@@ -90,7 +90,7 @@ final class NativeUploadTests: XCTestCase {
         XCTAssertTrue(plan.canSend)
         XCTAssertTrue(plan.webItems.isEmpty, "images, files and link cards are native for FANBOX now")
         XCTAssertTrue(plan.sendsPublished)
-        XCTAssertTrue(plan.notes.contains { $0.contains("先に FANBOX に下書きを作成") }, "the confirmation explains the draft is created first")
+        XCTAssertTrue(plan.notes.contains { $0.contains("先にFANBOXに下書きを作成") }, "the confirmation explains the draft is created first")
 
         let receipt = try await h.drafts.send(draftID: draft.id, publish: true).get()
 
@@ -283,6 +283,28 @@ final class NativeUploadTests: XCTestCase {
         XCTAssertEqual(h.uploads.jobs(draftID: draft.id).map(\.state), [.completed, .completed])
         XCTAssertEqual(h.http.requests.dropFirst(before).map(\.endpointKey), ["post.getEditable", "post.addImage", "post.getEditable"])
         XCTAssertEqual(h.http.requests(for: "post.create").count, 1)
+    }
+
+    func testJobPausedWithTheEarlierAwaitingSpellingIsStillResumedBySend() async throws {
+        let draft = h.drafts.createDraft(accountID: h.account.id)
+        draft.title = "T"
+        try addMedia(.image, name: "a.png", to: draft)
+        h.uploads.enqueue(draftID: draft.id)
+        await h.uploads.run()
+        let job = try XCTUnwrap(h.uploads.jobs(draftID: draft.id).first)
+        XCTAssertTrue(UploadQueue.isAwaitingPost(job))
+
+        job.lastError = try XCTUnwrap(UploadQueue.legacyAwaitingPostMessages.first)
+        XCTAssertNotEqual(job.lastError, UploadQueue.awaitingPostMessage)
+        XCTAssertTrue(UploadQueue.isAwaitingPost(job), "paused before the message was respaced")
+        h.uploads.resumeAwaitingPost(draftID: draft.id)
+        XCTAssertEqual(job.state, .queued)
+        XCTAssertNil(job.lastError)
+
+        h.uploads.pause(jobID: job.id)
+        XCTAssertFalse(UploadQueue.isAwaitingPost(job), "paused by the creator")
+        h.uploads.resumeAwaitingPost(draftID: draft.id)
+        XCTAssertEqual(job.state, .paused, "a job the creator paused stays paused")
     }
 
     func testPlanRejectsFilesFANBOXWouldRefuseBeforeAnythingIsCreated() async throws {

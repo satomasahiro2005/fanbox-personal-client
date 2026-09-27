@@ -19,7 +19,7 @@ enum ResearchDemoTools {
         var title: String {
             switch self {
             case .newPost: return "新着投稿を発生させる"
-            case .comment: return "コメントを発生させる（Demo Creator 宛）"
+            case .comment: return "コメントを発生させる（Demo Creator宛）"
             case .newsletter: return "おたよりを発生させる"
             }
         }
@@ -57,7 +57,7 @@ enum ResearchDemoTools {
             return Outcome(message: "オフラインのため実行しませんでした（デモでも通信モードに従います）。", createdEvents: 0)
         }
         if action == .comment, !demoAccounts.contains(where: { $0.creatorID == DemoFixtures.selfCreatorID }) {
-            return Outcome(message: "コメント通知の受け手（Demo Creator アカウント）がありません。", createdEvents: 0)
+            return Outcome(message: "コメント通知の受け手（Demo Creatorアカウント）がありません。", createdEvents: 0)
         }
         for account in demoAccounts {
             let key = SyncState.key(accountID: account.id, resource: .notifications)
@@ -69,14 +69,14 @@ enum ResearchDemoTools {
         let label: String
         switch action {
         case .newPost:
-            label = "新着投稿 \(await world.simulateIncomingPost(creatorID: DemoWorld.simulationCreatorID))"
+            label = "新着投稿\(await world.simulateIncomingPost(creatorID: DemoWorld.simulationCreatorID))"
         case .comment:
             guard let id = await world.simulateIncomingComment() else {
                 return Outcome(message: "コメント先のデモ投稿が見つかりません。", createdEvents: 0)
             }
-            label = "コメント \(id)"
+            label = "コメント\(id)"
         case .newsletter:
-            label = "おたより \(await world.simulateIncomingNewsletter())"
+            label = "おたより\(await world.simulateIncomingNewsletter())"
         }
         if action == .newsletter {
             // Automatic polling reads newsletters at most every `SyncEngine.newsletterPollInterval`; ask explicitly
@@ -88,7 +88,7 @@ enum ResearchDemoTools {
             await poll()
         }
         let created = max(0, eventCount(store) - before)
-        return Outcome(message: "\(label) を追加してポーリングしました。新しい通知イベント: \(created) 件", createdEvents: created)
+        return Outcome(message: "\(label)を追加してポーリングしました。新しい通知イベント: \(created)件", createdEvents: created)
     }
 
     private static func eventCount(_ store: LocalStore) -> Int {
@@ -129,9 +129,9 @@ struct ResearchDemoToolsSection: View {
             } header: {
                 Text("デモツール（DEBUG）")
             } footer: {
-                Text("デモアカウントのデータに 1 件追加してから、通常のポーリングを 1 回実行します（通知の取得 → 本文の先読み → ローカル通知）。"
-                     + "実アカウントがある場合は、その通知確認も通常どおり行われます。"
-                     + (env.settings.localNotificationsEnabled ? "" : "\nローカル通知がオフのため、iOS の通知は表示されません。"))
+                if !env.settings.localNotificationsEnabled {
+                    Text("ローカル通知がオフのため、iOSの通知は表示されません。")
+                }
             }
         }
     }

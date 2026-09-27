@@ -403,7 +403,7 @@ struct ReplyQueueSummaryLabel: View {
                 .frame(width: 32)
             VStack(alignment: .leading, spacing: 2) {
                 Text("送信キュー").font(.subheadline.weight(.semibold))
-                Text(attention > 0 ? "確認が必要な返信が \(attention) 件あります" : "送信待ちの返信が \(pending) 件あります")
+                Text(attention > 0 ? "確認が必要な返信が\(attention)件あります" : "送信待ちの返信が\(pending)件あります")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -431,7 +431,7 @@ struct NotificationInboxRouteDestinations: ViewModifier {
 
 // MARK: - Rows
 
-/// ● user123 がコメントしました / Creator Account / 1分前
+/// ● user123がコメントしました / Creator Account / 1分前
 struct NotificationInboxRow: View {
     let event: NotificationEvent
     let text: NotificationRowText
@@ -506,7 +506,7 @@ struct NewsletterInboxRow: View {
             AvatarView(url: newsletter.creatorIconURL, size: 36)
             VStack(alignment: .leading, spacing: 3) {
                 HStack(alignment: .firstTextBaseline) {
-                    Text("\(newsletter.creatorName) からおたより")
+                    Text("\(newsletter.creatorName)からおたより")
                         .font(.subheadline.weight(newsletter.isRead ? .regular : .semibold))
                         .lineLimit(1)
                     Spacer(minLength: 4)

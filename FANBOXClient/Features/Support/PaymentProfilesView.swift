@@ -27,15 +27,8 @@ struct PaymentProfilesView: View {
 
         List {
             Section {
-                Label(SupportText.storagePolicyNote, systemImage: "lock.shield")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .accessibilityIdentifier("paymentProfilePolicyNote")
-            }
-
-            Section {
                 if profiles.isEmpty {
-                    Text("Payment Profile はまだありません")
+                    Text("Payment Profileはまだありません")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
@@ -60,8 +53,6 @@ struct PaymentProfilesView: View {
                 }
             } header: {
                 Text("Payment Profile")
-            } footer: {
-                Text("支援ごとの割り当ては「支援」→ クリエイターから設定します。")
             }
         }
         .accessibilityIdentifier("paymentProfilesList")
@@ -131,7 +122,7 @@ struct PaymentProfileRow: View {
                 }
             }
             Spacer()
-            Text(usageCount > 0 ? "\(usageCount) 件の支援" : "未使用")
+            Text(usageCount > 0 ? "\(usageCount)件の支援" : "未使用")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .accessibilityIdentifier("paymentProfileUsage")
@@ -188,12 +179,6 @@ struct PaymentProfileEditorView: View {
         NavigationStack {
             Form {
                 Section {
-                    Label(SupportText.storagePolicyNote, systemImage: "lock.shield")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-
-                Section {
                     TextField("名前（例: 楽天カード）", text: $draft.nickname)
                         .onChange(of: draft.nickname) { nicknameTouched = true }
                         .accessibilityIdentifier("paymentProfileNickname")
@@ -225,8 +210,6 @@ struct PaymentProfileEditorView: View {
                             .accessibilityIdentifier("paymentProfileLast4")
                     } header: {
                         Text("カード")
-                    } footer: {
-                        Text("識別用に下4桁だけを保存できます。カード番号全体は入力しないでください。")
                     }
                 }
 
@@ -237,8 +220,6 @@ struct PaymentProfileEditorView: View {
                         .accessibilityIdentifier("paymentProfileMemo")
                 } header: {
                     Text("メモ")
-                } footer: {
-                    Text("暗証番号・セキュリティコード・有効期限・パスワード・3Dセキュアやワンタイムパスワードは書かないでください。")
                 }
 
                 if !shownIssues.isEmpty {
@@ -252,7 +233,7 @@ struct PaymentProfileEditorView: View {
                     .accessibilityIdentifier("paymentProfileIssues")
                 }
             }
-            .navigationTitle(draft.id == nil ? "Payment Profile を追加" : "Payment Profile を編集")
+            .navigationTitle(draft.id == nil ? "Payment Profileを追加" : "Payment Profileを編集")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {

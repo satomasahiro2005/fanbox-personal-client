@@ -44,19 +44,19 @@ struct ResearchAccountStateView: View {
                     LabeledContent("Session", value: SystemStatusText.sessionState(account.sessionState))
                     LabeledContent("sessionCheckedAt", value: SystemStatusText.date(account.sessionCheckedAt))
                     LabeledContent("lastSyncAt", value: SystemStatusText.date(account.lastSyncAt))
-                    LabeledContent("Web Data Store", value: "分離 (\(account.webProfileID.prefix(8))…)")
+                    LabeledContent("Web Data Store", value: "分離（\(account.webProfileID.prefix(8))…）")
                     let presence = credentials[account.id] ?? CredentialPresence()
                     LabeledContent("Keychain Credential", value: SystemStatusText.presence(presence.hasCredential))
                     if presence.hasCredential {
                         LabeledContent("FANBOXSESSID", value: SystemStatusText.presence(presence.hasSessionCookie) + "（値は非表示）")
-                        LabeledContent("Cookies", value: "\(presence.cookieCount) 件（値は非表示）")
+                        LabeledContent("Cookies", value: "\(presence.cookieCount)件（値は非表示）")
                         LabeledContent("CSRF Token", value: SystemStatusText.presence(presence.hasCSRFToken) + "（値は非表示）")
                         LabeledContent("User-Agent", value: SystemStatusText.presence(presence.hasUserAgent))
                         LabeledContent("capturedAt", value: SystemStatusText.date(presence.capturedAt))
                     }
                     let states = statesByAccount[account.id] ?? []
                     if states.isEmpty {
-                        Text("SyncState なし").font(.caption).foregroundStyle(.secondary)
+                        Text("SyncStateなし").font(.caption).foregroundStyle(.secondary)
                     }
                     ForEach(states) { state in
                         SyncStateRow(state: state)
@@ -98,7 +98,7 @@ private struct SyncStateRow: View {
                 }
                 Spacer()
                 if state.consecutiveFailures > 0 {
-                    PillLabel(text: "失敗 \(state.consecutiveFailures)", tint: .red)
+                    PillLabel(text: "失敗\(state.consecutiveFailures)", tint: .red)
                 }
             }
             Group {
@@ -127,9 +127,7 @@ struct ResearchSupportStateView: View {
         let visible = attentionOnly ? supports.filter { $0.needsAttention || $0.status != .active } : supports
         List {
             Section {
-                Toggle("要確認・非 active のみ", isOn: $attentionOnly)
-            } footer: {
-                Text("FANBOX から観測した値をそのまま表示します。原因（決済失敗など）は推定しません。")
+                Toggle("要確認・非activeのみ", isOn: $attentionOnly)
             }
             if visible.isEmpty {
                 EmptyStateView(title: "支援の記録がありません", systemImage: "yensign.circle")
@@ -187,7 +185,7 @@ struct ResearchSchedulerView: View {
             } header: {
                 Text("実行中のリクエスト")
             } footer: {
-                if let updatedAt { Text("更新: \(updatedAt.formatted(.dateTime.hour().minute().second()))（1 秒ごと）") }
+                if let updatedAt { Text("更新: \(updatedAt.formatted(.dateTime.hour().minute().second()))（1秒ごと）") }
             }
 
             Section("通信ポリシー") {

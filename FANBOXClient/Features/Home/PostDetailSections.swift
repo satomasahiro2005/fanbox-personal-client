@@ -22,7 +22,7 @@ struct PostDetailHeader: View {
                     VStack(alignment: .leading, spacing: 1) {
                         Text(post.creatorName).font(.subheadline.weight(.semibold)).foregroundStyle(.primary)
                         Text(Formatters.shortDate(post.publishedAt) + " " + Formatters.time(post.publishedAt)
-                             + (post.updatedAt > post.publishedAt.addingTimeInterval(60) ? " (更新 \(Formatters.shortDate(post.updatedAt)))" : ""))
+                             + (post.updatedAt > post.publishedAt.addingTimeInterval(60) ? "（更新\(Formatters.shortDate(post.updatedAt))）" : ""))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -98,7 +98,7 @@ struct PostDetailRestrictedView: View {
             }
             VStack(spacing: 10) {
                 Image(systemName: "lock.fill").font(.title2).foregroundStyle(.secondary)
-                Text("支援が必要です (\(Formatters.yen(feeRequired))〜)")
+                Text("支援が必要です（\(Formatters.yen(feeRequired))〜）")
                     .font(.headline)
                     .accessibilityIdentifier("postRestrictedMessage")
                 if let planTitle {
@@ -131,7 +131,7 @@ struct PostDetailFooter: View {
             }
             .buttonStyle(.bordered)
             .disabled(isLikeBusy)
-            .accessibilityLabel(isLiked ? "いいね済み \(likeCount)" : "いいね \(likeCount)")
+            .accessibilityLabel(isLiked ? "いいね済み\(likeCount)" : "いいね\(likeCount)")
             .accessibilityIdentifier("postLikeButton")
             Label("\(post.commentCount)", systemImage: "bubble.left")
                 .foregroundStyle(.secondary)
@@ -153,7 +153,7 @@ struct PostDetailCommentPreview: View {
                 Text("コメント").font(.headline)
                 Spacer()
                 NavigationLink(value: AppRoute.comments(postID: postID, focusCommentID: nil)) {
-                    Text("コメント (\(totalCount))")
+                    Text("コメント（\(totalCount)）")
                 }
                 .accessibilityIdentifier("postCommentsLink")
             }
@@ -206,13 +206,10 @@ struct PostDetailWebFallbackCard: View {
             if let error {
                 Text(error.userMessage).font(.caption).foregroundStyle(.secondary)
             }
-            Text("Web で開くと、このアカウントのログイン状態で FANBOX のページを表示します。")
-                .font(.caption)
-                .foregroundStyle(.secondary)
             AccountBadge(accountID: accountID)
             HStack(spacing: 12) {
                 Button(action: openWeb) {
-                    Label("Web で開く", systemImage: "safari")
+                    Label("Webで開く", systemImage: "safari")
                 }
                 .buttonStyle(.borderedProminent)
                 .accessibilityIdentifier("postOpenWebFallback")

@@ -212,7 +212,7 @@ final class WebFetchHost: NSObject, WKNavigationDelegate {
             throw mapScriptError(name)
         }
         if (object["type"] as? String) == "opaqueredirect" {
-            throw RemoteError.invalidRequest("FANBOX が書き込みをリダイレクトしました")
+            throw RemoteError.invalidRequest("FANBOXが書き込みをリダイレクトしました")
         }
         let status = (object["status"] as? NSNumber)?.intValue ?? 0
         var responseHeaders: [String: String] = [:]

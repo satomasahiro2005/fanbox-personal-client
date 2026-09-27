@@ -72,10 +72,6 @@ struct ReplySettingsSection: View {
             .accessibilityIdentifier("staleReplyThresholdPicker")
         } header: {
             Text("コメント返信")
-        } footer: {
-            Text(settings.autoSendStaleReplies
-                 ? "オフラインの間に保存した返信は、通信が戻ったときに経過時間にかかわらず自動で送信します。"
-                 : "短い切断のあとは自動で再送します。\(SettingsChoices.durationLabel(settings.staleReplyThreshold))以上待った返信は、送信前に確認を求めます（既定）。")
         }
     }
 }
@@ -98,17 +94,13 @@ struct ResearchSettingsSection: View {
                     Label("Research / API Inspector", systemImage: "stethoscope")
                     Spacer()
                     if changed > 0 {
-                        PillLabel(text: "Schema 変化 \(changed)", systemImage: "sparkles", tint: .orange)
+                        PillLabel(text: "Schema変化\(changed)", systemImage: "sparkles", tint: .orange)
                     }
                 }
             }
             .accessibilityIdentifier("researchModeLink")
         } header: {
             Text("Research Mode")
-        } footer: {
-            Text(settings.researchModeEnabled
-                 ? "Secret を伏せたレスポンス本文を記録します。Cookie / FANBOXSESSID / Authorization / CSRF Token などは常に <REDACTED> で表示されます。"
-                 : "オフの間は、通信のメタデータ（メソッド・endpoint・ステータス・時間）だけを記録します。")
         }
     }
 }

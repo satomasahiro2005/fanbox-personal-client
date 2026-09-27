@@ -131,7 +131,7 @@ struct CommentThreadView: View {
                 Button {
                     if let account = webAccountID { openWeb(account: account) }
                 } label: {
-                    Label("Web で開く", systemImage: "safari")
+                    Label("Webで開く", systemImage: "safari")
                 }
                 .disabled(webAccountID == nil || webCreatorID == nil)
                 .accessibilityIdentifier("commentOpenWeb")
@@ -156,7 +156,7 @@ struct CommentThreadView: View {
             alertWebAccountID = nil
         } })) {
             if let account = alertWebAccountID, webCreatorID != nil {
-                Button("Web で開く") { openWeb(account: account) }
+                Button("Webで開く") { openWeb(account: account) }
                     .accessibilityIdentifier("commentAlertOpenWeb")
             }
             Button("OK", role: .cancel) {}
@@ -218,7 +218,7 @@ struct CommentThreadView: View {
             if let target {
                 HStack(spacing: 6) {
                     Image(systemName: "arrowshape.turn.up.left").foregroundStyle(.secondary)
-                    Text("\(target.authorName) に返信").font(.caption.weight(.semibold))
+                    Text("\(target.authorName)に返信").font(.caption.weight(.semibold))
                     Text(target.body).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                     Spacer()
                     Button {
@@ -351,7 +351,7 @@ struct CommentThreadView: View {
             if let error {
                 if PostAccountLogic.commentOperationOffersWeb(error) {
                     alertWebAccountID = accountID
-                    alertMessage = "アプリから削除できませんでした（\(error.userMessage)）。Web で開いて、このアカウントで操作できます。"
+                    alertMessage = "アプリから削除できませんでした（\(error.userMessage)）。Webで開いて、このアカウントで操作できます。"
                 } else {
                     alertMessage = error.userMessage
                 }
@@ -495,7 +495,7 @@ struct HomeCommentRow: View {
                             }
                         }
                         .buttonStyle(.borderless)
-                        .accessibilityLabel("\(comment.authorName) に返信")
+                        .accessibilityLabel("\(comment.authorName)に返信")
                         .accessibilityIdentifier("commentReply.\(comment.commentID)")
                     }
                     if comment.likeCount > 0 || comment.isLiked {

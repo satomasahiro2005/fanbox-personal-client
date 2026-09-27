@@ -27,8 +27,6 @@ struct ReplyQueueView: View {
                     ForEach(attention, id: \.id) { row($0) }
                 } header: {
                     Text("確認が必要")
-                } footer: {
-                    Text("送信結果を確認できなかった返信や、長時間送信を待っていた返信は自動では送信しません。内容を確認して送信するか取り消してください。")
                 }
             }
             if !waiting.isEmpty {
@@ -37,12 +35,8 @@ struct ReplyQueueView: View {
                 }
             }
             if !drafts.isEmpty {
-                Section {
+                Section("下書き") {
                     ForEach(drafts, id: \.id) { row($0) }
-                } header: {
-                    Text("下書き")
-                } footer: {
-                    Text("下書きはスレッドを開いて送信できます。")
                 }
             }
         }
@@ -58,7 +52,7 @@ struct ReplyQueueView: View {
 
     private func row(_ item: OutgoingComment) -> some View {
         let accountName = accounts.first { $0.id == item.accountID }?.displayName ?? "不明なアカウント"
-        let postTitle = env.store.post(id: item.postID).map { $0.title.isEmpty ? "無題の投稿" : $0.title } ?? "投稿 \(item.postID)"
+        let postTitle = env.store.post(id: item.postID).map { $0.title.isEmpty ? "無題の投稿" : $0.title } ?? "投稿\(item.postID)"
         let busy = busyIDs.contains(item.id) || item.state == .sending
         return VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .firstTextBaseline) {

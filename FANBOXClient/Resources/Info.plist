@@ -28,7 +28,7 @@
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
 	<key>NSPhotoLibraryAddUsageDescription</key>
-	<string>Web エディタで追加する画像（アプリで縮小・変換したもの）を写真に保存するために使用します。</string>
+	<string>画像を写真に保存するために使用します。</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>投稿に添付する画像を選択するために使用します。</string>
 	<key>UIApplicationSceneManifest</key>

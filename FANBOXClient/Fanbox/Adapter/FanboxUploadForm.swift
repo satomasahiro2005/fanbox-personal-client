@@ -60,11 +60,11 @@ enum FanboxUploadForm {
     /// Trimmed http(s) URL for a link card.
     static func linkURL(_ raw: String) throws -> String {
         let url = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !url.isEmpty else { throw RemoteError.invalidRequest("リンクカードの URL が空です") }
-        guard url.count <= maxURLLength else { throw RemoteError.invalidRequest("リンクカードの URL が長すぎます") }
+        guard !url.isEmpty else { throw RemoteError.invalidRequest("リンクカードのURLが空です") }
+        guard url.count <= maxURLLength else { throw RemoteError.invalidRequest("リンクカードのURLが長すぎます") }
         guard let comps = URLComponents(string: url), let scheme = comps.scheme?.lowercased(), scheme == "https" || scheme == "http",
               let host = comps.host, !host.isEmpty else {
-            throw RemoteError.invalidRequest("リンクカードの URL が正しくありません（http / https）")
+            throw RemoteError.invalidRequest("リンクカードのURLが正しくありません（http / https）")
         }
         return url
     }
@@ -100,20 +100,20 @@ enum FanboxUploadForm {
     // MARK: Results
 
     static func result(_ image: FanboxImageDTO, postID: String) throws -> RemoteUploadResult {
-        guard let id = image.id else { throw RemoteError.decoding(endpoint: "post.addImage", detail: "id がありません") }
+        guard let id = image.id else { throw RemoteError.decoding(endpoint: "post.addImage", detail: "idがありません") }
         return RemoteUploadResult(mediaID: id, url: image.originalUrl ?? image.thumbnailUrl, postID: postID,
                                   thumbnailURL: image.thumbnailUrl, width: image.width, height: image.height,
                                   fileExtension: image.fileExtension)
     }
 
     static func result(_ file: FanboxFileDTO, postID: String) throws -> RemoteUploadResult {
-        guard let id = file.id else { throw RemoteError.decoding(endpoint: "post.addFile", detail: "id がありません") }
+        guard let id = file.id else { throw RemoteError.decoding(endpoint: "post.addFile", detail: "idがありません") }
         return RemoteUploadResult(mediaID: id, url: file.url, postID: postID, fileExtension: file.fileExtension, fileName: file.name,
                                   fileSize: file.size)
     }
 
     static func result(_ embed: FanboxURLEmbedDTO, postID: String, requestedURL: String) throws -> RemoteUploadResult {
-        guard let id = embed.id else { throw RemoteError.decoding(endpoint: "post.addUrlEmbed", detail: "id がありません") }
+        guard let id = embed.id else { throw RemoteError.decoding(endpoint: "post.addUrlEmbed", detail: "idがありません") }
         return RemoteUploadResult(mediaID: id, url: embed.url ?? requestedURL, postID: postID)
     }
 }

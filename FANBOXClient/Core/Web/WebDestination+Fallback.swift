@@ -8,10 +8,10 @@ struct WebFallbackStep: Hashable, Sendable, Identifiable {
     var id: URL { url }
 
     // Pages the research marked verified (docs/API.md §20).
-    static let pixivCards = WebFallbackStep(url: URL(string: "https://payment.pixiv.net/cards")!, title: "pixiv のカード管理")
+    static let pixivCards = WebFallbackStep(url: URL(string: "https://payment.pixiv.net/cards")!, title: "pixivのカード管理")
     static let invoices = WebFallbackStep(url: URL(string: "https://www.fanbox.cc/invoices")!, title: "領収書")
     static let userSettings = WebFallbackStep(url: URL(string: "https://www.fanbox.cc/user/settings")!, title: "ユーザー設定")
-    static let home = WebFallbackStep(url: WebDestination.home.url, title: "FANBOX トップ")
+    static let home = WebFallbackStep(url: WebDestination.home.url, title: "FANBOXトップ")
 }
 
 extension WebDestination {

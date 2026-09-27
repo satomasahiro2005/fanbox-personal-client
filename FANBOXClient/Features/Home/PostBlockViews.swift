@@ -119,7 +119,7 @@ struct PostDetailGalleryView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Label("画像 \(blocks.count) 枚", systemImage: "photo.on.rectangle.angled")
+                Label("画像\(blocks.count)枚", systemImage: "photo.on.rectangle.angled")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
@@ -482,7 +482,7 @@ struct PostDetailUnknownBlockView: View {
             Image(systemName: "questionmark.square.dashed").foregroundStyle(.secondary)
             Text("未対応のブロック").font(.subheadline).foregroundStyle(.secondary)
             Spacer()
-            Button("Browser で開く", action: context.openInBrowser)
+            Button("Browserで開く", action: context.openInBrowser)
                 .font(.caption)
                 .buttonStyle(.bordered)
         }

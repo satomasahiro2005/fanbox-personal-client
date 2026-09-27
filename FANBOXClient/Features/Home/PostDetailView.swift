@@ -82,7 +82,8 @@ struct PostDetailView: View {
             return .systemAction
         })
         .fullScreenCover(item: $viewerStart) { start in
-            ImageViewer(items: imageItems, startIndex: start.index, postID: postID, accountID: selectedAccountID)
+            ImageViewer(items: start.showsCover ? coverItems : imageItems, startIndex: start.index, postID: postID,
+                        creatorID: post?.creatorID, accountID: selectedAccountID)
         }
         .navigationDestination(isPresented: $showCreator) {
             if let creatorID = post?.creatorID {
@@ -93,8 +94,8 @@ struct PostDetailView: View {
         .sheet(isPresented: $showTagMemo) {
             TagMemoEditorView(postID: postID)
         }
-        .confirmationDialog("この投稿のキャッシュ (画像・添付) を削除しますか？", isPresented: $confirmClearCache, titleVisibility: .visible) {
-            Button("Cache 削除", role: .destructive) { env.media.clearCache(postID: postID) }
+        .confirmationDialog("この投稿のキャッシュ（画像・添付）を削除しますか？", isPresented: $confirmClearCache, titleVisibility: .visible) {
+            Button("Cache削除", role: .destructive) { env.media.clearCache(postID: postID) }
         } message: {
             Text("本文とタイトルは残ります。")
         }
@@ -134,13 +135,19 @@ struct PostDetailView: View {
     @ViewBuilder
     private func bodySection(_ post: Post) -> some View {
         if !blocks.isEmpty {
-            if blocks.allSatisfy({ $0.kind != .image }), post.coverImageURL != nil {
-                RemoteImageView(thumbnailURL: post.coverImageURL, displayURL: post.coverImageURL, maxVariant: .display, postID: postID,
+            if blocks.allSatisfy({ $0.kind != .image }), let cover = post.coverImageURL, !cover.isEmpty {
+                RemoteImageView(thumbnailURL: cover, displayURL: cover, maxVariant: .display, postID: postID,
                                 creatorID: post.creatorID, accountID: selectedAccountID, contentMode: .fill)
                     // FANBOX covers are ~1200×630; a fixed ratio keeps the layout stable while the image loads.
                     .aspectRatio(1200.0 / 630.0, contentMode: .fit)
                     .frame(maxWidth: .infinity)
                     .clipShape(RoundedRectangle(cornerRadius: 10))
+                    .contentShape(Rectangle())
+                    .onTapGesture { viewerStart = PostDetailImageViewerStart(index: 0, showsCover: true) }
+                    .accessibilityElement()
+                    .accessibilityLabel("画像")
+                    .accessibilityAddTraits(.isButton)
+                    .accessibilityIdentifier("postCoverImage")
             }
             PostDetailBlocksView(blocks: blocks, context: renderContext(post))
         } else if PostAccountLogic.isRestricted(feeRequired: post.feeRequired, accessAccountIDs: post.accessAccountIDs,
@@ -247,7 +254,7 @@ struct PostDetailView: View {
                     .accessibilityIdentifier("postRetryButton")
                 if PostAccountLogic.offersWebFallback(for: refreshError), let account = browserAccountID,
                    let creatorID = knownCreatorIDForMissingPost {
-                    Button("Web で開く") {
+                    Button("Webで開く") {
                         env.web.openWeb(account: account, destination: .post(creatorID: creatorID, postID: postID),
                                         purpose: .fallback(reason: "投稿を取得できませんでした"))
                     }
@@ -352,7 +359,7 @@ struct PostDetailView: View {
                         if let failure = summary.failureReason { alertMessage = failure.message }
                     }
                 } label: {
-                    Label(env.offline.activeSaves.contains(postID) ? "Offline 保存中…" : "Offline 保存", systemImage: "arrow.down.circle")
+                    Label(env.offline.activeSaves.contains(postID) ? "Offline保存中…" : "Offline保存", systemImage: "arrow.down.circle")
                 }
                 .disabled(env.offline.activeSaves.contains(postID))
             }
@@ -360,13 +367,13 @@ struct PostDetailView: View {
                 Button {
                     env.offline.remove(postID: postID)
                 } label: {
-                    Label("Offline 解除", systemImage: "xmark.circle")
+                    Label("Offline解除", systemImage: "xmark.circle")
                 }
             }
             Button(role: .destructive) {
                 confirmClearCache = true
             } label: {
-                Label("Cache 削除", systemImage: "trash")
+                Label("Cache削除", systemImage: "trash")
             }
         }
         Section {
@@ -375,18 +382,18 @@ struct PostDetailView: View {
                     env.web.openWeb(account: account, destination: .post(creatorID: post.creatorID, postID: postID))
                 }
             } label: {
-                Label("Browser で開く", systemImage: "safari")
+                Label("Browserで開く", systemImage: "safari")
             }
             .disabled(browserAccountID == nil)
             Menu {
                 accountMenuItems
             } label: {
-                Label("Account 切り替え", systemImage: "person.2.circle")
+                Label("Account切り替え", systemImage: "person.2.circle")
             }
             Button {
                 showCreator = true
             } label: {
-                Label("Creator を開く", systemImage: "person.crop.square")
+                Label("Creatorを開く", systemImage: "person.crop.square")
             }
             ShareLink(item: WebDestination.post(creatorID: post.creatorID, postID: postID).url, subject: Text(post.title)) {
                 Label("共有", systemImage: "square.and.arrow.up")
@@ -411,6 +418,11 @@ struct PostDetailView: View {
 
     private var imageItems: [ImageViewerItem] {
         imageBlocks.map(ImageViewerItem.init(block:))
+    }
+
+    private var coverItems: [ImageViewerItem] {
+        guard let cover = post?.coverImageURL, !cover.isEmpty else { return [] }
+        return [ImageViewerItem(id: "cover", resizedURL: cover)]
     }
 
     private func renderContext(_ post: Post) -> PostDetailRenderContext {
@@ -573,6 +585,8 @@ struct PostDetailView: View {
 /// Identifiable wrapper for the full-screen image viewer.
 struct PostDetailImageViewerStart: Identifiable, Hashable {
     let index: Int
-    var id: Int { index }
+    /// The cover image (shown when the post has no image blocks) instead of the image blocks.
+    var showsCover = false
+    var id: String { showsCover ? "cover" : "block.\(index)" }
 }
 

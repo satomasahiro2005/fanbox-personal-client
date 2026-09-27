@@ -8,6 +8,8 @@ struct ImageViewerItem: Identifiable, Hashable {
     var originalURL: String?
     var width: Int?
     var height: Int?
+    /// `originalURL` was derived from a resized pximg URL by the app (FANBOX may refuse it), not returned by the API.
+    var originalIsDerived = false
 }
 
 extension ImageViewerItem {
@@ -17,32 +19,66 @@ extension ImageViewerItem {
                   originalURL: block.originalURL, width: block.width, height: block.height)
     }
 
+    /// Item for an image FANBOX serves as one resized URL (icons, creator / post / plan covers). The original is the
+    /// un-resized pximg image when the URL has that shape (docs/API.md §1.9), else the same URL.
+    init(id: String, resizedURL: String) {
+        let original = FanboxMediaURL.pximgOriginal(of: resizedURL)
+        self.init(id: id, thumbnailURL: resizedURL, displayURL: resizedURL, originalURL: original ?? resizedURL,
+                  originalIsDerived: original != nil)
+    }
+
     /// All image blocks of a post, in order (for `ImageViewer(items:startIndex:)`).
     static func items(for post: Post) -> [ImageViewerItem] {
         post.orderedBlocks.filter { $0.kind == .image }.map(ImageViewerItem.init(block:))
+    }
+
+    /// Non-empty URLs by variant.
+    var urls: [MediaVariant: String] {
+        var map: [MediaVariant: String] = [:]
+        if let u = thumbnailURL, !u.isEmpty { map[.thumbnail] = u }
+        if let u = displayURL, !u.isEmpty { map[.display] = u }
+        if let u = originalURL, !u.isEmpty { map[.original] = u }
+        return map
+    }
+
+    /// What 「写真に保存」 writes for this item.
+    func saveSource(postID: String? = nil, creatorID: String? = nil, accountID: String? = nil) -> ImageSaveSource {
+        ImageSaveSource(urls: urls, postID: postID, creatorID: creatorID, accountID: accountID, derivedOriginal: originalIsDerived)
     }
 }
 
 /// Full-screen image gallery with paging + zoom. Loads Display first, Original on demand (SPEC §6).
 ///
 /// Present with `.fullScreenCover`. Original images are fetched automatically only when the network policy allows it;
-/// otherwise the page shows "オリジナルを読み込む".
+/// otherwise the page shows "オリジナルを読み込む". 「写真に保存」 adds the original to Photos (loading it as a manual
+/// action when needed); when the mode blocks that, the best cached variant is saved.
 struct ImageViewer: View {
     let items: [ImageViewerItem]
     var startIndex: Int = 0
     var postID: String? = nil
+    var creatorID: String? = nil
     var accountID: String? = nil
 
+    @Environment(AppEnvironment.self) private var env
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.openURL) private var openURL
     @State private var selection: Int
     @State private var showsChrome = true
     /// Best local file per page (for sharing).
     @State private var files: [Int: URL] = [:]
+    /// 「写真に保存」 per page (absent = not saved yet).
+    @State private var photoSaves: [Int: PhotoSaveState] = [:]
+    @State private var photoSaveError: PhotoSaveError?
+    @State private var photoSaveCount = 0
+    /// Bumped when a save loaded a new file, so the page shows it.
+    @State private var reloads: [Int: Int] = [:]
 
-    init(items: [ImageViewerItem], startIndex: Int = 0, postID: String? = nil, accountID: String? = nil) {
+    init(items: [ImageViewerItem], startIndex: Int = 0, postID: String? = nil, creatorID: String? = nil,
+         accountID: String? = nil) {
         self.items = items
         self.startIndex = startIndex
         self.postID = postID
+        self.creatorID = creatorID
         self.accountID = accountID
         _selection = State(initialValue: items.isEmpty ? 0 : min(max(startIndex, 0), items.count - 1))
     }
@@ -55,7 +91,8 @@ struct ImageViewer: View {
             } else {
                 TabView(selection: $selection) {
                     ForEach(Array(items.enumerated()), id: \.offset) { index, item in
-                        ImageViewerPage(item: item, postID: postID, accountID: accountID,
+                        ImageViewerPage(item: item, postID: postID, creatorID: creatorID, accountID: accountID,
+                                        reload: reloads[index] ?? 0,
                                         onToggleChrome: { withAnimation(.easeInOut(duration: 0.2)) { showsChrome.toggle() } },
                                         onFileAvailable: { files[index] = $0 })
                             .tag(index)
@@ -70,6 +107,21 @@ struct ImageViewer: View {
         }
         .statusBarHidden(!showsChrome)
         .preferredColorScheme(.dark)
+        .sensoryFeedback(.success, trigger: photoSaveCount)
+        .alert("写真に保存できませんでした",
+               isPresented: Binding(get: { photoSaveError != nil }, set: { if !$0 { photoSaveError = nil } }),
+               presenting: photoSaveError) { error in
+            if error == .denied {
+                Button("設定を開く") {
+                    if let url = URL(string: UIApplication.openSettingsURLString) { openURL(url) }
+                }
+                Button("キャンセル", role: .cancel) {}
+            } else {
+                Button("OK", role: .cancel) {}
+            }
+        } message: { error in
+            Text(error.message)
+        }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("imageViewer")
     }
@@ -90,15 +142,8 @@ struct ImageViewer: View {
             Spacer()
 
             if !items.isEmpty {
-                Text("\(selection + 1) / \(items.count)")
-                    .font(.subheadline.monospacedDigit().weight(.medium))
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(.ultraThinMaterial, in: Capsule())
-                    .accessibilityIdentifier("imageViewerPageIndicator")
+                saveToPhotosButton
             }
-
-            Spacer()
 
             if let file = files[selection] {
                 ShareLink(item: file) {
@@ -113,9 +158,88 @@ struct ImageViewer: View {
                 Color.clear.frame(width: 36, height: 36)
             }
         }
+        .overlay {
+            if !items.isEmpty {
+                Text("\(selection + 1) / \(items.count)")
+                    .font(.subheadline.monospacedDigit().weight(.medium))
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .allowsHitTesting(false)
+                    .accessibilityIdentifier("imageViewerPageIndicator")
+            }
+        }
         .foregroundStyle(.white)
         .padding(.horizontal, 16)
         .padding(.top, 8)
+    }
+
+    private var saveToPhotosButton: some View {
+        let online = env.networkMode.isOnline
+        let state = photoSaves[selection]
+        let done = state?.isDone(online: online) ?? false
+        return Button {
+            let index = selection
+            Task { await saveToPhotos(index: index) }
+        } label: {
+            Group {
+                if state == .saving {
+                    ProgressView().tint(.white)
+                } else {
+                    Image(systemName: done ? "checkmark" : "square.and.arrow.down")
+                }
+            }
+            .font(.body.weight(.semibold))
+            .frame(width: 36, height: 36)
+            .background(.ultraThinMaterial, in: Circle())
+        }
+        .disabled(state == .saving || done || !canSave(selection, online: online))
+        .accessibilityLabel(Text(done ? "写真に保存済み" : "写真に保存"))
+        .accessibilityIdentifier("imageViewerSaveToPhotos")
+    }
+
+    private func saveSource(_ index: Int) -> ImageSaveSource {
+        guard items.indices.contains(index) else { return ImageSaveSource(urls: [:]) }
+        return items[index].saveSource(postID: postID, creatorID: creatorID, accountID: accountID)
+    }
+
+    /// Online, a manual load is always allowed (SPEC §30); offline only a cached file can be saved.
+    private func canSave(_ index: Int, online: Bool) -> Bool {
+        let source = saveSource(index)
+        if online { return !source.urls.isEmpty }
+        return env.media.saveChoice(for: source) != .unavailable
+    }
+
+    private func saveToPhotos(index: Int) async {
+        let previous = photoSaves[index]
+        guard previous?.isDone(online: env.networkMode.isOnline) != true, previous != .saving else { return }
+        photoSaves[index] = .saving
+        do {
+            let saved = try await PhotoLibrarySaver.save(saveSource(index), media: env.media)
+            photoSaves[index] = saved.isBestAvailable ? .saved : .savedSmaller
+            photoSaveCount += 1
+            if saved.downloaded { reloads[index, default: 0] += 1 }
+        } catch {
+            photoSaves[index] = previous
+            photoSaveError = PhotoSaveError(error)
+        }
+    }
+}
+
+private enum PhotoSaveState {
+    case saving
+    /// The largest variant (or the best FANBOX serves) is in Photos.
+    case saved
+    /// A smaller cached variant was saved while the original could not be loaded (offline).
+    case savedSmaller
+
+    /// Nothing more to save: a smaller variant counts only until connectivity returns (the original can be saved then).
+    func isDone(online: Bool) -> Bool {
+        switch self {
+        case .saving: return false
+        case .saved: return true
+        case .savedSmaller: return !online
+        }
     }
 }
 
@@ -123,7 +247,10 @@ struct ImageViewer: View {
 private struct ImageViewerPage: View {
     let item: ImageViewerItem
     let postID: String?
+    let creatorID: String?
     let accountID: String?
+    /// Changes when 「写真に保存」 loaded a new file for this page.
+    let reload: Int
     let onToggleChrome: () -> Void
     let onFileAvailable: (URL) -> Void
 
@@ -133,18 +260,19 @@ private struct ImageViewerPage: View {
     @State private var displayState: ViewerLoadState = .idle
     @State private var originalState: ViewerLoadState = .idle
 
-    private var urls: [MediaVariant: String] {
-        var map: [MediaVariant: String] = [:]
-        if let u = item.thumbnailURL, !u.isEmpty { map[.thumbnail] = u }
-        if let u = item.displayURL, !u.isEmpty { map[.display] = u }
-        if let u = item.originalURL, !u.isEmpty { map[.original] = u }
-        return map
-    }
+    private var urls: [MediaVariant: String] { item.urls }
 
     /// Whether a distinct original exists beyond what is displayed.
     private var hasSeparateOriginal: Bool {
-        guard let original = urls[.original] else { return false }
+        guard let original = urls[.original], shown != .original else { return false }
         return original != urls[.display] || shown == nil
+    }
+
+    /// The display variant (or the thumbnail when there is no display URL) or something larger is shown already, e.g.
+    /// the original that 「写真に保存」 loaded: the display controls have nothing left to load.
+    private var showsDisplay: Bool {
+        guard let shown else { return false }
+        return shown >= (urls[.display] != nil ? .display : .thumbnail)
     }
 
     var body: some View {
@@ -178,13 +306,15 @@ private struct ImageViewerPage: View {
         }
         .overlay(alignment: .bottom) { controls }
         // Re-runs when connectivity returns (a fixed network mode keeps its mode while the path is down).
-        .task(id: ImageViewerPageKey(itemID: item.id, online: env.networkMode.isOnline)) { await start() }
+        .task(id: ImageViewerPageKey(itemID: item.id, online: env.networkMode.isOnline, reload: reload)) { await start() }
     }
 
     @ViewBuilder
     private var controls: some View {
         VStack(spacing: 8) {
-            if displayState == .manualRequired {
+            if showsDisplay {
+                EmptyView()
+            } else if displayState == .manualRequired {
                 Button {
                     Task { await loadDisplay(trigger: .manual) }
                 } label: {
@@ -300,6 +430,7 @@ private struct ImageViewerPage: View {
             image = decoded
             shown = variant
         }
+        if variant >= .display, [.manualRequired, .blocked, .failed].contains(displayState) { displayState = .done }
         if let file = env.media.peekCachedFileURL(url: url, variant: variant) {
             onFileAvailable(file)
         }
@@ -307,7 +438,7 @@ private struct ImageViewerPage: View {
 
     private func request(_ variant: MediaVariant, url: String, trigger: MediaTrigger) -> MediaRequest {
         MediaRequest(url: url, variant: variant, kind: .image, trigger: trigger, priority: .foregroundMedia, postID: postID,
-                     accountID: accountID)
+                     creatorID: creatorID, accountID: accountID)
     }
 }
 
@@ -318,6 +449,7 @@ private enum ViewerLoadState: Equatable {
 private struct ImageViewerPageKey: Hashable {
     var itemID: String
     var online: Bool
+    var reload: Int
 }
 
 // MARK: - Zoom

@@ -90,12 +90,12 @@ struct SupportAccountDetailView: View {
                         .font(.title2.monospacedDigit().weight(.semibold))
                         .accessibilityIdentifier("supportAccountTotal")
                 }
-                Text("\(group?.activeCreatorCount ?? 0) クリエイターを支援中")
+                Text("\(group?.activeCreatorCount ?? 0)クリエイターを支援中")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 let stopping = group?.lines.filter { $0.support.scheduledStop() != nil } ?? []
                 if !stopping.isEmpty {
-                    Text("うち停止予定 \(Formatters.yen(stopping.reduce(0) { $0 + $1.support.amount }))（来月予定には含みません）")
+                    Text("うち停止予定\(Formatters.yen(stopping.reduce(0) { $0 + $1.support.amount }))")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -131,7 +131,7 @@ struct SupportAccountDetailView: View {
                 Button {
                     env.web.openWeb(account: accountID, destination: .paymentSettings, purpose: .payment)
                 } label: {
-                    Label("お支払い方法を Web で確認", systemImage: "creditcard")
+                    Label("お支払い方法をWebで確認", systemImage: "creditcard")
                 }
                 .accessibilityIdentifier("supportAccountPaymentSettings")
                 Button {
@@ -146,7 +146,7 @@ struct SupportAccountDetailView: View {
                     Label("支援中のプラン", systemImage: "heart.text.square")
                 }
             } header: {
-                Text("FANBOX / pixiv で確認")
+                Text("FANBOX / pixivで確認")
             }
 
             if paymentSnapshots.isEmpty {
@@ -261,7 +261,7 @@ struct PaymentMonthSection: View {
         } footer: {
             let unknown = records.filter { $0.amountUnknown == true }.count
             if unknown > 0 {
-                Text("金額不明のお支払い \(unknown) 件は合計に含みません")
+                Text("金額不明のお支払い\(unknown)件は合計に含みません")
             }
         }
     }

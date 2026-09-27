@@ -71,7 +71,7 @@ final class FixSupportDashboardTests: XCTestCase {
         XCTAssertEqual(s.scheduledStopObservedCount, 1)
         XCTAssertEqual(s.scheduledStopUserMarkedCount, 1)
         XCTAssertEqual(s.scheduledStopCount, 2)
-        XCTAssertEqual(SupportText.nextMonthCaption(s), "停止予定 2 件を除く（FANBOX で観測 1 / 自分で記録 1）")
+        XCTAssertEqual(SupportText.nextMonthCaption(s), "停止予定2件を除く（FANBOXで観測1 / 自分で記録1）")
 
         let october = SupportAnalyzer.summarize(supports: supports, payments: [], now: jst(2026, 10, 1, 9))
         XCTAssertEqual(october.nextMonthPlanned, october.recurringMonthly, "September's stops do not carry over")
@@ -81,14 +81,7 @@ final class FixSupportDashboardTests: XCTestCase {
         let s = SupportAnalyzer.summarize(supports: [support("A", "c1", 500), support("B", "c1", 1_000)], payments: [], now: jst(2026, 9, 1))
         XCTAssertEqual(s.nextMonthPlanned, 1_500)
         XCTAssertEqual(s.scheduledStopCount, 0)
-        XCTAssertEqual(SupportText.nextMonthCaption(s), "停止予定を除く継続中の支援の合計")
-    }
-
-    func testFootnoteDocumentsTheRules() {
-        XCTAssertTrue(SupportText.dashboardFootnote.contains("日本時間"))
-        XCTAssertTrue(SupportText.dashboardFootnote.contains("停止予定"))
-        XCTAssertTrue(SupportText.dashboardFootnote.contains("自分で記録"))
-        XCTAssertTrue(SupportText.dashboardFootnote.contains("プラン変更"))
+        XCTAssertNil(SupportText.nextMonthCaption(s), "nothing to add under 来月予定 without stops")
     }
 
     // MARK: 今月実請求 (JST)
@@ -119,7 +112,7 @@ final class FixSupportDashboardTests: XCTestCase {
         let s = SupportAnalyzer.summarize(supports: [], payments: payments, now: jst(2026, 9, 10))
         XCTAssertEqual(s.actualThisMonth, 500)
         XCTAssertEqual(s.actualUnknownAmountCount, 1)
-        XCTAssertEqual(SupportText.actualCaption(s), "観測したお支払いの合計（金額不明 1 件を除く）")
+        XCTAssertEqual(SupportText.actualCaption(s), "金額不明1件を除く")
 
         let onlyUnknown = SupportAnalyzer.summarize(supports: [], payments: [payments[1]], now: jst(2026, 9, 10))
         XCTAssertEqual(onlyUnknown.actualThisMonth, 0)
@@ -197,7 +190,7 @@ final class FixSupportDashboardTests: XCTestCase {
     }
 
     func testStopLabelsSeparateObservedFromUserEntered() {
-        XCTAssertEqual(SupportStopRule.label(.observed), "停止予定（FANBOX で観測）")
+        XCTAssertEqual(SupportStopRule.label(.observed), "停止予定（FANBOXで観測）")
         XCTAssertEqual(SupportStopRule.label(.userMarked), "停止予定（自分で記録）")
         XCTAssertNil(support("A", "c1", 500, status: .missing, stoppingObservedAt: .now).scheduledStop(),
                      "only active supports can be scheduled to stop")

@@ -82,7 +82,7 @@ enum CreatorListFilter: String, CaseIterable, Identifiable, Sendable {
         case .following: return "フォロー中"
         case .hasPosts: return "投稿あり"
         case .favorite: return "お気に入り"
-        case .ownCreatorAccount: return "自分の Creator Account"
+        case .ownCreatorAccount: return "自分のCreator Account"
         }
     }
 

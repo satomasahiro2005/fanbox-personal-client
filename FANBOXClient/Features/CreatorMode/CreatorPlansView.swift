@@ -41,8 +41,6 @@ struct CreatorPlansView: View {
                 ForEach(plans) { plan in
                     planRow(plan, supporterCount: ownerFans.isEmpty ? nil : supporters[plan.planID, default: 0])
                 }
-            } footer: {
-                Text("支援者数は取得済みのファン情報から数えた値です（取得範囲外のファンは含まれません）。")
             }
             Section {
                 Button {
@@ -50,12 +48,10 @@ struct CreatorPlansView: View {
                         env.web.openWeb(account: account.id, destination: .managePlans, purpose: .browse)
                     }
                 } label: {
-                    Label("Web でプラン管理", systemImage: "safari")
+                    Label("Webでプラン管理", systemImage: "safari")
                 }
                 .disabled(ownerAccount == nil)
                 .accessibilityIdentifier("creatorWebManagePlans")
-            } footer: {
-                Text("プランの作成・変更は Web で行います。")
             }
         }
         .navigationTitle("プラン")
@@ -97,7 +93,7 @@ struct CreatorPlansView: View {
             HStack(spacing: 6) {
                 Image(systemName: "person.2")
                 if let supporterCount {
-                    Text("支援者 \(supporterCount) 人")
+                    Text("支援者\(supporterCount)人")
                 } else {
                     Text("支援者数: 未取得")
                 }

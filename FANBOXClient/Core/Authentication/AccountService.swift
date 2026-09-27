@@ -20,14 +20,14 @@ enum AccountLoginError: Error, Equatable, LocalizedError {
         case .accountNotFound:
             return "アカウントが見つかりません。"
         case .noSessionCookie:
-            return "ログインがまだ完了していません。pixiv の画面でログインしてください。"
+            return "ログインがまだ完了していません。pixivの画面でログインしてください。"
         case .profileUnavailable(let detail):
             return "ログインしたユーザーを確認できませんでした（\(detail)）。"
         case .duplicate(_, let name):
-            return "この pixiv アカウントは「\(name)」として既に追加されています。"
+            return "このpixivアカウントは「\(name)」として既に追加されています。"
         case .accountMismatch(let name):
-            return "「\(name)」とは別の pixiv アカウントでログインしています。このアカウントのセッションは変更せず、Web セッションを元に戻しました。"
-                + "「\(name)」の pixiv アカウントでログインし直してください。"
+            return "「\(name)」とは別のpixivアカウントでログインしています。このアカウントのセッションは変更せず、Webセッションを元に戻しました。"
+                + "「\(name)」のpixivアカウントでログインし直してください。"
         case .credentialStorage:
             return "セッション情報を安全に保存できませんでした。"
         }
@@ -651,7 +651,7 @@ final class AccountService {
                     account.sessionCheckedAt = .now
                     result = .updated(.expired)
                 } else {
-                    result = .unchanged(reason: "ページを確認できませんでしたが、API ではログイン中です")
+                    result = .unchanged(reason: "ページを確認できませんでしたが、APIではログイン中です")
                 }
             } else {
                 result = .unchanged(reason: Self.describe(error))

@@ -69,8 +69,8 @@ struct LibraryRootView: View {
             NavigationLink(value: AppRoute.offlineLibrary) {
                 Label {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Offline ライブラリ")
-                        Text(offlinePosts.isEmpty ? "保存した投稿はありません" : "保存済みの投稿 \(offlinePosts.count) 件")
+                        Text("Offlineライブラリ")
+                        Text(offlinePosts.isEmpty ? "保存した投稿はありません" : "保存済みの投稿\(offlinePosts.count)件")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }

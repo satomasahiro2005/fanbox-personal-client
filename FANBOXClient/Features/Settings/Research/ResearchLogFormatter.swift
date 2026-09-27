@@ -184,7 +184,7 @@ enum ResearchLogFormatter {
         fields.append(Field(label: "Request Headers", value: blockText(entry.requestHeaders), isBlock: true))
         fields.append(Field(label: "Response Headers", value: blockText(entry.responseHeaders), isBlock: true))
         var bodyText = body.text.isEmpty ? "(なし)" : body.text
-        if body.truncatedCount > 0 { bodyText += "\n… (\(body.truncatedCount) 文字省略)" }
+        if body.truncatedCount > 0 { bodyText += "\n…（\(body.truncatedCount)文字省略）" }
         fields.append(Field(label: "Safe Response Body", value: bodyText, isBlock: true))
         return fields
     }

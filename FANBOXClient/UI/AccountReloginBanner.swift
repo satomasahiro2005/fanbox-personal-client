@@ -35,7 +35,7 @@ struct AccountReloginBanner: View {
                             } label: {
                                 HStack(spacing: 5) {
                                     Circle().fill(Color(hex: account.colorHex)).frame(width: 8, height: 8)
-                                    Text(affected.count == 1 ? "Web で再ログイン" : account.displayName)
+                                    Text(affected.count == 1 ? "Webで再ログイン" : account.displayName)
                                         .lineLimit(1)
                                 }
                                 .font(.caption.weight(.semibold))
@@ -43,7 +43,7 @@ struct AccountReloginBanner: View {
                             .buttonStyle(.borderedProminent)
                             .tint(.orange)
                             .controlSize(.small)
-                            .accessibilityLabel("\(account.displayName) に再ログイン")
+                            .accessibilityLabel("\(account.displayName)に再ログイン")
                             .accessibilityIdentifier("reloginBannerButton_\(account.displayName)")
                         }
                     }
@@ -59,7 +59,7 @@ struct AccountReloginBanner: View {
     private func message(_ affected: [Account]) -> String {
         let mismatched = affected.contains { $0.sessionState == .error }
         if mismatched {
-            return "別の pixiv アカウントのセッションを検出したため、同期を止めています。正しいアカウントでログインし直してください。"
+            return "別のpixivアカウントのセッションを検出したため、同期を止めています。正しいアカウントでログインし直してください。"
         }
         return "ログインの有効期限が切れたため、このアカウントの自動同期を止めています。キャッシュ済みのデータはそのまま表示できます。"
     }

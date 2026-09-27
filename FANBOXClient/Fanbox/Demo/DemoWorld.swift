@@ -448,7 +448,7 @@ actor DemoWorld {
     func addURLEmbed(url: String, postID: String, account: AccountContext) throws -> RemoteUploadResult {
         try requireOwnPost(postID, account: account)
         let trimmed = url.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard DraftPostMapping.isWebURL(trimmed) else { throw RemoteError.invalidRequest("リンクカードの URL が正しくありません（http / https）") }
+        guard DraftPostMapping.isWebURL(trimmed) else { throw RemoteError.invalidRequest("リンクカードのURLが正しくありません（http / https）") }
         if trimmed.lowercased().contains("fail") {
             throw RemoteError.invalidRequest("Demo: リンクカードを登録できませんでした（\(trimmed)）")
         }
@@ -502,7 +502,7 @@ actor DemoWorld {
         let id = "demo-post-live-\(sequence)"
         let now = mutationDate()
         let creator = DemoFixtures.creatorsByID[creatorID] ?? DemoFixtures.creators[0]
-        let postTitle = title ?? "Demo 新着投稿 #\(sequence)"
+        let postTitle = title ?? "Demo新着投稿#\(sequence)"
         let blocks = DemoWorld.expand([.paragraph("（デモ用に生成された新着投稿です）"), .images(count: 1, width: 1600, height: 1200)], postID: id)
         posts[id] = DemoStoredPost(id: id, creatorID: creator.id, type: .image, title: postTitle, feeRequired: feeRequired, planID: nil,
                                    status: .published, tags: ["Demo"], hasAdultContent: false, blocks: blocks,
@@ -515,7 +515,7 @@ actor DemoWorld {
         dynamicNotifications.append(DynamicNotification(audience: audience, fixture: DemoNotificationFixture(
             key: "newpost-\(id)", type: .newPost, rawType: "post_published", time: .minutesAgo(0), creatorID: creator.id, postID: id,
             commentID: nil, newsletterID: nil, actorName: creator.name, actorIconURL: creator.iconURL,
-            title: "\(creator.name) が新しい投稿を公開しました", message: postTitle, unread: true), date: now))
+            title: "\(creator.name)が新しい投稿を公開しました", message: postTitle, unread: true), date: now))
         return id
     }
 
@@ -532,7 +532,7 @@ actor DemoWorld {
         dynamicNotifications.append(DynamicNotification(audience: [.creator], fixture: DemoNotificationFixture(
             key: "comment-\(comment.id)", type: .comment, rawType: "post_comment", time: .minutesAgo(0),
             creatorID: DemoFixtures.selfCreatorID, postID: postID, commentID: comment.id, newsletterID: nil, actorName: fan.name,
-            actorIconURL: fan.iconURL, title: "\(fan.name) さんが「\(post.title)」にコメントしました", message: comment.body, unread: true),
+            actorIconURL: fan.iconURL, title: "\(fan.name)さんが「\(post.title)」にコメントしました", message: comment.body, unread: true),
             date: comment.createdAt))
         return comment.id
     }
@@ -659,7 +659,7 @@ actor DemoWorld {
             dynamicNotifications.append(DynamicNotification(audience: [.creator], fixture: DemoNotificationFixture(
                 key: "comment-\(comment.id)", type: .comment, rawType: "post_comment", time: .minutesAgo(0),
                 creatorID: post.creatorID, postID: post.id, commentID: comment.id, newsletterID: nil, actorName: writerName,
-                actorIconURL: writerIcon, title: "\(writerName) さんが「\(post.title)」にコメントしました", message: comment.body,
+                actorIconURL: writerIcon, title: "\(writerName)さんが「\(post.title)」にコメントしました", message: comment.body,
                 unread: true), date: comment.createdAt))
         }
         if let parent {
@@ -674,7 +674,7 @@ actor DemoWorld {
                 dynamicNotifications.append(DynamicNotification(audience: [recipient], fixture: DemoNotificationFixture(
                     key: "reply-\(comment.id)", type: .commentReply, rawType: "comment_reply", time: .minutesAgo(0),
                     creatorID: post.creatorID, postID: post.id, commentID: comment.id, newsletterID: nil, actorName: writerName,
-                    actorIconURL: writerIcon, title: "\(writerName) さんがあなたのコメントに返信しました", message: comment.body,
+                    actorIconURL: writerIcon, title: "\(writerName)さんがあなたのコメントに返信しました", message: comment.body,
                     unread: true), date: comment.createdAt))
             }
         }
@@ -773,13 +773,13 @@ actor DemoWorld {
             case .externalVideo(let provider, let id):
                 blocks.append(RemoteBlock(kind: .video, thumbnailURL: DemoMedia.imageURL(seed: "video-\(id)", width: 480, height: 270, variant: .thumbnail),
                                           url: "https://example.com/demo/video/\(provider)/\(id)", embedProvider: provider,
-                                          embedContentID: id, title: "Demo 動画（\(provider)）"))
+                                          embedContentID: id, title: "Demo動画（\(provider)）"))
             case .link(let url, let title, let subtitle):
                 blocks.append(RemoteBlock(kind: .url, thumbnailURL: DemoMedia.imageURL(seed: "link-\(url)", width: 480, height: 252, variant: .thumbnail),
                                           url: url, title: title, subtitle: subtitle))
             case .embed(let provider, let id):
                 blocks.append(RemoteBlock(kind: .embed, url: "https://example.com/demo/embed/\(provider)/\(id)", embedProvider: provider,
-                                          embedContentID: id, title: "Demo 埋め込み（\(provider)）"))
+                                          embedContentID: id, title: "Demo埋め込み（\(provider)）"))
             }
         }
         return blocks

@@ -64,7 +64,7 @@ struct SupportCreatorDetailView: View {
                 }
                 let stopping = group?.lines.filter { $0.support.scheduledStop() != nil } ?? []
                 if !stopping.isEmpty {
-                    Text("うち停止予定 \(Formatters.yen(stopping.reduce(0) { $0 + $1.support.amount }))（来月予定には含みません）")
+                    Text("うち停止予定\(Formatters.yen(stopping.reduce(0) { $0 + $1.support.amount }))")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .accessibilityIdentifier("supportCreatorStopping")
@@ -90,8 +90,6 @@ struct SupportCreatorDetailView: View {
                 }
             } header: {
                 Text("アカウント別")
-            } footer: {
-                Text("タップして支払い方法（Payment Profile）や停止予定を設定します。「推定（未確認）」「手動設定」「停止予定（自分で記録）」は FANBOX 上で確認された情報ではありません。")
             }
 
             Section {
@@ -271,15 +269,13 @@ struct AssignmentEditorSheet: View {
                         .accessibilityIdentifier("assignmentConfirmationPicker")
                     } header: {
                         Text("確認状態")
-                    } footer: {
-                        Text("「Webで確認した」はFANBOX / pixivのお支払い方法画面で実際に確認した場合のみ選んでください。確認日時が記録されます。")
                     }
                 }
 
                 if let support, support.isActive {
                     Section {
                         if SupportSnapshot(support).scheduledStop() == .observed {
-                            Label("FANBOX で停止予定を観測しました。来月予定には含みません。", systemImage: "calendar.badge.minus")
+                            Label("FANBOXで停止予定を観測しました", systemImage: "calendar.badge.minus")
                                 .font(.footnote)
                                 .accessibilityIdentifier("assignmentObservedStop")
                         }
@@ -287,8 +283,6 @@ struct AssignmentEditorSheet: View {
                             .accessibilityIdentifier("assignmentStopToggle")
                     } header: {
                         Text("来月の予定")
-                    } footer: {
-                        Text("FANBOX で支援を停止した場合などに記録します。自分で記録した内容で、FANBOX 上で確認された情報ではありません。今月（日本時間）の間だけ有効で、来月予定の合計から除外します。")
                     }
                 }
 

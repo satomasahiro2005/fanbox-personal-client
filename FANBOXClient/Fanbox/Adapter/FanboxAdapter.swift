@@ -221,7 +221,7 @@ enum FanboxAdapter {
         case "twitter", "x": return "X"
         case "vimeo": return "Vimeo"
         case "soundcloud": return "SoundCloud"
-        case "google_forms": return "Google フォーム"
+        case "google_forms": return "Googleフォーム"
         case "fanbox": return "FANBOX"
         case "gist": return "GitHub Gist"
         default: return provider
@@ -239,13 +239,13 @@ enum FanboxAdapter {
                 url = info?.creatorId.map { "https://www.fanbox.cc/@\($0)/posts/\(id)" } ?? "https://www.fanbox.cc/posts/\(id)"
             }
             return RemoteBlock(kind: .url, url: url, embedProvider: "fanbox.post", embedContentID: info?.id,
-                               title: nonEmpty(info?.title) ?? "FANBOX の投稿", subtitle: info?.user?.name ?? info?.creatorId)
+                               title: nonEmpty(info?.title) ?? "FANBOXの投稿", subtitle: info?.user?.name ?? info?.creatorId)
         case "fanbox.creator":
             let profile = embed.profile
             let url = profile?.creatorId.map { "https://www.fanbox.cc/@\($0)" }
             return RemoteBlock(kind: .url, thumbnailURL: profile?.user?.iconUrl, url: url, embedProvider: "fanbox.creator",
                                embedContentID: profile?.creatorId, title: profile?.user?.name ?? profile?.name ?? profile?.creatorId,
-                               subtitle: "FANBOX クリエイター")
+                               subtitle: "FANBOXクリエイター")
         case "html", "html.card":
             let link = embed.html.flatMap(firstLink(inHTML:))
             return RemoteBlock(kind: .url, url: link ?? embed.url, embedProvider: type, title: link.flatMap(hostName) ?? "埋め込みリンク",
@@ -442,7 +442,7 @@ enum FanboxAdapter {
             title = count > 1 ? "コメントに\(count)件のいいね" : "コメントにいいねがつきました"
             message = dto.postCommentBody ?? ""
         default:
-            title = "FANBOX からのお知らせ"
+            title = "FANBOXからのお知らせ"
             message = postTitle ?? dto.postCommentBody ?? ""
         }
         return RemoteNotification(

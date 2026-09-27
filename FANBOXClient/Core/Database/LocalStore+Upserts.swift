@@ -140,7 +140,16 @@ extension LocalStore {
     // MARK: - Supports (SPEC §10 / §11 / §13 / §15)
 
     /// Observed-fact-only reason for supports FANBOX lists as unpaid (docs/API.md §12.2). Never asserts a payment failure.
-    static let paymentAttentionReason = "決済状態を確認できません（FANBOX で未払いの項目が表示されています）"
+    static let paymentAttentionReason = "決済状態を確認できません（FANBOXで未払いの項目が表示されています）"
+    /// Earlier spellings of `paymentAttentionReason` still stored in `Support.attentionReason`.
+    static let legacyPaymentAttentionReasons: Set<String> = ["決済状態を確認できません（FANBOX で未払いの項目が表示されています）"]
+
+    /// True for the unpaid flag's reason, current or earlier spelling (the reason is stored and recognised by value).
+    static func isPaymentAttentionReason(_ reason: String?) -> Bool {
+        guard let reason else { return false }
+        return reason == paymentAttentionReason || legacyPaymentAttentionReasons.contains(reason)
+    }
+
     /// Sub-scope of the supports SyncState that remembers a pending "everything disappeared at once" observation.
     static let massDisappearanceScope = "massDisappearance"
     /// A mass disappearance must be seen again within this window to be recorded (two-strike rule).
@@ -222,7 +231,7 @@ extension LocalStore {
                 if s.status != .active {
                     // A restored / restarted support starts clean: a later disappearance is a NEW anomaly for 要確認.
                     s.missingSince = nil
-                    if s.attentionReason != Self.paymentAttentionReason {
+                    if !Self.isPaymentAttentionReason(s.attentionReason) {
                         s.needsAttention = false
                         s.attentionReason = nil
                         s.acknowledgedAt = nil
@@ -409,9 +418,12 @@ extension LocalStore {
         if let records = status.unpaidRecords {
             let unpaidCreators = Set(records.compactMap(\.creatorID).filter { !$0.isEmpty })
             for s in supports(accountID: account.accountID) {
-                let flagged = s.needsAttention && s.attentionReason == Self.paymentAttentionReason
+                let flagged = s.needsAttention && Self.isPaymentAttentionReason(s.attentionReason)
                 if unpaidCreators.contains(s.creatorID) {
-                    if !flagged {
+                    if flagged {
+                        // Same flag in an earlier spelling: reworded only, the acknowledgment stays.
+                        if s.attentionReason != Self.paymentAttentionReason { s.attentionReason = Self.paymentAttentionReason }
+                    } else {
                         // Keep a disappearance reason if one is pending: it is the stronger observed fact.
                         if !(s.needsAttention && s.attentionReason == Self.supportMissingReason) {
                             s.needsAttention = true
@@ -420,13 +432,13 @@ extension LocalStore {
                         }
                         change.newlyFlaggedCreatorIDs.append(s.creatorID)
                     }
-                } else if s.attentionReason == Self.paymentAttentionReason {
+                } else if Self.isPaymentAttentionReason(s.attentionReason) {
                     s.needsAttention = false
                     s.attentionReason = nil
                 }
             }
         } else if indicates == false {
-            for s in supports(accountID: account.accountID) where s.attentionReason == Self.paymentAttentionReason {
+            for s in supports(accountID: account.accountID) where Self.isPaymentAttentionReason(s.attentionReason) {
                 s.needsAttention = false
                 s.attentionReason = nil
             }
@@ -641,7 +653,7 @@ extension LocalStore {
                 continue
             }
             let e = NotificationEvent(id: key, type: .newsletter, accountIDs: [account.accountID],
-                                      title: "\(n.creatorName) からおたより", message: n.title ?? String(n.body.prefix(80)),
+                                      title: "\(n.creatorName)からおたより", message: n.title ?? String(n.body.prefix(80)),
                                       timestamp: n.createdAt, creatorID: n.creatorID, newsletterID: id)
             e.isRead = n.isRead
             e.prefetchState = n.bodyFetched ? .textReady : .pending
@@ -663,11 +675,11 @@ extension LocalStore {
             guard notificationEvent(id: key) == nil else { continue }
             let fact: String
             switch h.kind {
-            case .started: fact = "支援開始 \(Self.yenText(h.newAmount))"
+            case .started: fact = "支援開始\(Self.yenText(h.newAmount))"
             case .planChanged: fact = "\(Self.yenText(h.oldAmount)) → \(Self.yenText(h.newAmount))"
             case .ended: fact = "支援終了"
             case .disappeared: fact = Self.supportMissingReason
-            case .restored: fact = "支援中一覧に再び表示されました \(Self.yenText(h.newAmount))"
+            case .restored: fact = "支援中一覧に再び表示されました（\(Self.yenText(h.newAmount))）"
             }
             let e = NotificationEvent(id: key, type: .supportChanged, accountIDs: [account.accountID],
                                       title: "\(h.creatorName)（\(accountName)）", message: fact, timestamp: h.timestamp,
@@ -709,7 +721,7 @@ extension LocalStore {
             let message: String
             switch trigger {
             case .unpaidFlag:
-                message = "FANBOX で未払いの項目があると表示されています。決済状態を確認できません（原因はアプリでは確認できません）"
+                message = "FANBOXで未払いの項目があると表示されています。決済状態を確認できません"
             case .unpaidRecord:
                 message = Self.paymentAttentionReason
             case .disappearedEarlyInMonth:
@@ -743,8 +755,8 @@ extension LocalStore {
             var detail = ""
             if let plan = fan.planTitle, !plan.isEmpty { detail = "「\(plan)」" }
             if let fee = fan.fee { detail += (detail.isEmpty ? "" : " ") + Self.yenText(fee) }
-            let message = detail.isEmpty ? "\(fan.name) さんが支援者一覧に加わりました"
-                : "\(fan.name) さんが支援者一覧に加わりました（\(detail)）"
+            let message = detail.isEmpty ? "\(fan.name)さんが支援者一覧に加わりました"
+                : "\(fan.name)さんが支援者一覧に加わりました（\(detail)）"
             let e = NotificationEvent(id: key, type: .newSupporter, accountIDs: [accountID], title: "新規支援（\(accountName)）",
                                       message: message, timestamp: fan.supportStartedAt.map { min($0, now) } ?? now,
                                       creatorID: account.creatorID)

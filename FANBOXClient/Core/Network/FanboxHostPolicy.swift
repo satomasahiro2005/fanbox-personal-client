@@ -116,7 +116,7 @@ enum HTTPErrorMapper {
             return .edgeBlocked(retryAfter: retryAfter(header(named: "Retry-After", in: headers), now: now))
         }
         switch status {
-        case 300..<400: return .invalidRequest("FANBOX がリダイレクトを返しました (\(status))")
+        case 300..<400: return .invalidRequest("FANBOXがリダイレクトを返しました（\(status)）")
         case 401: return .unauthorized
         case 403: return .forbidden
         case 404: return .notFound

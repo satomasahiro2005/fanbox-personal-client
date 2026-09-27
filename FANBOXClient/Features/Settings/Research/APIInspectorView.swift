@@ -76,19 +76,15 @@ struct APIInspectorView: View {
             Section {
                 Toggle("変化があるものだけ", isOn: $changedOnly)
                 if changed > 0 {
-                    Label("\(changed) 件の schema に未知のフィールドがあります", systemImage: "sparkles")
+                    Label("\(changed)件のschemaに未知のフィールドがあります", systemImage: "sparkles")
                         .foregroundStyle(.orange)
                         .font(.callout)
                 }
-            } footer: {
-                Text("Decoder は未知のフィールドがあっても失敗しません。ここでは DTO が知っているフィールドと実際のレスポンスの差分を表示します。"
-                     + "パスの [] は配列の各要素、{} は ID をキーにした辞書（imageMap など）の各値です。"
-                     + "解釈できなかったレスポンスは「Sync / Errors」に記録されます。")
             }
 
             if groups.isEmpty {
-                EmptyStateView(title: "Schema の記録がありません", systemImage: "curlybraces",
-                               message: "FANBOX API のレスポンスを受け取ると、endpoint ごとのフィールドが記録されます。")
+                EmptyStateView(title: "Schemaの記録がありません", systemImage: "curlybraces",
+                               message: "FANBOX APIのレスポンスを受け取ると、endpointごとのフィールドが記録されます。")
             }
 
             ForEach(groups) { group in
@@ -174,8 +170,6 @@ struct APISchemaDetailView: View {
                     }
                 } header: {
                     Text("New (\(snapshot.newFields.count))")
-                } footer: {
-                    Text("レスポンスに含まれていたが DTO が知らないフィールドです。")
                 }
 
                 Section {
@@ -187,8 +181,6 @@ struct APISchemaDetailView: View {
                     }
                 } header: {
                     Text("Missing (\(snapshot.missingFields.count))")
-                } footer: {
-                    Text("DTO が知っているが、最新のレスポンスに含まれていなかったフィールドです。")
                 }
 
                 Section("Known (\(snapshot.knownFields.count))") {

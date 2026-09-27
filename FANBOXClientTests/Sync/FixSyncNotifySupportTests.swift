@@ -223,6 +223,51 @@ final class FixSyncNotifySupportTests: XCTestCase {
         XCTAssertNil(c2.attentionReason)
     }
 
+    /// Rows flagged before the reason was respaced keep the earlier spelling: they are still recognised (not flagged
+    /// again, the acknowledgment kept) and cleared once FANBOX no longer lists the creator.
+    func testEarlierSpellingOfThePaymentAttentionReasonIsStillRecognised() throws {
+        let h = try SyncHarness()
+        let a = h.addAccount("A", pixivUserID: "pA", isMain: true)
+        h.store.applySupports([SyncFixtures.support("c1", plan: "p1", fee: 500), SyncFixtures.support("c2", plan: "p2", fee: 300),
+                               SyncFixtures.support("c3", plan: "p3", fee: 100)],
+                              account: a.context, source: .sync, isBaseline: true)
+        let legacy = try XCTUnwrap(LocalStore.legacyPaymentAttentionReasons.first)
+        XCTAssertNotEqual(legacy, LocalStore.paymentAttentionReason)
+        XCTAssertTrue(LocalStore.isPaymentAttentionReason(legacy))
+        XCTAssertFalse(LocalStore.isPaymentAttentionReason(LocalStore.supportMissingReason))
+        let acknowledged = Date(timeIntervalSince1970: 1_790_000_000)
+        func support(_ id: String) throws -> Support {
+            try XCTUnwrap(h.store.supports(accountID: a.id).first { $0.creatorID == id })
+        }
+        for id in ["c1", "c2", "c3"] {
+            let s = try support(id)
+            s.needsAttention = true
+            s.attentionReason = legacy
+            s.acknowledgedAt = acknowledged
+        }
+        h.store.save()
+
+        // c1 is still listed as unpaid, c2 and c3 are not.
+        let unpaid = RemotePayment(id: "u1", creatorID: "c1", creatorName: "Creator c1", amount: 500, paidAt: .now, paymentMethod: nil)
+        let change = h.store.applyPaymentStatus(RemotePaymentStatus(hasUnpaidPayments: true, unpaidRecords: [unpaid]), account: a.context)
+        XCTAssertTrue(change.newlyFlaggedCreatorIDs.isEmpty, "the same flag, not a new one")
+        let c1 = try support("c1")
+        XCTAssertTrue(c1.needsAttention)
+        XCTAssertEqual(c1.acknowledgedAt, acknowledged, "the acknowledgment is kept")
+        XCTAssertEqual(c1.attentionReason, LocalStore.paymentAttentionReason, "reworded to the current spelling")
+        for id in ["c2", "c3"] {
+            XCTAssertFalse(try support(id).needsAttention, id)
+            XCTAssertNil(try support(id).attentionReason, id)
+        }
+
+        // Account-level "no unpaid payments" without records clears the earlier spelling too.
+        c1.attentionReason = legacy
+        h.store.save()
+        h.store.applyPaymentStatus(RemotePaymentStatus(hasUnpaidPayments: false, unpaidRecords: nil), account: a.context)
+        XCTAssertFalse(c1.needsAttention)
+        XCTAssertNil(c1.attentionReason)
+    }
+
     func testUnpaidFlagWithoutRecordsCreatesAccountLevelEvent() async throws {
         let h = try SyncHarness()
         h.setClock(SyncFixtures.midMonthJST)

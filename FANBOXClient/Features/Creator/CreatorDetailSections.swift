@@ -43,7 +43,7 @@ struct CreatorPostsSection: View {
             .disabled(isLoadingMore)
             .accessibilityIdentifier("creatorLoadMoreButton")
         } header: {
-            Text("投稿（この端末 \(posts.count) 件）")
+            Text("投稿（この端末\(posts.count)件）")
         } footer: {
             if let loadMoreMessage {
                 Text(loadMoreMessage)
@@ -108,14 +108,24 @@ struct CreatorPlanRow: View {
     let supporterAccountIDs: [String]
     let onSupport: () -> Void
     @State private var expanded = false
+    @State private var showsCover = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .top, spacing: 10) {
-                if let cover = plan.coverImageURL {
+                if let cover = plan.coverImageURL, !cover.isEmpty {
                     RemoteImageView(thumbnailURL: cover, maxVariant: .thumbnail, creatorID: plan.creatorID)
                         .frame(width: 56, height: 56)
                         .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .contentShape(Rectangle())
+                        .onTapGesture { showsCover = true }
+                        .accessibilityElement()
+                        .accessibilityLabel("プランの画像")
+                        .accessibilityAddTraits(.isButton)
+                        .accessibilityIdentifier("creatorPlanCover.\(plan.planID)")
+                        .fullScreenCover(isPresented: $showsCover) {
+                            ImageViewer(items: [ImageViewerItem(id: "plan.\(plan.planID)", resizedURL: cover)], creatorID: plan.creatorID)
+                        }
                 }
                 VStack(alignment: .leading, spacing: 2) {
                     Text(plan.title)
@@ -256,7 +266,7 @@ struct CreatorAboutSection: View {
                     .foregroundStyle(.secondary)
             }
             if creator?.hasAdultContent == true {
-                PillLabel(text: "R-18 コンテンツあり", tint: .red)
+                PillLabel(text: "R-18コンテンツあり", tint: .red)
             }
         }
 
@@ -285,11 +295,9 @@ struct CreatorAboutSection: View {
 
         Section {
             CreatorWebAccountMenu(accounts: webAccounts, destination: .creator(creatorID: creatorID)) {
-                Label("Web で開く", systemImage: "safari")
+                Label("Webで開く", systemImage: "safari")
             }
             .accessibilityIdentifier("creatorAboutOpenWeb")
-        } footer: {
-            Text("選択したアカウントのログイン状態で FANBOX を開きます。")
         }
     }
 
@@ -304,7 +312,7 @@ struct CreatorAboutSection: View {
                     if enabled { Task { await saveRecent(count: creator.offlineRecentCount) } }
                 }
             )) {
-                Text("最近 N 件をオフライン保存")
+                Text("最近N件をオフライン保存")
             }
             .accessibilityIdentifier("creatorOfflineRuleToggle")
 
@@ -314,7 +322,7 @@ struct CreatorAboutSection: View {
                     // Local only: posts beyond the new N are released now, newly covered ones are saved by the next sync.
                     set: { env.offline.setRecentRule(creatorID: creatorID, count: $0) }
                 ), in: 1...100) {
-                    Text("最近 \(creator.offlineRecentCount) 件")
+                    Text("最近\(creator.offlineRecentCount)件")
                         .monospacedDigit()
                 }
                 .accessibilityIdentifier("creatorOfflineRecentStepper")
@@ -336,10 +344,7 @@ struct CreatorAboutSection: View {
         } header: {
             Text("オフライン")
         } footer: {
-            VStack(alignment: .leading, spacing: 4) {
-                if let offlineMessage { Text(offlineMessage) }
-                Text("既知の投稿と最新ページの差分だけを保存します。過去の全履歴は取得しません。新しい投稿は同期のたびに自動で保存され、古くなった分は保存が解除されます。")
-            }
+            if let offlineMessage { Text(offlineMessage) }
         }
     }
 
@@ -349,7 +354,7 @@ struct CreatorAboutSection: View {
         offlineMessage = nil
         await env.offline.saveRecent(creatorID: creatorID, count: count)
         isSavingOffline = false
-        offlineMessage = "最近 \(count) 件の保存を実行しました"
+        offlineMessage = "最近\(count)件の保存を実行しました"
     }
 }
 

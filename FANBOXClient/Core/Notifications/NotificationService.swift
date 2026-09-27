@@ -340,18 +340,18 @@ final class NotificationService: NSObject {
             let commentID = event.commentID
             let comment = commentID.flatMap { id in store.first(#Predicate<Comment> { $0.commentID == id }) }
             let author = comment?.authorName ?? event.actorName ?? "誰か"
-            let title = event.type == .comment ? "\(author) がコメントしました" : "\(author) が返信しました"
+            let title = event.type == .comment ? "\(author)がコメントしました" : "\(author)が返信しました"
             let body = comment.map { preview($0.body) } ?? preview(fallbackBody)
             return (title, post?.title ?? "", body)
         case .newPost:
-            let title = "\(creatorName ?? event.actorName ?? "クリエイター") が投稿しました"
+            let title = "\(creatorName ?? event.actorName ?? "クリエイター")が投稿しました"
             guard let post else { return (title, "", preview(fallbackBody)) }
             let lead = post.bodyText.isEmpty ? post.excerpt : post.bodyText
             let body = lead.isEmpty ? post.title : "\(post.title)\n\(preview(lead))"
             return (title, "", body)
         case .newsletter:
             let letter = event.newsletterID.flatMap { store.newsletter(id: $0) }
-            let title = "\(letter?.creatorName ?? creatorName ?? "クリエイター") からおたより"
+            let title = "\(letter?.creatorName ?? creatorName ?? "クリエイター")からおたより"
             let body = letter.map { $0.body.isEmpty ? ($0.title ?? fallbackBody) : preview($0.body) } ?? preview(fallbackBody)
             return (title, letter?.title ?? "", body)
         case .supportChanged, .paymentAttention, .newSupporter, .other:

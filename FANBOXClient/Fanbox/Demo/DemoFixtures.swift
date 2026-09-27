@@ -522,7 +522,7 @@ enum DemoFixtures {
     static let sharedNewPost = DemoNotificationFixture(
         key: "newpost-101", type: .newPost, rawType: "post_published", time: .minutesAgo(12), creatorID: "demo-aoi",
         postID: "demo-post-101", commentID: nil, newsletterID: nil, actorName: "Demo 絵描きアオイ",
-        actorIconURL: creatorsByID["demo-aoi"]?.iconURL, title: "Demo 絵描きアオイ が新しい投稿を公開しました",
+        actorIconURL: creatorsByID["demo-aoi"]?.iconURL, title: "Demo 絵描きアオイが新しい投稿を公開しました",
         message: "Demo 新作イラスト「夏の終わり」", unread: true)
 
     private static func newPost(_ postID: String, unread: Bool) -> DemoNotificationFixture {
@@ -531,7 +531,7 @@ enum DemoFixtures {
         return DemoNotificationFixture(
             key: "newpost-\(postID)", type: .newPost, rawType: "post_published", time: post.time, creatorID: creator.id,
             postID: postID, commentID: nil, newsletterID: nil, actorName: creator.name, actorIconURL: creator.iconURL,
-            title: "\(creator.name) が新しい投稿を公開しました", message: post.title, unread: unread)
+            title: "\(creator.name)が新しい投稿を公開しました", message: post.title, unread: unread)
     }
 
     private static func reply(_ commentID: String, unread: Bool) -> DemoNotificationFixture {
@@ -546,7 +546,7 @@ enum DemoFixtures {
         return DemoNotificationFixture(
             key: "reply-\(commentID)", type: .commentReply, rawType: "comment_reply", time: comment.time, creatorID: creator.id,
             postID: post.id, commentID: commentID, newsletterID: nil, actorName: actor.0, actorIconURL: actor.1,
-            title: "\(actor.0) さんがあなたのコメントに返信しました", message: comment.body, unread: unread)
+            title: "\(actor.0)さんがあなたのコメントに返信しました", message: comment.body, unread: unread)
     }
 
     private static func ownPostComment(_ commentID: String, unread: Bool) -> DemoNotificationFixture {
@@ -556,7 +556,7 @@ enum DemoFixtures {
         return DemoNotificationFixture(
             key: "comment-\(commentID)", type: .comment, rawType: "post_comment", time: comment.time, creatorID: selfCreatorID,
             postID: post.id, commentID: commentID, newsletterID: nil, actorName: fans[i].name, actorIconURL: fans[i].iconURL,
-            title: "\(fans[i].name) さんが「\(post.title)」にコメントしました", message: comment.body, unread: unread)
+            title: "\(fans[i].name)さんが「\(post.title)」にコメントしました", message: comment.body, unread: unread)
     }
 
     private static func newsletterNotice(_ id: String, unread: Bool) -> DemoNotificationFixture {
@@ -623,13 +623,13 @@ enum DemoFixtures {
                 key: "supporter-fan-03", type: .newSupporter, rawType: "new_supporter", time: .minutesAgo(130),
                 creatorID: selfCreatorID, postID: nil, commentID: nil, newsletterID: nil, actorName: fans[2].name,
                 actorIconURL: fans[2].iconURL, title: "新しい支援者がいます",
-                message: "\(fans[2].name) さんが「メイキング」プラン（¥1,000）で支援を開始しました", unread: true),
+                message: "\(fans[2].name)さんが「メイキング」プラン（¥1,000）で支援を開始しました", unread: true),
             ownPostComment("demo-c-902-2", unread: false),
             DemoNotificationFixture(
                 key: "supporter-fan-09", type: .newSupporter, rawType: "new_supporter", time: .minutesAgo(1500),
                 creatorID: selfCreatorID, postID: nil, commentID: nil, newsletterID: nil, actorName: fans[8].name,
                 actorIconURL: fans[8].iconURL, title: "新しい支援者がいます",
-                message: "\(fans[8].name) さんが「スタンダード」プラン（¥500）で支援を開始しました", unread: false),
+                message: "\(fans[8].name)さんが「スタンダード」プラン（¥500）で支援を開始しました", unread: false),
             newsletterNotice("demo-nl-c-1", unread: false),
             DemoNotificationFixture(
                 key: "other-creator-tips", type: .other, rawType: "creator_announcement", time: .daysAgo(4), creatorID: nil,

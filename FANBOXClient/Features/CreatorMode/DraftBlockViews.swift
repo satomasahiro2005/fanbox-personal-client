@@ -105,7 +105,7 @@ struct DraftBlockEditorRow: View {
                 }
             }
             if needsWeb {
-                Label("Web で追加（アプリから送信できません）", systemImage: "safari")
+                Label("Webで追加（アプリから送信できません）", systemImage: "safari")
                     .font(.caption2.bold())
                     .foregroundStyle(.orange)
                     .accessibilityIdentifier("draftNeedsWebBadge")
@@ -148,16 +148,16 @@ struct DraftBlockEditorRow: View {
                 switch block.kind {
                 case .text, .header:
                     Text(block.text).font(.subheadline)
-                    Text("アプリで扱えないブロックです（Web エディタで編集してください）").font(.caption2).foregroundStyle(.secondary)
+                    Text("アプリで扱えないブロックです（Webエディタで編集してください）").font(.caption2).foregroundStyle(.secondary)
                 case .image:
-                    Text("FANBOX 上の画像（プレビューできません）").font(.subheadline)
+                    Text("FANBOX上の画像（プレビューできません）").font(.subheadline)
                 case .file:
-                    Text(block.originalFileName ?? "FANBOX 上のファイル").font(.subheadline)
+                    Text(block.originalFileName ?? "FANBOX上のファイル").font(.subheadline)
                 case .url:
-                    Text(block.text.isEmpty ? (block.url ?? "FANBOX 上のリンクカード") : block.text).font(.subheadline).lineLimit(2)
+                    Text(block.text.isEmpty ? (block.url ?? "FANBOX上のリンクカード") : block.text).font(.subheadline).lineLimit(2)
                     Text("リンクカード（そのまま残します）").font(.caption2).foregroundStyle(.secondary)
                 case .embed:
-                    Text(block.url ?? block.embedContentID ?? "FANBOX 上の埋め込み").font(.subheadline).lineLimit(2)
+                    Text(block.url ?? block.embedContentID ?? "FANBOX上の埋め込み").font(.subheadline).lineLimit(2)
                     Text("埋め込み（そのまま残します）").font(.caption2).foregroundStyle(.secondary)
                 }
             }
@@ -211,7 +211,7 @@ struct DraftBlockEditorRow: View {
             HStack {
                 Label("URL", systemImage: "link").font(.caption).foregroundStyle(.secondary)
                 if block.remoteMediaID != nil {
-                    Text(block.remoteMedia != nil ? "リンクカード登録済み" : "FANBOX 上のリンクカード").font(.caption2).foregroundStyle(.secondary)
+                    Text(block.remoteMedia != nil ? "リンクカード登録済み" : "FANBOX上のリンクカード").font(.caption2).foregroundStyle(.secondary)
                 }
             }
             TextField("https://", text: Binding(get: { block.url ?? "" }, set: { block.url = $0 }))
@@ -238,7 +238,7 @@ struct DraftBlockEditorRow: View {
                 }
                 .pickerStyle(.menu)
             }
-            TextField("URL または ID", text: Binding(
+            TextField("URLまたはID", text: Binding(
                 get: { block.url ?? block.embedContentID ?? "" },
                 set: { value in
                     block.url = value
@@ -263,13 +263,13 @@ struct DraftMediaUploadBadge: View {
 
     var body: some View {
         if block.remoteMediaID != nil {
-            Label(block.localFileName == nil ? "FANBOX 上のメディア" : "アップロード済み", systemImage: "checkmark.circle.fill")
+            Label(block.localFileName == nil ? "FANBOX上のメディア" : "アップロード済み", systemImage: "checkmark.circle.fill")
                 .font(.caption2)
                 .foregroundStyle(.green)
         } else if !canUpload {
-            Text("縮小・変換済み（Web エディタで追加）").font(.caption2).foregroundStyle(.secondary)
-        } else if let job, job.state == .paused, job.lastError == UploadQueue.awaitingPostMessage {
-            Text("送信時にアップロード（FANBOX の下書き作成後）").font(.caption2).foregroundStyle(.secondary)
+            Text("縮小・変換済み（Webエディタで追加）").font(.caption2).foregroundStyle(.secondary)
+        } else if let job, UploadQueue.isAwaitingPost(job) {
+            Text("送信時にアップロード（FANBOXの下書き作成後）").font(.caption2).foregroundStyle(.secondary)
         } else if let job {
             HStack(spacing: 4) {
                 Text(CreatorFormatting.uploadStatus(state: job.state, progress: job.progress))
@@ -318,7 +318,7 @@ struct DraftUploadPanel: View {
     /// Accounts without a native upload: media are prepared locally and added in the web editor.
     private var webSection: some View {
         Section {
-            Label(webItemCount > 0 ? "Web エディタで追加する画像・ファイル \(webItemCount) 件" : "Web エディタで追加する画像・ファイルはありません",
+            Label(webItemCount > 0 ? "Webエディタで追加する画像・ファイル\(webItemCount)件" : "Webエディタで追加する画像・ファイルはありません",
                   systemImage: "safari")
                 .font(.subheadline)
             if webItemCount > 0 {
@@ -331,8 +331,6 @@ struct DraftUploadPanel: View {
             }
         } header: {
             Text("アップロード")
-        } footer: {
-            Text("このアカウントではアプリから画像・ファイルをアップロードできません。送信すると本文を先に FANBOX に保存し、ここで縮小・変換した画像を書き出して Web エディタで追加できます。")
         }
     }
 
@@ -342,22 +340,15 @@ struct DraftUploadPanel: View {
                 DraftUploadJobRow(job: job)
             }
             if notQueued > 0 {
-                Text("未アップロード \(notQueued) 件").font(.subheadline).foregroundStyle(.secondary)
+                Text("未アップロード\(notQueued)件").font(.subheadline).foregroundStyle(.secondary)
             }
             if !env.uploads.isNetworkAvailable && (notQueued > 0 || activeJobs.contains { $0.state == .queued }) {
                 Label("オフラインのため待機中です。接続後に送信できます。", systemImage: "wifi.slash")
                     .font(.caption)
                     .foregroundStyle(.orange)
             }
-            if awaitsPost {
-                Label("送信（下書き保存 / 公開）すると、FANBOX に下書きを作成してから順にアップロードします。",
-                      systemImage: "tray.and.arrow.up")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .accessibilityIdentifier("draftUploadAwaitsPostNote")
-            }
             HStack {
-                if !awaitsPost && (notQueued > 0 || activeJobs.contains(where: { $0.state == .queued || $0.lastError == UploadQueue.awaitingPostMessage })) {
+                if !awaitsPost && (notQueued > 0 || activeJobs.contains(where: { $0.state == .queued || UploadQueue.isAwaitingPost($0) })) {
                     Button {
                         env.uploads.resumeAwaitingPost(draftID: draft.id)
                         env.uploads.enqueue(draftID: draft.id)
@@ -386,10 +377,6 @@ struct DraftUploadPanel: View {
                 Text("アップロード")
                 if env.uploads.isRunning { ProgressView().controlSize(.mini) }
             }
-        } footer: {
-            Text(awaitsPost
-                 ? "FANBOX では画像・ファイルを投稿に直接アップロードするため、先に FANBOX の下書きが必要です。画像は長辺 4096px を超える場合に縮小し、HEIC は JPEG に変換します。完了した項目は再送しません。"
-                 : "画像は長辺 4096px を超える場合に縮小し、HEIC は JPEG に変換してから送信します。完了した項目は再送しません。")
         }
     }
 }
@@ -418,7 +405,8 @@ struct DraftUploadJobRow: View {
                     Text(reason).font(.caption).foregroundStyle(.red)
                 } else if job.state == .paused, let reason = job.lastError {
                     // Paused by the app (web editor / waiting for the FANBOX draft), not by the creator.
-                    Text(reason).font(.caption).foregroundStyle(.secondary)
+                    Text(UploadQueue.isAwaitingPost(job) ? UploadQueue.awaitingPostMessage : reason)
+                        .font(.caption).foregroundStyle(.secondary)
                 }
             }
             switch job.state {
@@ -426,7 +414,7 @@ struct DraftUploadJobRow: View {
                 Button { env.uploads.pause(jobID: job.id) } label: { Image(systemName: "pause.circle") }
                     .buttonStyle(.borderless)
                     .accessibilityLabel("一時停止")
-            case .paused where job.lastError == UploadQueue.awaitingPostMessage:
+            case .paused where UploadQueue.isAwaitingPost(job):
                 EmptyView()
             case .paused:
                 Button { env.uploads.resume(jobID: job.id) } label: { Image(systemName: "play.circle") }
@@ -530,7 +518,7 @@ private struct DraftPreviewBlock: View {
             let target = block.url ?? ""
             HStack {
                 Image(systemName: "link")
-                Text(target.isEmpty ? (block.remoteMediaID != nil ? "FANBOX 上のリンクカード" : "（URL 未入力）") : target).lineLimit(1)
+                Text(target.isEmpty ? (block.remoteMediaID != nil ? "FANBOX上のリンクカード" : "（URL未入力）") : target).lineLimit(1)
             }
             .font(.subheadline)
             .foregroundStyle(target.isEmpty ? .secondary : Color.accentColor)

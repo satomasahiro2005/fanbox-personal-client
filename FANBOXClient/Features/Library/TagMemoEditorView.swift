@@ -58,7 +58,7 @@ struct TagMemoEditorView: View {
                                     }
                                     .buttonStyle(.borderless)
                                     .foregroundStyle(.primary)
-                                    .accessibilityLabel(Text("#\(tag) を外す"))
+                                    .accessibilityLabel(Text("#\(tag)を外す"))
                                 }
                             }
                             .padding(.vertical, 2)
@@ -103,8 +103,6 @@ struct TagMemoEditorView: View {
                     Section {
                         Toggle("お気に入り", systemImage: "star", isOn: $isFavorite)
                         Toggle("あとで読む", systemImage: "bookmark", isOn: $isReadLater)
-                    } footer: {
-                        Text("タグ・メモ・お気に入りはこの端末内だけに保存され、FANBOX へは送信されません。")
                     }
                 } else {
                     Text("投稿が見つかりません")

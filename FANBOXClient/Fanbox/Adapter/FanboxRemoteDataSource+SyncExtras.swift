@@ -15,9 +15,9 @@ extension FanboxRemoteDataSource {
         let supports = body.items.compactMap(FanboxAdapter.support)
         var problems: [String] = []
         if let shape = body.shapeProblem { problems.append(shape) }
-        if body.undecodableCount > 0 { problems.append("解釈できない項目 \(body.undecodableCount) 件") }
+        if body.undecodableCount > 0 { problems.append("解釈できない項目\(body.undecodableCount)件") }
         let unmapped = body.items.count - supports.count
-        if unmapped > 0 { problems.append("id / creatorId のない項目 \(unmapped) 件") }
+        if unmapped > 0 { problems.append("id / creatorIdのない項目\(unmapped)件") }
         return RemoteSupportListing(supports: supports, problem: problems.isEmpty ? nil : problems.joined(separator: " / "))
     }
 
@@ -96,7 +96,7 @@ struct FanboxSupportingPlanAudit: FanboxResponseBody {
             } else {
                 items = []
                 undecodableCount = 0
-                shapeProblem = "\(key) が配列ではありません"
+                shapeProblem = "\(key)が配列ではありません"
             }
             return
         }

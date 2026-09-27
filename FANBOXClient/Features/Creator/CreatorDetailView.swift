@@ -124,7 +124,7 @@ struct CreatorDetailView: View {
                 CreatorWebAccountMenu(accounts: webAccounts, destination: .creator(creatorID: creatorID)) {
                     Image(systemName: "safari")
                 }
-                .accessibilityLabel("Web で開く")
+                .accessibilityLabel("Webで開く")
                 .accessibilityIdentifier("creatorOpenWebMenu")
             }
         }
@@ -170,12 +170,21 @@ struct CreatorDetailHeader: View {
     let onToggleFavorite: () -> Void
     let onEditMemo: () -> Void
 
+    /// Icon or cover opened full screen.
+    @State private var viewer: CreatorHeaderImage?
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             ZStack(alignment: .bottomLeading) {
                 Group {
-                    if let cover = creator?.coverImageURL {
+                    if let cover = creator?.coverImageURL, !cover.isEmpty {
                         RemoteImageView(thumbnailURL: cover, displayURL: cover, maxVariant: .display, creatorID: creatorID)
+                            .contentShape(Rectangle())
+                            .onTapGesture { viewer = .cover }
+                            .accessibilityElement()
+                            .accessibilityLabel("カバー画像")
+                            .accessibilityAddTraits(.isButton)
+                            .accessibilityIdentifier("creatorHeaderCover")
                     } else {
                         LinearGradient(colors: [.purple.opacity(0.35), .teal.opacity(0.35)], startPoint: .topLeading, endPoint: .bottomTrailing)
                     }
@@ -184,12 +193,23 @@ struct CreatorDetailHeader: View {
                 .frame(maxWidth: .infinity)
                 .clipped()
 
+                let hasIcon = !(creator?.iconURL ?? "").isEmpty
                 AvatarView(url: creator?.iconURL, size: 64)
                     .overlay(Circle().stroke(Color(.systemBackground), lineWidth: 3))
+                    .contentShape(Circle())
+                    .onTapGesture { if hasIcon { viewer = .icon } }
+                    .accessibilityElement()
+                    .accessibilityLabel("アイコン")
+                    .accessibilityAddTraits(hasIcon ? .isButton : [])
+                    .accessibilityIdentifier("creatorHeaderIcon")
                     .padding(.leading, 16)
                     .offset(y: 32)
             }
             .padding(.bottom, 36)
+            .fullScreenCover(item: $viewer) { tapped in
+                let items = CreatorHeaderImage.viewerItems(iconURL: creator?.iconURL, coverURL: creator?.coverImageURL)
+                ImageViewer(items: items, startIndex: CreatorHeaderImage.startIndex(of: tapped, in: items), creatorID: creatorID)
+            }
 
             VStack(alignment: .leading, spacing: 6) {
                 HStack(alignment: .firstTextBaseline) {
@@ -266,6 +286,26 @@ struct CreatorDetailHeader: View {
     }
 }
 
+/// Images of the creator page header opened in the full-screen viewer (unit-tested).
+enum CreatorHeaderImage: String, Identifiable, CaseIterable {
+    case icon, cover
+
+    var id: String { rawValue }
+
+    /// Icon then cover, whichever exist. Both are pximg-resized; the viewer's original is the un-resized image.
+    static func viewerItems(iconURL: String?, coverURL: String?) -> [ImageViewerItem] {
+        var items: [ImageViewerItem] = []
+        if let iconURL, !iconURL.isEmpty { items.append(ImageViewerItem(id: icon.rawValue, resizedURL: iconURL)) }
+        if let coverURL, !coverURL.isEmpty { items.append(ImageViewerItem(id: cover.rawValue, resizedURL: coverURL)) }
+        return items
+    }
+
+    /// Page of the tapped image (the first page when it is missing).
+    static func startIndex(of tapped: CreatorHeaderImage, in items: [ImageViewerItem]) -> Int {
+        items.firstIndex { $0.id == tapped.rawValue } ?? 0
+    }
+}
+
 /// Local-only memo editor (SPEC §33: never sent to FANBOX).
 struct CreatorMemoEditor: View {
     let creator: Creator
@@ -281,8 +321,6 @@ struct CreatorMemoEditor: View {
                     TextEditor(text: $text)
                         .frame(minHeight: 160)
                         .accessibilityIdentifier("creatorMemoEditor")
-                } footer: {
-                    Text("メモはこの端末内にのみ保存され、FANBOX には送信されません。")
                 }
             }
             .navigationTitle("メモ")
@@ -385,7 +423,7 @@ struct CreatorSupportBlock: View {
 
             if !ownerAccountIDs.isEmpty {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text("自分の Creator Account")
+                    Text("自分のCreator Account")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     AccountBadgeRow(accountIDs: ownerAccountIDs)

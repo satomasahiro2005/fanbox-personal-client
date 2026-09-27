@@ -120,7 +120,7 @@ private struct CreatorModeAccountView: View {
         }
         .alert("編集を開始できませんでした", isPresented: Binding(get: { editFailure != nil }, set: { if !$0 { editFailure = nil } }),
                presenting: editFailure) { failure in
-            Button("Web エディタで開く") {
+            Button("Webエディタで開く") {
                 env.web.openWeb(account: accountID, destination: .managePostEditor(postID: failure.postID),
                                 purpose: .fallback(reason: failure.error.userMessage))
             }
@@ -133,7 +133,7 @@ private struct CreatorModeAccountView: View {
                             titleVisibility: .visible, presenting: draftPendingDeletion) { draft in
             Button("削除", role: .destructive) { env.drafts.deleteDraft(draftID: draft.id) }
         } message: { _ in
-            Text("ローカルの下書きと添付メディアを削除します。FANBOX 上の投稿は削除されません。")
+            Text("ローカルの下書きと添付メディアを削除します。FANBOX上の投稿は削除されません。")
         }
     }
 
@@ -143,7 +143,7 @@ private struct CreatorModeAccountView: View {
         Section {
             let s = currentSnapshot
             CreatorMetricRow(title: "支援者",
-                             display: CreatorFormatting.metric(s?.supporterCount, source: s?.supporterCountSource ?? .unavailable) { "\($0) 人" },
+                             display: CreatorFormatting.metric(s?.supporterCount, source: s?.supporterCountSource ?? .unavailable) { "\($0)人" },
                              identifier: "creatorMetricSupporters")
             CreatorMetricRow(title: "支援額",
                              display: CreatorFormatting.metric(s?.earnings, source: s?.earningsSource ?? .unavailable) { Formatters.yen($0) },
@@ -158,9 +158,9 @@ private struct CreatorModeAccountView: View {
             Text("今月（\(CreatorFormatting.monthTitle(currentMonth))）")
         } footer: {
             if let s = currentSnapshot {
-                Text("取得: \(Formatters.shortDate(s.fetchedAt)) \(Formatters.time(s.fetchedAt))・取得できない統計は表示しません")
+                Text("取得: \(Formatters.shortDate(s.fetchedAt)) \(Formatters.time(s.fetchedAt))")
             } else {
-                Text("まだ取得していません。取得できない統計は推定せず「取得不可」と表示します。")
+                Text("まだ取得していません")
             }
         }
     }
@@ -174,8 +174,6 @@ private struct CreatorModeAccountView: View {
                 Label("新規投稿", systemImage: "square.and.pencil")
             }
             .accessibilityIdentifier("creatorNewPostButton")
-        } footer: {
-            Text("下書きは端末内に自動保存され、オフラインでも作成・編集できます。")
         }
     }
 
@@ -238,7 +236,7 @@ private struct CreatorModeAccountView: View {
             Button { startEditing(post) } label: { Label("編集", systemImage: "pencil") }
             Button {
                 env.web.openWeb(account: accountID, destination: .managePostEditor(postID: post.postID), purpose: .browse)
-            } label: { Label("Web エディタで開く", systemImage: "safari") }
+            } label: { Label("Webエディタで開く", systemImage: "safari") }
         }
     }
 
@@ -257,7 +255,7 @@ private struct CreatorModeAccountView: View {
                     Label("ファン", systemImage: "person.3")
                     Spacer()
                     if !fans.isEmpty {
-                        Text("\(fans.filter { $0.state == .supporting }.count) 人支援中").font(.caption).foregroundStyle(.secondary)
+                        Text("\(fans.filter { $0.state == .supporting }.count)人支援中").font(.caption).foregroundStyle(.secondary)
                     }
                 }
             }
@@ -267,7 +265,7 @@ private struct CreatorModeAccountView: View {
                     Label("プラン", systemImage: "list.bullet.rectangle")
                     Spacer()
                     if !plans.isEmpty {
-                        Text("\(plans.count) 件").font(.caption).foregroundStyle(.secondary)
+                        Text("\(plans.count)件").font(.caption).foregroundStyle(.secondary)
                     }
                 }
             }
@@ -282,16 +280,14 @@ private struct CreatorModeAccountView: View {
             Button {
                 env.web.openWeb(account: accountID, destination: .managePosts, purpose: .browse)
             } label: {
-                Label("Web で投稿管理", systemImage: "safari")
+                Label("Webで投稿管理", systemImage: "safari")
             }
             .accessibilityIdentifier("creatorWebManagePosts")
             Button {
                 env.web.openWeb(account: accountID, destination: .manageDashboard, purpose: .browse)
             } label: {
-                Label("Web でダッシュボード", systemImage: "chart.bar")
+                Label("Webでダッシュボード", systemImage: "chart.bar")
             }
-        } footer: {
-            Text("ネイティブで扱えない操作は、このアカウントのログイン状態を保った Web 画面で行えます。")
         }
     }
 
@@ -345,13 +341,13 @@ struct CreatorDraftRow: View {
                     PillLabel(text: "FANBOX: \(remote.creatorLabel)", tint: remote.creatorTint)
                 }
                 if draft.webHandoffAt != nil {
-                    PillLabel(text: "Web で仕上げ", systemImage: "safari", tint: .orange)
+                    PillLabel(text: "Webで仕上げ", systemImage: "safari", tint: .orange)
                 }
                 let images = draft.blocks.filter { $0.kind == .image }.count
                 if images > 0 {
                     Label("\(images)", systemImage: "photo").font(.caption).foregroundStyle(.secondary)
                 }
-                Text("更新 \(Formatters.relative(draft.updatedAt))").font(.caption).foregroundStyle(.secondary)
+                Text("更新\(Formatters.relative(draft.updatedAt))").font(.caption).foregroundStyle(.secondary)
             }
             if let error = draft.lastError, draft.status == .failed {
                 Text(error).font(.caption).foregroundStyle(.red).lineLimit(2)
@@ -423,7 +419,7 @@ struct CreatorManagedPostsView: View {
         }
         .alert("編集を開始できませんでした", isPresented: Binding(get: { editFailure != nil }, set: { if !$0 { editFailure = nil } }),
                presenting: editFailure) { failure in
-            Button("Web エディタで開く") {
+            Button("Webエディタで開く") {
                 env.web.openWeb(account: accountID, destination: .managePostEditor(postID: failure.postID),
                                 purpose: .fallback(reason: failure.error.userMessage))
             }

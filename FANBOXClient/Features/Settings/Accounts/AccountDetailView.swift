@@ -52,7 +52,7 @@ struct AccountDetailView: View {
                 if account.kind == .fanbox {
                     LabeledContent("pixiv ID", value: account.pixivUserID ?? "—")
                     if let fanboxUserID = account.fanboxUserID {
-                        LabeledContent("FANBOX ユーザー ID", value: fanboxUserID)
+                        LabeledContent("FANBOXユーザーID", value: fanboxUserID)
                     }
                 } else {
                     LabeledContent("種類", value: "デモ（通信なし）")
@@ -89,17 +89,15 @@ struct AccountDetailView: View {
 
             if account.kind == .fanbox {
                 Section {
-                    LabeledContent("Web ストア", value: String(account.webProfileID.prefix(8)) + "…")
+                    LabeledContent("Webストア", value: String(account.webProfileID.prefix(8)) + "…")
                     Button(role: .destructive) {
                         confirmLogout = true
                     } label: {
-                        Label("ログアウト（セッションと Web データを消去）", systemImage: "rectangle.portrait.and.arrow.right")
+                        Label("ログアウト（セッションとWebデータを消去）", systemImage: "rectangle.portrait.and.arrow.right")
                     }
                     .accessibilityIdentifier("logoutAccountButton")
                 } header: {
                     Text("セキュリティ")
-                } footer: {
-                    Text("Cookie はこのアカウント専用の WebKit ストアに、API セッションは Keychain に保存されています。どちらも他のアカウントとは共有されません。")
                 }
             }
 
@@ -119,7 +117,7 @@ struct AccountDetailView: View {
                 Task { await env.accounts.remove(accountID: id) }
             }
         } message: {
-            Text("セッション（Keychain）、Web データ、支援・同期情報が削除されます。取得済みの投稿本文やコメントは残ります。")
+            Text("セッション（Keychain）、Webデータ、支援・同期情報が削除されます。取得済みの投稿本文やコメントは残ります。")
         }
         .confirmationDialog("ログアウトしますか？", isPresented: $confirmLogout, titleVisibility: .visible) {
             Button("ログアウト", role: .destructive) {
@@ -127,7 +125,7 @@ struct AccountDetailView: View {
                 Task { await env.accounts.logout(accountID: id) }
             }
         } message: {
-            Text("このアカウントのセッションと Web データを削除します。アカウントとキャッシュは残り、「Web で再ログイン」で復帰できます。")
+            Text("このアカウントのセッションとWebデータを削除します。アカウントとキャッシュは残り、「Webで再ログイン」で復帰できます。")
         }
     }
 
@@ -162,13 +160,13 @@ struct AccountDetailView: View {
             Button {
                 env.web.openWeb(account: account.id, destination: .login, purpose: .login)
             } label: {
-                Label("Web で再ログイン", systemImage: "person.badge.key")
+                Label("Webで再ログイン", systemImage: "person.badge.key")
             }
             .accessibilityIdentifier("reloginButton")
             Button {
                 env.web.openWeb(account: account.id, destination: .home, purpose: .browse)
             } label: {
-                Label("Web で FANBOX を開く", systemImage: "safari")
+                Label("WebでFANBOXを開く", systemImage: "safari")
             }
             .accessibilityIdentifier("openWebButton")
         } header: {
@@ -182,13 +180,13 @@ struct AccountDetailView: View {
     private func sessionFooter(_ account: Account) -> some View {
         let observed = env.accounts.identityWarnings[account.id]
         if account.sessionState == .error {
-            Text("別の pixiv アカウント\(observed.map { "（pixiv ID: \($0)）" } ?? "")のセッションを検出したため、このアカウントのセッションを削除し、"
-                 + "同期を止めています。「Web で再ログイン」から pixiv ID \(account.pixivUserID ?? "—") のアカウントでログインしてください。")
+            Text("別のpixivアカウント\(observed.map { "（pixiv ID: \($0)）" } ?? "")のセッションを検出したため、このアカウントのセッションを削除し、"
+                 + "同期を止めています。「Webで再ログイン」からpixiv ID \(account.pixivUserID ?? "—")のアカウントでログインしてください。")
                 .foregroundStyle(.red)
         } else if account.sessionState == .expired || account.sessionState == .loggedOut {
-            Text("ログインの有効期限が切れています。「Web で再ログイン」から同じ pixiv アカウントでログインしてください。")
+            Text("ログインの有効期限が切れています。「Webで再ログイン」から同じpixivアカウントでログインしてください。")
         } else if let observed {
-            Text("Web 画面で別の pixiv アカウント（pixiv ID: \(observed)）のログインを検出したため、Web セッションをこのアカウントのものに戻しました。")
+            Text("Web画面で別のpixivアカウント（pixiv ID: \(observed)）のログインを検出したため、Webセッションをこのアカウントのものに戻しました。")
                 .foregroundStyle(.orange)
         }
     }
@@ -211,7 +209,7 @@ struct AccountDetailView: View {
         case .updated(.valid): return "セッションは有効です。"
         case .updated(.expired): return "ログインの有効期限が切れています。"
         case .updated(.loggedOut): return "ログアウトしています。"
-        case .updated(.error): return "別の pixiv アカウントのセッションでした。安全のため削除しました。正しいアカウントで再ログインしてください。"
+        case .updated(.error): return "別のpixivアカウントのセッションでした。安全のため削除しました。正しいアカウントで再ログインしてください。"
         case .updated(.unknown): return "状態は不明です。"
         case .unchanged(let reason): return "確認できませんでした（\(reason)）。状態は変更していません。"
         }
@@ -235,7 +233,7 @@ private struct AccountCreatorSection: View {
 
     var body: some View {
         Section {
-            LabeledContent("クリエイター ID", value: creatorID)
+            LabeledContent("クリエイターID", value: creatorID)
             if let creator = creators.first {
                 LabeledContent("名前", value: creator.name)
             }
@@ -243,18 +241,16 @@ private struct AccountCreatorSection: View {
                 Button {
                     env.web.openWeb(account: accountID, destination: .creator(creatorID: creatorID), purpose: .browse)
                 } label: {
-                    Label("クリエイターページを Web で開く", systemImage: "person.crop.square")
+                    Label("クリエイターページをWebで開く", systemImage: "person.crop.square")
                 }
                 Button {
                     env.web.openWeb(account: accountID, destination: .manageDashboard, purpose: .browse)
                 } label: {
-                    Label("クリエイター管理画面を Web で開く", systemImage: "chart.bar")
+                    Label("クリエイター管理画面をWebで開く", systemImage: "chart.bar")
                 }
             }
         } header: {
             Text("クリエイターページ")
-        } footer: {
-            Text("このアカウントは Creator Mode で使用されます。")
         }
     }
 }

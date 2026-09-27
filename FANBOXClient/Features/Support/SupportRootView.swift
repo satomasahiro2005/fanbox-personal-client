@@ -50,9 +50,6 @@ struct SupportRootView: View {
 
             Section {
                 SupportDashboardCard(summary: summary, monthLabel: SupportAnalyzer.monthLabel(now), lastSync: status.lastSync)
-            } footer: {
-                Text(SupportText.dashboardFootnote)
-                    .accessibilityIdentifier("supportDashboardFootnote")
             }
 
             if !attention.isEmpty || !unpaidAccounts.isEmpty {
@@ -68,18 +65,16 @@ struct SupportRootView: View {
                         }
                     }
                 } header: {
-                    Label("要確認 \(attention.count + unpaidAccounts.count)", systemImage: "exclamationmark.triangle.fill")
+                    Label("要確認\(attention.count + unpaidAccounts.count)", systemImage: "exclamationmark.triangle.fill")
                         .foregroundStyle(.orange)
                         .accessibilityIdentifier("supportAttentionHeader")
-                } footer: {
-                    Text("アプリが観測した事実のみを表示しています。原因は FANBOX / pixiv の画面で確認してください。")
                 }
             }
 
             Section {
                 Picker("表示", selection: $grouping) {
-                    Text("Creator 別").tag(Grouping.creator)
-                    Text("Account 別").tag(Grouping.account)
+                    Text("Creator別").tag(Grouping.creator)
+                    Text("Account別").tag(Grouping.account)
                 }
                 .pickerStyle(.segmented)
                 .accessibilityIdentifier("supportGroupingPicker")
@@ -163,11 +158,10 @@ struct SupportDashboardCard: View {
                     .accessibilityIdentifier("supportDashboardMonth")
                 Spacer()
                 if summary.attentionCount > 0 {
-                    PillLabel(text: "要確認 \(summary.attentionCount)", systemImage: "exclamationmark.triangle.fill", tint: .orange)
+                    PillLabel(text: "要確認\(summary.attentionCount)", systemImage: "exclamationmark.triangle.fill", tint: .orange)
                 }
             }
-            SupportMoneyRow(title: "定常月額", value: summary.recurringMonthly, caption: "支援中プランの月額合計",
-                            identifier: "supportRecurringMonthly")
+            SupportMoneyRow(title: "定常月額", value: summary.recurringMonthly, identifier: "supportRecurringMonthly")
             SupportMoneyRow(title: "今月実請求", value: summary.actualThisMonth, caption: SupportText.actualCaption(summary),
                             identifier: "supportActualThisMonth")
             SupportMoneyRow(title: "来月予定", value: summary.nextMonthPlanned, caption: SupportText.nextMonthCaption(summary),
@@ -270,7 +264,7 @@ struct SupportAttentionCard: View {
                 Button {
                     env.web.openWeb(account: support.accountID, destination: .supportingPlans, purpose: .payment)
                 } label: {
-                    Label("Web で開く", systemImage: "safari")
+                    Label("Webで開く", systemImage: "safari")
                 }
                 .accessibilityIdentifier("attentionOpenWeb")
                 Button {
@@ -353,7 +347,7 @@ struct PaymentStateAttentionCard: View {
                         Label("お支払い方法", systemImage: "creditcard")
                     }
                 } label: {
-                    Label("Web で開く", systemImage: "safari")
+                    Label("Webで開く", systemImage: "safari")
                 }
                 .accessibilityIdentifier("paymentStateOpenWeb")
             }
@@ -413,7 +407,7 @@ struct SupportAccountGroupRow: View {
         HStack(spacing: 10) {
             VStack(alignment: .leading, spacing: 3) {
                 AccountBadge(accountID: group.accountID)
-                Text("\(group.activeCreatorCount) クリエイター")
+                Text("\(group.activeCreatorCount)クリエイター")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

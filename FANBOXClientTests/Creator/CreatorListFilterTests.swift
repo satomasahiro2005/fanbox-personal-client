@@ -24,7 +24,7 @@ final class CreatorListFilterTests: XCTestCase {
 
     func testChipTitlesMatchSpec() {
         XCTAssertEqual(CreatorListFilter.allCases.map(\.title),
-                       ["すべて", "支援中", "フォロー中", "投稿あり", "お気に入り", "自分の Creator Account"])
+                       ["すべて", "支援中", "フォロー中", "投稿あり", "お気に入り", "自分のCreator Account"])
     }
 
     func testEachFilter() {

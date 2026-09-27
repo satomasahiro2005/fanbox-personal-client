@@ -38,7 +38,7 @@ private struct DraftSendResult: Identifiable {
     var detail: String?
 
     var title: String {
-        if error == nil { return published ? "公開しました" : "FANBOX に下書き保存しました" }
+        if error == nil { return published ? "公開しました" : "FANBOXに下書き保存しました" }
         return "送信できませんでした"
     }
 
@@ -46,7 +46,7 @@ private struct DraftSendResult: Identifiable {
         guard let error else { return "ローカルの下書きはそのまま残っています。" }
         let reason = detail ?? error.userMessage
         if case .unsupported = error, detail == nil {
-            return "この操作はアプリから行えません。下書きは端末内に残っています。Web エディタで続けてください。"
+            return "この操作はアプリから行えません。下書きは端末内に残っています。Webエディタで続けてください。"
         }
         return "\(reason)\n下書きは端末内に残っています。"
     }
@@ -131,7 +131,7 @@ private struct DraftEditorContent: View {
         if let id = draft.targetPlanID, let plan = plans.first(where: { $0.planID == id }) {
             return "\(plan.title)（\(Formatters.yen(plan.fee))〜）"
         }
-        if draft.feeRequired > 0 { return "\(Formatters.yen(draft.feeRequired)) 以上" }
+        if draft.feeRequired > 0 { return "\(Formatters.yen(draft.feeRequired))以上" }
         return "全体公開"
     }
 
@@ -176,7 +176,7 @@ private struct DraftEditorContent: View {
             }
             .accessibilityIdentifier("draftConfirmPublishButton")
             if !pending.plan.warnings.isEmpty {
-                Button("Web エディタで編集") { openWeb(reason: "書式などを保ったまま編集") }
+                Button("Webエディタで編集") { openWeb(reason: "書式などを保ったまま編集") }
             }
             Button("キャンセル", role: .cancel) {}
         } message: { pending in
@@ -206,18 +206,18 @@ private struct DraftEditorContent: View {
                             titleVisibility: .visible, presenting: blockPendingDeletion) { block in
             Button("削除", role: .destructive) { env.drafts.deleteBlock(block) }
         }
-        .confirmationDialog("Web エディタでの作業は完了しましたか？", isPresented: $askWebCompletion, titleVisibility: .visible) {
+        .confirmationDialog("Webエディタでの作業は完了しましたか？", isPresented: $askWebCompletion, titleVisibility: .visible) {
             webCompletionButtons
             Button("まだ", role: .cancel) {}
         } message: {
             Text(isExisting
-                 ? "完了した場合、FANBOX 上の投稿が最新です。ローカル下書きから再送すると Web での変更を上書きしてしまうため、再送はできなくなります。"
-                 : "Web で投稿を作成した場合、この下書きは不要です。アプリから送信すると別の投稿が作られます。")
+                 ? "完了した場合、FANBOX上の投稿が最新です。ローカル下書きから再送するとWebでの変更を上書きしてしまうため、再送はできなくなります。"
+                 : "Webで投稿を作成した場合、この下書きは不要です。アプリから送信すると別の投稿が作られます。")
         }
         .sheet(isPresented: $showHandoff) {
             NavigationStack {
                 DraftWebHandoffView(draft: draft, items: livePlan.webItems, checked: $handoffChecked,
-                                    openWeb: { openWeb(reason: "残りの項目を Web エディタで追加") },
+                                    openWeb: { openWeb(reason: "残りの項目をWebエディタで追加") },
                                     complete: { completion in completeOnWeb(completion) })
             }
         }
@@ -285,8 +285,6 @@ private struct DraftEditorContent: View {
                     .textCase(nil)
                     .accessibilityIdentifier("draftReorderButton")
                 }
-            } footer: {
-                Text("長押しでドラッグ、または「並べ替え」で順序を変更できます。")
             }
 
             addBlockSection
@@ -310,23 +308,23 @@ private struct DraftEditorContent: View {
             HStack(spacing: 8) {
                 PillLabel(text: draft.status.creatorLabel, tint: draft.status.creatorTint)
                 if let remote = draft.remoteStatus {
-                    PillLabel(text: remote == .unknown ? "FANBOX 投稿と連携" : "FANBOX: \(remote.creatorLabel)",
+                    PillLabel(text: remote == .unknown ? "FANBOX投稿と連携" : "FANBOX: \(remote.creatorLabel)",
                               systemImage: "link", tint: remote == .unknown ? .purple : remote.creatorTint)
                         .accessibilityIdentifier("draftRemoteStatusPill")
                 }
                 Spacer()
-                Text("自動保存 \(Formatters.time(draft.updatedAt))")
+                Text("自動保存\(Formatters.time(draft.updatedAt))")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .accessibilityIdentifier("draftAutosaveLabel")
             }
             if let progress = env.drafts.importProgress, progress.draftID == draft.id {
                 ProgressView(value: Double(progress.completed), total: Double(max(progress.total, 1))) {
-                    Text("画像を読み込み中 \(progress.completed)/\(progress.total)").font(.caption)
+                    Text("画像を読み込み中\(progress.completed)/\(progress.total)").font(.caption)
                 }
             }
             if !capabilities.nativeWrites {
-                banner("このアカウントの投稿はアプリから送信できません。下書きは端末内に保存されます。送信は Web エディタで行ってください。",
+                banner("このアカウントの投稿はアプリから送信できません。下書きは端末内に保存されます。送信はWebエディタで行ってください。",
                        systemImage: "safari", tint: .orange, withWebButton: true)
             } else if isExisting, let blocker = draft.nativeUpdateBlocker {
                 banner(blocker, systemImage: "lock.fill", tint: .orange, withWebButton: true)
@@ -334,7 +332,7 @@ private struct DraftEditorContent: View {
             }
             if draft.webHandoffAt != nil {
                 VStack(alignment: .leading, spacing: 6) {
-                    Label("Web エディタでの仕上げが残っています（\(plan.webItems.count) 件）", systemImage: "checklist")
+                    Label("Webエディタでの仕上げが残っています（\(plan.webItems.count)件）", systemImage: "checklist")
                         .font(.subheadline)
                         .foregroundStyle(.orange)
                     Button("チェックリストを開く") { showHandoff = true }
@@ -398,29 +396,26 @@ private struct DraftEditorContent: View {
                     Text("\(plan.title)（\(Formatters.yen(plan.fee))）").tag(DraftPlanChoice.plan(plan.planID))
                 }
                 ForEach(extraFees, id: \.self) { fee in
-                    Text("\(Formatters.yen(fee)) 以上\(fee == draft.remoteFeeRequired ? "（FANBOX 上の設定）" : "")").tag(DraftPlanChoice.fee(fee))
+                    Text("\(Formatters.yen(fee))以上\(fee == draft.remoteFeeRequired ? "（FANBOX上の設定）" : "")").tag(DraftPlanChoice.fee(fee))
                 }
             }
             .accessibilityIdentifier("draftPlanPicker")
-            Toggle("R-18", isOn: $draft.hasAdultContent)
-                .disabled(!capabilities.sendsAdultFlag)
-                .accessibilityIdentifier("draftAdultToggle")
+            if capabilities.sendsAdultFlag {
+                Toggle("R-18", isOn: $draft.hasAdultContent)
+                    .accessibilityIdentifier("draftAdultToggle")
+            } else {
+                LabeledContent("R-18", value: "Webエディタで設定")
+                    .accessibilityIdentifier("draftAdultToggle")
+            }
         } header: {
             Text("公開範囲")
         } footer: {
             VStack(alignment: .leading, spacing: 4) {
                 if plans.isEmpty {
-                    Text("プラン情報が未取得です。取得できると、ここでプランを選べます。")
-                }
-                if !capabilities.sendsPlanID {
-                    Text("プランは「その金額以上の支援者に公開」として送信されます。")
-                }
-                if !capabilities.sendsAdultFlag {
-                    Text("R-18 の設定は FANBOX に送信されません。Web エディタで設定してください。")
-                        .accessibilityIdentifier("draftAdultNotSentNote")
+                    Text("プラン情報が未取得です")
                 }
                 if isExisting, let old = draft.remoteFeeRequired, old != draft.feeRequired {
-                    Text("FANBOX 上の設定（\(DraftSendPlanner.feeLabel(old))）から変わります。")
+                    Text("FANBOX上の設定（\(DraftSendPlanner.feeLabel(old))）から変わります。")
                         .foregroundStyle(.orange)
                 }
             }
@@ -450,13 +445,13 @@ private struct DraftEditorContent: View {
                                 .background(.tint.opacity(0.12), in: Capsule())
                             }
                             .buttonStyle(.plain)
-                            .accessibilityLabel("タグ \(tag) を削除")
+                            .accessibilityLabel("タグ\(tag)を削除")
                         }
                     }
                 }
             }
             HStack {
-                TextField(tagLimitReached ? "タグは \(DraftPostMapping.maxTags) 個までです" : "タグを追加", text: $newTag)
+                TextField(tagLimitReached ? "タグは\(DraftPostMapping.maxTags)個までです" : "タグを追加", text: $newTag)
                     .textInputAutocapitalization(.never)
                     .onSubmit(addTag)
                     .disabled(tagLimitReached)
@@ -470,7 +465,7 @@ private struct DraftEditorContent: View {
         } footer: {
             let count = DraftPostMapping.normalizedTags(draft.tags).count
             Text(count > DraftPostMapping.maxTags
-                 ? "タグは \(DraftPostMapping.maxTags) 個までです（現在 \(count) 個）。送信前に減らしてください。"
+                 ? "タグは\(DraftPostMapping.maxTags)個までです（現在\(count)個）。送信前に減らしてください。"
                  : "\(count)/\(DraftPostMapping.maxTags)")
                 .foregroundStyle(count > DraftPostMapping.maxTags ? .red : .secondary)
         }
@@ -495,12 +490,6 @@ private struct DraftEditorContent: View {
             .padding(.vertical, 4)
         } header: {
             Text("ブロックを追加")
-        } footer: {
-            if capabilities.nativeWrites && !(capabilities.uploadsMedia && capabilities.createsLinkCards && capabilities.createsEmbeds) {
-                Label("「Web」の付いたブロックはアプリから FANBOX に送信できません。本文を先に保存し、残りは Web エディタで追加します（順番のチェックリストと、縮小・変換済み画像の書き出しを用意します）。",
-                      systemImage: "safari")
-                    .accessibilityIdentifier("draftCapabilityNote")
-            }
         }
     }
 
@@ -536,7 +525,7 @@ private struct DraftEditorContent: View {
                 if !isExisting {
                     Button { request(publish: true) } label: { Label("公開…", systemImage: "paperplane") }
                         .accessibilityIdentifier("draftPublishButton")
-                    Button { request(publish: false) } label: { Label("FANBOX に下書き保存", systemImage: "tray.and.arrow.up") }
+                    Button { request(publish: false) } label: { Label("FANBOXに下書き保存", systemImage: "tray.and.arrow.up") }
                         .accessibilityIdentifier("draftSaveRemoteButton")
                 } else if isLiveOrUnknown {
                     Button { request(publish: true) } label: { Label("更新（公開のまま）", systemImage: "arrow.triangle.2.circlepath") }
@@ -546,16 +535,16 @@ private struct DraftEditorContent: View {
                     }
                     .accessibilityIdentifier("draftUnpublishButton")
                 } else {
-                    Button { request(publish: false) } label: { Label("FANBOX に下書き保存", systemImage: "tray.and.arrow.up") }
+                    Button { request(publish: false) } label: { Label("FANBOXに下書き保存", systemImage: "tray.and.arrow.up") }
                         .accessibilityIdentifier("draftSaveRemoteButton")
                     Button { request(publish: true) } label: { Label("公開…", systemImage: "paperplane") }
                         .accessibilityIdentifier("draftPublishButton")
                 }
                 if draft.webHandoffAt != nil || !livePlan.webItems.isEmpty {
-                    Button { showHandoff = true } label: { Label("Web で追加する項目", systemImage: "checklist") }
+                    Button { showHandoff = true } label: { Label("Webで追加する項目", systemImage: "checklist") }
                 }
                 Divider()
-                openWebButton(reason: "Web エディタで編集")
+                openWebButton(reason: "Webエディタで編集")
             } label: {
                 Label("送信", systemImage: "paperplane.circle")
             }
@@ -568,7 +557,7 @@ private struct DraftEditorContent: View {
         Button {
             openWeb(reason: reason)
         } label: {
-            Label("Web エディタで開く", systemImage: "safari")
+            Label("Webエディタで開く", systemImage: "safari")
         }
         .accessibilityIdentifier("draftOpenWebEditorButton")
     }
@@ -589,7 +578,7 @@ private struct DraftEditorContent: View {
             Button("下書き保存した") { completeOnWeb(.savedAsDraft) }
             Button("ローカル下書きを削除", role: .destructive) { completeOnWeb(nil) }
         } else {
-            Button("Web で投稿した（ローカル下書きを削除）", role: .destructive) { completeOnWeb(nil) }
+            Button("Webで投稿した（ローカル下書きを削除）", role: .destructive) { completeOnWeb(nil) }
         }
     }
 
@@ -664,7 +653,7 @@ private struct DraftEditorContent: View {
     private func importImages(_ items: [PhotosPickerItem]) async {
         let report = await env.drafts.addImages(from: items, to: draft.id)
         if !report.failures.isEmpty {
-            importMessage = "\(report.added) 件追加しました。\n" + report.failures.joined(separator: "\n")
+            importMessage = "\(report.added)件追加しました。\n" + report.failures.joined(separator: "\n")
         }
     }
 
@@ -697,13 +686,13 @@ private struct DraftEditorContent: View {
             title = "公開中の投稿を更新しますか？"
             confirm = "更新（公開のまま）"
         } else if publish && !plan.sendsPublished {
-            title = "本文を FANBOX に下書き保存しますか？"
-            confirm = "下書き保存して Web で仕上げる"
+            title = "本文をFANBOXに下書き保存しますか？"
+            confirm = "下書き保存してWebで仕上げる"
         } else if plan.sendsPublished {
             title = "公開しますか？"
             confirm = "公開"
         } else {
-            title = "FANBOX に下書き保存しますか？"
+            title = "FANBOXに下書き保存しますか？"
             confirm = "下書き保存"
         }
         let needsConfirmation = plan.sendsPublished || plan.unpublishes || isExisting || !plan.warnings.isEmpty || !plan.notes.isEmpty

@@ -338,7 +338,7 @@ final class AccountWebCoordinator: NSObject, WKNavigationDelegate, WKUIDelegate 
         if ns.domain == NSURLErrorDomain && (ns.code == NSURLErrorNotConnectedToInternet || ns.code == NSURLErrorNetworkConnectionLost) {
             controller?.loadError = "オフラインのためページを読み込めませんでした"
         } else {
-            controller?.loadError = "ページを読み込めませんでした (\(ns.code))"
+            controller?.loadError = "ページを読み込めませんでした（\(ns.code)）"
         }
     }
 

@@ -42,9 +42,10 @@ rows.
 | BackgroundTasks | `BGAppRefreshTask` / `BGProcessingTask` |
 | Security | Keychain (`SecItem*`) for session credentials |
 | CryptoKit | SHA-256 file names in the media cache; stable colors of on-device demo images |
-| ImageIO | Image downsampling, conversion of draft images, demo image metadata |
+| ImageIO | Image downsampling, conversion of draft images, demo image metadata, image type of files saved to Photos |
+| Photos | "写真に保存" in the image viewer (add-only access, the file's bytes unchanged) |
 | PhotosUI | Photo picker in the post editor |
-| UniformTypeIdentifiers | File types of draft media and uploads |
+| UniformTypeIdentifiers | File types of draft media and uploads, and of images saved to Photos |
 | QuickLook | Previews of files attached to posts |
 | AVKit | Audio / video playback in posts |
 | os | `Logger` (unified logging) |

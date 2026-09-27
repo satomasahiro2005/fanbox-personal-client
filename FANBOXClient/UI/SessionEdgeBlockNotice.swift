@@ -3,7 +3,7 @@ import SwiftUI
 /// Shown where native content could not be fetched because FANBOX's edge blocked the request (`RemoteError.edgeBlocked`,
 /// docs/API.md §1.7): explains that the session is fine and offers the account-aware WebView (SPEC §40 fallback).
 struct SessionEdgeBlockNotice: View {
-    var message = "FANBOX 側で一時的にブロックされたため、アプリ内で本文を取得できませんでした。ログイン状態には影響ありません。"
+    var message = "FANBOX側で一時的にブロックされたため、アプリ内で本文を取得できませんでした。ログイン状態には影響ありません。"
     let openWeb: () -> Void
 
     /// Whether `error` is the edge block this notice explains.
@@ -14,7 +14,7 @@ struct SessionEdgeBlockNotice: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Label("FANBOX 側で一時的にブロックされています", systemImage: "shield.lefthalf.filled.slash")
+            Label("FANBOX側で一時的にブロックされています", systemImage: "shield.lefthalf.filled.slash")
                 .font(.subheadline.bold())
             Text(message)
                 .font(.caption)
@@ -23,7 +23,7 @@ struct SessionEdgeBlockNotice: View {
             Button {
                 openWeb()
             } label: {
-                Label("Web で開く", systemImage: "safari")
+                Label("Webで開く", systemImage: "safari")
                     .font(.subheadline.weight(.semibold))
             }
             .buttonStyle(.borderedProminent)

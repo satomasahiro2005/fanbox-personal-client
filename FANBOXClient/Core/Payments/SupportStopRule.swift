@@ -81,7 +81,7 @@ enum SupportStopRule {
 
     static func label(_ source: SupportStopSource) -> String {
         switch source {
-        case .observed: return "停止予定（FANBOX で観測）"
+        case .observed: return "停止予定（FANBOXで観測）"
         case .userMarked: return "停止予定（自分で記録）"
         }
     }

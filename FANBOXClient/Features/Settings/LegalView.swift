@@ -14,43 +14,43 @@ enum LegalNotice {
 
     static let policyPoints: [String] = [
         "Public Source ≠ Open Source。ソースコードを公開する場合も、閲覧のためだけに公開しています。",
-        "OSS ライセンスは付与していません（All Rights Reserved）。LICENSE ファイルは意図的に置いていません。",
-        "将来 MIT / Apache-2.0 / MPL などへ変更する可能性はありますが、現時点では許諾はありません。",
-        "外部からの Pull Request は、著作権と再ライセンスの方針が決まるまで受け付けていません。",
+        "OSSライセンスは付与していません（All Rights Reserved）。LICENSEファイルは意図的に置いていません。",
+        "将来MIT / Apache-2.0 / MPLなどへ変更する可能性はありますが、現時点では許諾はありません。",
+        "外部からのPull Requestは、著作権と再ライセンスの方針が決まるまで受け付けていません。",
     ]
 
     /// Apple SDK frameworks the app links (platform frameworks, not redistributed).
     static let appleFrameworks: [String] = [
         "SwiftUI", "SwiftData", "Foundation", "Observation", "UIKit", "WebKit", "Network", "UserNotifications",
-        "BackgroundTasks", "Security (Keychain)", "CryptoKit", "ImageIO", "PhotosUI", "UniformTypeIdentifiers",
+        "BackgroundTasks", "Security (Keychain)", "CryptoKit", "ImageIO", "Photos", "PhotosUI", "UniformTypeIdentifiers",
         "QuickLook", "AVKit", "os (Logger)",
     ]
 
     static let thirdPartyPoints: [String] = [
-        "アプリに組み込んでいる第三者のライブラリ・コードはありません（Swift Package / CocoaPods / Carthage も未使用）。",
-        "使用しているのは iOS SDK の Apple 標準フレームワークのみです。これらはアプリに同梱・再配布されません。",
-        "ビルド時のツールとして XcodeGen (MIT License) を使いますが、アプリには含まれません。",
-        "PixiView-KMP / fankt は、挙動・endpoint・データ構造を理解するための参考資料としてのみ参照しています。コードはコピーしていません。",
-        "依存関係の台帳は THIRD_PARTY.md にあります。追加する前にライセンスと NOTICE / attribution の条件を確認します。",
+        "アプリに組み込んでいる第三者のライブラリ・コードはありません（Swift Package / CocoaPods / Carthageも未使用）。",
+        "使用しているのはiOS SDKのApple標準フレームワークのみです。これらはアプリに同梱・再配布されません。",
+        "ビルド時のツールとしてXcodeGen（MIT License）を使いますが、アプリには含まれません。",
+        "PixiView-KMP / fanktは、挙動・endpoint・データ構造を理解するための参考資料としてのみ参照しています。コードはコピーしていません。",
+        "依存関係の台帳はTHIRD_PARTY.mdにあります。追加する前にライセンスとNOTICE / attributionの条件を確認します。",
     ]
 
     static let dataBoundaryPoints: [String] = [
-        "本アプリは FANBOX のダウンローダーや一括保存ツールではありません。",
-        "全 Creator × 全履歴 × 全画像 を定期的に総当たりで取得することはしません。",
+        "本アプリはFANBOXのダウンローダーや一括保存ツールではありません。",
+        "全Creator × 全履歴 × 全画像を定期的に総当たりで取得することはしません。",
         "通常の同期は最新ページから取得し、既に知っている投稿に到達した時点で止まります。",
-        "オフライン保存は、閲覧した投稿と、自分で保存を指定した投稿（この投稿 / Creator の最近 N 件）に限ります。",
-        "Background では軽量なデータだけを取得し、Original 画像や動画をまとめて取得しません。",
+        "オフライン保存は、閲覧した投稿と、自分で保存を指定した投稿（この投稿 / Creatorの最近N件）に限ります。",
+        "Backgroundでは軽量なデータだけを取得し、Original画像や動画をまとめて取得しません。",
     ]
 
     static let privacyPoints: [String] = [
         "データはすべてこの端末の中に保存されます。開発者のサーバへ送るデータや、利用状況の計測はありません。",
-        "お気に入り・タグ・メモ・既読状態・Read Later はローカルだけの情報で、FANBOX へは送信しません。",
-        "ログイン情報（Cookie / FANBOXSESSID / CSRF Token）は Keychain とアカウントごとの WebKit ストアにだけ保存し、ログや画面に表示しません。",
+        "お気に入り・タグ・メモ・既読状態・Read Laterはローカルだけの情報で、FANBOXへは送信しません。",
+        "ログイン情報（Cookie / FANBOXSESSID / CSRF Token）はKeychainとアカウントごとのWebKitストアにだけ保存し、ログや画面に表示しません。",
         "決済手段はニックネーム・ブランド・下4桁・メモだけを保存します。カード番号・セキュリティコード・パスワードは保存しません。",
-        "APNs Relay（任意・既定はオフ）を使う場合も、Relay へ渡すのはデバイストークンと不透明なアカウントのヒントだけです。",
+        "APNs Relay（任意・既定はオフ）を使う場合も、Relayへ渡すのはデバイストークンと不透明なアカウントのヒントだけです。",
     ]
 
-    static let disclaimer = "本アプリは個人が自分のために作成した非公式クライアントです。pixiv / pixivFANBOX の公式アプリではなく、pixiv Inc. とは関係ありません。"
+    static let disclaimer = "本アプリは個人が自分のために作成した非公式クライアントです。pixiv / pixivFANBOXの公式アプリではなく、pixiv Inc.とは関係ありません。"
 }
 
 /// 法的情報 (SPEC §3.5 / §3.6 / §3.7).
@@ -74,7 +74,7 @@ struct LegalView: View {
 
             Section {
                 BulletList(items: LegalNotice.thirdPartyPoints)
-                DisclosureGroup("使用している Apple フレームワーク") {
+                DisclosureGroup("使用しているAppleフレームワーク") {
                     ForEach(LegalNotice.appleFrameworks, id: \.self) { name in
                         Text(name).font(.callout)
                     }

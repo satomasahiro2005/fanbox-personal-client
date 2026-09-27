@@ -72,7 +72,7 @@ extension DraftStatus {
         switch self {
         case .local: return "ローカル"
         case .uploading: return "アップロード中"
-        case .readyToPublish: return "FANBOX 下書き保存済み"
+        case .readyToPublish: return "FANBOX下書き保存済み"
         case .publishing: return "送信中"
         case .published: return "公開済み"
         case .failed: return "送信失敗"
@@ -154,9 +154,9 @@ struct CreatorNoAccountView: View {
 
     var body: some View {
         ContentUnavailableView {
-            Label("Creator アカウントがありません", systemImage: "paintbrush.pointed")
+            Label("Creatorアカウントがありません", systemImage: "paintbrush.pointed")
         } description: {
-            Text("Creator Mode は FANBOX のクリエイターページを持つアカウントで利用できます。\nダッシュボード・投稿管理・ローカル下書き・コメント・ファン・プランをここで扱えます。\nアカウント設定でクリエイターアカウントを追加またはログインしてください。")
+            Text("Creator ModeはFANBOXのクリエイターページを持つアカウントで利用できます。\nアカウント設定でクリエイターアカウントを追加またはログインしてください。")
         } actions: {
             Button("アカウント設定を開く") {
                 env.router.isSettingsPresented = true
@@ -191,7 +191,7 @@ struct CreatorAccountMenu: View {
             } label: {
                 AccountBadge(accountID: selected.id)
             }
-            .accessibilityLabel("Creator アカウントを切り替え")
+            .accessibilityLabel("Creatorアカウントを切り替え")
             .accessibilityIdentifier("creatorAccountMenu")
         }
     }
@@ -211,7 +211,7 @@ struct CreatorMetricRow: View {
                 Text(text).monospacedDigit().foregroundStyle(.primary)
             case .estimated(let text):
                 HStack(spacing: 6) {
-                    Text("約 \(text)").monospacedDigit()
+                    Text("約\(text)").monospacedDigit()
                     PillLabel(text: "estimated", tint: .orange)
                 }
             case .unavailable:

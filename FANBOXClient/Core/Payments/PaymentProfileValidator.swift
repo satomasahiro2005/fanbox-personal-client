@@ -13,10 +13,10 @@ enum PaymentProfileIssue: Equatable, Sendable {
     var message: String {
         switch self {
         case .last4MustBeFourDigits: return "下4桁は数字4桁で入力してください"
-        case .looksLikeCardNumber(let field): return "\(field) にカード番号のような数字列があります。カード番号は保存できません"
-        case .looksLikeSecurityCode(let field): return "\(field) にセキュリティコード/PIN/有効期限のような値があります。保存できません"
+        case .looksLikeCardNumber(let field): return "\(field)にカード番号のような数字列があります。カード番号は保存できません"
+        case .looksLikeSecurityCode(let field): return "\(field)にセキュリティコード/PIN/有効期限のような値があります。保存できません"
         case .looksLikeCredential(let field):
-            return "\(field) にパスワード/3Dセキュア/ワンタイムパスワードのような値があります。保存できません"
+            return "\(field)にパスワード/3Dセキュア/ワンタイムパスワードのような値があります。保存できません"
         case .nicknameRequired: return "名前を入力してください"
         }
     }

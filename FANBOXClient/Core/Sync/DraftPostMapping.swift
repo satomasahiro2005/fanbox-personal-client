@@ -89,7 +89,7 @@ enum DraftPostMapping {
     static func validateBasics(title: String, tags: [String]) throws {
         if title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { throw RemoteError.invalidRequest("タイトルを入力してください") }
         let count = normalizedTags(tags).count
-        if count > maxTags { throw RemoteError.invalidRequest("タグは \(maxTags) 個までです（現在 \(count) 個）") }
+        if count > maxTags { throw RemoteError.invalidRequest("タグは\(maxTags)個までです（現在\(count)個）") }
     }
 
     /// Payload plus what could not be carried natively.
@@ -204,9 +204,9 @@ enum DraftPostMapping {
                 }
                 if capabilities.uploadsNeedPost {
                     if !isWebURL(url) {
-                        problems.append("リンクカードの URL が正しくありません（http / https）: \(url.prefix(60))")
+                        problems.append("リンクカードのURLが正しくありません（http / https）: \(url.prefix(60))")
                     } else if url.count > maxLinkCardURLLength {
-                        problems.append("リンクカードの URL が長すぎます（\(maxLinkCardURLLength) 文字まで）: \(url.prefix(60))…")
+                        problems.append("リンクカードのURLが長すぎます（\(maxLinkCardURLLength)文字まで）: \(url.prefix(60))…")
                     } else if allowPendingUploads {
                         pendingLinks.append(block.id)
                     } else {
@@ -241,13 +241,13 @@ enum DraftPostMapping {
         if disallowed > 0 {
             let media = postType == .image ? "画像" : "ファイル"
             throw RemoteError.invalidRequest("「\(postType.creatorLabel)」形式の投稿には\(media)と本文テキストだけを保存できます。"
-                + "見出し・リンクカード・埋め込みなど（\(disallowed) 件）は削除するか、Web エディタで編集してください。")
+                + "見出し・リンクカード・埋め込みなど（\(disallowed)件）は削除するか、Webエディタで編集してください。")
         }
         if let first = problems.first {
-            throw RemoteError.invalidRequest(problems.count > 1 ? "\(first) ほか \(problems.count - 1) 件" : first)
+            throw RemoteError.invalidRequest(problems.count > 1 ? "\(first)ほか\(problems.count - 1)件" : first)
         }
-        if missingMedia > 0 { throw RemoteError.invalidRequest("未アップロードの画像・ファイルがあります（\(missingMedia) 件）") }
-        if missingLinks > 0 { throw RemoteError.invalidRequest("FANBOX に未登録のリンクカードがあります（\(missingLinks) 件）") }
+        if missingMedia > 0 { throw RemoteError.invalidRequest("未アップロードの画像・ファイルがあります（\(missingMedia)件）") }
+        if missingLinks > 0 { throw RemoteError.invalidRequest("FANBOXに未登録のリンクカードがあります（\(missingLinks)件）") }
         let hasContent = blocks.contains { !($0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0.mediaID == nil && $0.url == nil
                                               && $0.embedContentID == nil) }
         if publish && !hasContent && webItems.isEmpty && pendingUploads.isEmpty && pendingLinks.isEmpty {
@@ -392,7 +392,7 @@ enum DraftPostMapping {
         case .header:
             return ImportedBlock(kind: .header, text: block.text, styles: block.styles, importedText: block.text)
         case .image:
-            guard let mediaID = block.mediaID else { return unsupported("ID のない画像") }
+            guard let mediaID = block.mediaID else { return unsupported("IDのない画像") }
             let preview = block.displayURL ?? block.thumbnailURL ?? block.originalURL
             return ImportedBlock(kind: .image, remoteMediaID: mediaID, remoteURL: preview,
                                  originalFileName: block.fileName.map { name in
@@ -413,7 +413,7 @@ enum DraftPostMapping {
             if let provider = block.embedProvider, let contentID = block.embedContentID {
                 return ImportedBlock(kind: .embed, url: block.url, embedProvider: provider, embedContentID: contentID)
             }
-            return unsupported("ID のない添付ファイル")
+            return unsupported("IDのない添付ファイル")
         case .url:
             if let mediaID = block.mediaID {
                 return ImportedBlock(kind: .url, text: block.title ?? "", remoteMediaID: mediaID, url: block.url,

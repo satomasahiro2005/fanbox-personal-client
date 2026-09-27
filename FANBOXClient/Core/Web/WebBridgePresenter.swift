@@ -196,10 +196,10 @@ struct AccountWebSessionView: View {
         VStack(spacing: 12) {
             EmptyStateView(title: "オフラインモードです", systemImage: "wifi.slash",
                            message: env.settings.networkModePreference == .offline
-                               ? "通信モードが「Offline」のため Web ページを読み込みません。"
-                               : "ネットワークに接続されていないため Web ページを読み込めません。")
+                               ? "通信モードが「Offline」のためWebページを読み込みません。"
+                               : "ネットワークに接続されていないためWebページを読み込めません。")
             if env.settings.networkModePreference == .offline {
-                Button("通信モードを Automatic に戻す") { env.settings.networkModePreference = .automatic }
+                Button("通信モードをAutomaticに戻す") { env.settings.networkModePreference = .automatic }
                     .buttonStyle(.borderedProminent)
                     .accessibilityIdentifier("webOfflineRestoreButton")
             }
@@ -210,9 +210,9 @@ struct AccountWebSessionView: View {
     /// The page showed another pixiv user: the web store was reset and nothing is shown until the user reloads.
     private var identityMismatchState: some View {
         VStack(spacing: 12) {
-            EmptyStateView(title: "別の pixiv アカウントのページでした", systemImage: "person.crop.circle.badge.exclamationmark",
-                           message: "「\(account?.displayName ?? "このアカウント")」以外の pixiv アカウントでログインした状態を検出したため、"
-                               + "この Web セッションを停止し、アカウントのセッションを元に戻しました。")
+            EmptyStateView(title: "別のpixivアカウントのページでした", systemImage: "person.crop.circle.badge.exclamationmark",
+                           message: "「\(account?.displayName ?? "このアカウント")」以外のpixivアカウントでログインした状態を検出したため、"
+                               + "このWebセッションを停止し、アカウントのセッションを元に戻しました。")
             Button("このアカウントとして開き直す") {
                 identity = .unverified
                 controller.load(request.destination.url)
@@ -232,12 +232,7 @@ struct AccountWebSessionView: View {
         }
         switch request.purpose {
         case .payment:
-            VStack(alignment: .leading, spacing: 0) {
-                WebNoticeBanner(systemImage: "lock.shield", tint: .blue,
-                                text: "決済は FANBOX / pixiv の画面で行われます。カード番号等はこのアプリに保存されません")
-                    .accessibilityIdentifier("webPaymentBanner")
-                WebFallbackMenu(steps: request.destination.fallbackSteps) { controller.openFallback($0) }
-            }
+            WebFallbackMenu(steps: request.destination.fallbackSteps) { controller.openFallback($0) }
         case .login:
             if loginState != .completed {
                 WebNoticeBanner(systemImage: "exclamationmark.bubble", tint: .orange, text: Self.googleLoginHint)
@@ -246,7 +241,7 @@ struct AccountWebSessionView: View {
             }
         case .fallback(let reason):
             WebNoticeBanner(systemImage: "arrow.up.forward.app", tint: .orange,
-                            text: reason.isEmpty ? "アプリ内で処理できないため Web で表示しています" : "Web で表示しています: \(reason)")
+                            text: reason.isEmpty ? "アプリ内で処理できないためWebで表示しています" : "Webで表示しています: \(reason)")
         case .browse:
             EmptyView()
         }
@@ -406,7 +401,7 @@ struct AccountWebSessionView: View {
         }
         guard hasSession else {
             if manual {
-                alert = WebSessionAlert(title: "まだログインしていません", message: "pixiv の画面でログインを完了してから、もう一度確認してください。")
+                alert = WebSessionAlert(title: "まだログインしていません", message: "pixivの画面でログインを完了してから、もう一度確認してください。")
             }
             return
         }
@@ -488,7 +483,7 @@ struct WebIdentityMismatchBanner: View {
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
             Image(systemName: "exclamationmark.octagon.fill").foregroundStyle(.white)
-            Text("この Web セッションは「\(accountName)」ではない pixiv アカウント（pixiv ID: \(pageUserID)）でした。"
+            Text("このWebセッションは「\(accountName)」ではないpixivアカウント（pixiv ID: \(pageUserID)）でした。"
                  + "操作・決済を止め、セッションを元に戻しました。")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.white)
@@ -532,7 +527,7 @@ struct AccountWebSessionBanner: View {
             .overlay(Circle().stroke(color, lineWidth: 2))
 
             VStack(alignment: .leading, spacing: 1) {
-                Text("\(title) として表示中")
+                Text("\(title)として表示中")
                     .font(.subheadline.weight(.bold))
                     .lineLimit(1)
                 Text(detail)
@@ -563,10 +558,10 @@ struct AccountWebSessionBanner: View {
     private var detail: String {
         guard let account else { return "アカウントが見つかりません" }
         if AccountService.isPlaceholder(account) {
-            return isLoginPurpose ? "専用の Web ストアでログイン中（まだ追加されていません）" : "ログイン前"
+            return isLoginPurpose ? "専用のWebストアでログイン中（まだ追加されていません）" : "ログイン前"
         }
         var parts: [String] = []
-        if account.kind == .demo { parts.append("デモアカウント（FANBOX 未ログイン）") }
+        if account.kind == .demo { parts.append("デモアカウント（FANBOX未ログイン）") }
         if let pixiv = account.pixivUserID, account.kind == .fanbox { parts.append("pixiv ID: \(pixiv)") }
         if account.creatorAccount { parts.append("クリエイター") }
         switch identity {
@@ -574,7 +569,7 @@ struct AccountWebSessionBanner: View {
         case .mismatch: parts.append("別ユーザーを検出・停止")
         case .unverified: break
         }
-        return parts.isEmpty ? "専用の Web ストア" : parts.joined(separator: " ・ ")
+        return parts.isEmpty ? "専用のWebストア" : parts.joined(separator: " ・ ")
     }
 }
 
@@ -638,7 +633,7 @@ struct WebFallbackMenu: View {
                     .font(.caption.weight(.semibold))
             }
             .padding(.horizontal)
-            .padding(.bottom, 6)
+            .padding(.vertical, 6)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(Color.blue.opacity(0.08))
             .accessibilityIdentifier("webFallbackMenu")
@@ -646,7 +641,7 @@ struct WebFallbackMenu: View {
     }
 }
 
-/// One-line notice under the account banner (payment / login / fallback purposes).
+/// One-line notice under the account banner (login / fallback purposes).
 struct WebNoticeBanner: View {
     let systemImage: String
     let tint: Color

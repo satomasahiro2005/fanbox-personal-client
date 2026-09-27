@@ -48,7 +48,7 @@ enum DemoMediaRenderer {
 
     /// Renders the media for `url` into memory.
     static func render(url: String, requestedVariant: MediaVariant) throws -> Data {
-        guard let parsed = DemoMediaURL(url) else { throw RemoteError.invalidRequest("demo URL を解釈できませんでした") }
+        guard let parsed = DemoMediaURL(url) else { throw RemoteError.invalidRequest("demo URLを解釈できませんでした") }
         switch parsed {
         case let .image(seed, width, height, variant):
             guard let data = renderImage(seed: seed, width: width, height: height, variant: variant ?? requestedVariant) else {

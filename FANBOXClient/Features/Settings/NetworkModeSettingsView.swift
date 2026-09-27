@@ -50,13 +50,13 @@ enum NetworkModeGuide {
     static func summary(_ preference: NetworkModePreference) -> String {
         switch preference {
         case .automatic:
-            return "Network.framework の状態から自動で決めます。未接続なら Offline、iOS の省データモード（Low Data Mode）なら Low Data、それ以外は Normal。"
+            return "Network.frameworkの状態から自動で決めます。未接続ならOffline、iOSの省データモード（Low Data Mode）ならLow Data、それ以外はNormal。"
         case .normal:
-            return "本文・Thumbnail・表示用画像を通常どおり取得し、先読み (Prefetch) も行います。"
+            return "本文・Thumbnail・表示用画像を通常どおり取得し、先読み（Prefetch）も行います。"
         case .lowData:
-            return "本文と Thumbnail は取得します。Original 画像と動画の先読みは行いません。"
+            return "本文とThumbnailは取得します。Original画像と動画の先読みは行いません。"
         case .extreme:
-            return "JSON / テキストのみ自動取得します。画像・音声・動画・ファイルはタップしたときだけ取得します（Thumbnail は設定で選択）。"
+            return "JSON / テキストのみ自動取得します。画像・音声・動画・ファイルはタップしたときだけ取得します（Thumbnailは設定で選択）。"
         case .offline:
             return "ネットワーク通信を完全に停止します。保存済みのデータで閲覧・検索・下書き・返信の作成ができます。"
         }
@@ -86,9 +86,9 @@ struct NetworkModeSettingsSection: View {
 
             LabeledContent("回線", value: NetworkPathText.describe(network))
 
-            Toggle("メディアの先読みは Wi-Fi のときだけ", isOn: $settings.mediaPrefetchWiFiOnly)
+            Toggle("メディアの先読みはWi-Fiのときだけ", isOn: $settings.mediaPrefetchWiFiOnly)
                 .accessibilityIdentifier("mediaPrefetchWiFiOnlyToggle")
-            Toggle("Extreme でも Thumbnail を表示", isOn: $settings.extremeShowsThumbnails)
+            Toggle("ExtremeでもThumbnailを表示", isOn: $settings.extremeShowsThumbnails)
                 .accessibilityIdentifier("extremeShowsThumbnailsToggle")
 
             NavigationLink {
@@ -99,9 +99,6 @@ struct NetworkModeSettingsSection: View {
             .accessibilityIdentifier("networkModeGuideLink")
         } header: {
             Text("通信モード")
-        } footer: {
-            Text(NetworkModeGuide.summary(settings.networkModePreference)
-                 + " キャリアの速度制限は iOS が検出できないことがあるため、遅いと感じたら Extreme を手動で選んでください。")
         }
         .onChange(of: settings.networkModePreference) { _, _ in network.recompute() }
         .onChange(of: settings.mediaPrefetchWiFiOnly) { _, _ in network.recompute() }
@@ -118,7 +115,7 @@ enum NetworkPathText {
 
     static func describe(pathSatisfied: Bool, isOnWiFi: Bool, isConstrained: Bool, isExpensive: Bool) -> String {
         guard pathSatisfied else { return "未接続" }
-        var parts = [isOnWiFi ? "Wi-Fi" : "Wi-Fi 以外"]
+        var parts = [isOnWiFi ? "Wi-Fi" : "Wi-Fi以外"]
         if isConstrained { parts.append("省データモード") }
         if isExpensive { parts.append("従量制") }
         return parts.joined(separator: " / ")
@@ -158,11 +155,11 @@ struct NetworkModeGuideView: View {
             } header: {
                 Text("モード別の動作")
             } footer: {
-                Text("「手動」はタップしたときだけ取得します。Extreme の Thumbnail は「Extreme でも Thumbnail を表示」の設定に従います。"
-                     + "「メディアの先読みは Wi-Fi のときだけ」がオンの場合、Wi-Fi 以外では先読みを行いません。")
+                Text("「手動」はタップしたときだけ取得します。ExtremeのThumbnailは「ExtremeでもThumbnailを表示」の設定に従います。"
+                     + "「メディアの先読みはWi-Fiのときだけ」がオンの場合、Wi-Fi以外では先読みを行いません。")
             }
 
-            Section("モード") {
+            Section {
                 ForEach(NetworkModePreference.allCases) { mode in
                     VStack(alignment: .leading, spacing: 4) {
                         HStack {
@@ -175,6 +172,10 @@ struct NetworkModeGuideView: View {
                     }
                     .padding(.vertical, 2)
                 }
+            } header: {
+                Text("モード")
+            } footer: {
+                Text("キャリアの速度制限はiOSが検出できないことがあるため、遅いと感じたらExtremeを手動で選んでください。")
             }
 
             Section {
@@ -186,7 +187,7 @@ struct NetworkModeGuideView: View {
             } header: {
                 Text("通信の優先度")
             } footer: {
-                Text("コメント送信などの操作 (interactiveWrite) は、画像の取得や先読みより常に優先されます。メディアの転送は操作中の通信が終わるまで一時停止します。")
+                Text("コメント送信などの操作（interactiveWrite）は、画像の取得や先読みより常に優先されます。メディアの転送は操作中の通信が終わるまで一時停止します。")
             }
         }
         .navigationTitle("通信モード")

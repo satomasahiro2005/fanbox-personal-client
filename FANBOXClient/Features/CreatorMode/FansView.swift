@@ -93,7 +93,7 @@ private struct CreatorFansList: View {
         for fan in fans {
             guard let id = fan.planID, !known.contains(id) else { continue }
             known.insert(id)
-            options.append(CreatorFanPlanOption(id: id, title: fan.planTitle ?? "プラン \(id)", fee: fan.fee))
+            options.append(CreatorFanPlanOption(id: id, title: fan.planTitle ?? "プラン\(id)", fee: fan.fee))
         }
         return options.sorted { ($0.fee ?? 0) < ($1.fee ?? 0) }
     }
@@ -114,9 +114,9 @@ private struct CreatorFansList: View {
                     SyncStatusBanner(error: syncError, lastSync: syncStates.first?.lastSuccessfulSync)
                 }
                 HStack {
-                    Text("支援中 \(fans.filter { $0.state == .supporting }.count) 人")
+                    Text("支援中\(fans.filter { $0.state == .supporting }.count)人")
                     Spacer()
-                    Text("取得済み \(fans.count) 人").foregroundStyle(.secondary)
+                    Text("取得済み\(fans.count)人").foregroundStyle(.secondary)
                 }
                 .font(.subheadline)
                 if planFilter != .all || stateFilter != nil {
@@ -131,8 +131,6 @@ private struct CreatorFansList: View {
                         .font(.caption)
                     }
                 }
-            } footer: {
-                Text("FANBOX から取得できる範囲の情報です。メモは端末内だけに保存されます。")
             }
 
             Section {
@@ -253,8 +251,6 @@ struct CreatorFanDetailView: View {
                     .accessibilityIdentifier("creatorFanNoteField")
             } header: {
                 Text("メモ")
-            } footer: {
-                Text("メモは端末内だけに保存され、FANBOX には送信されません。")
             }
         }
         .navigationTitle(fan.name)

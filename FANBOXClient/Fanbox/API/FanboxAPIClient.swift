@@ -160,11 +160,11 @@ final class FanboxAPIClient: Sendable {
         let endpoint = FanboxEndpoint.homepageMetadata()
         let response = try await execute(endpoint, accountID: accountID, allowCSRFRetry: false)
         guard let html = String(data: response.data, encoding: .utf8) ?? String(data: response.data, encoding: .isoLatin1) else {
-            throw reportFailure(.decoding(endpoint: endpoint.key, detail: "HTML を読めません"), endpoint, response, accountID)
+            throw reportFailure(.decoding(endpoint: endpoint.key, detail: "HTMLを読めません"), endpoint, response, accountID)
         }
         guard let jsonText = FanboxMetadataParser.metadataJSON(fromHTML: html) else {
             // No metadata: a challenge page or an unexpected layout. Not proof of logout.
-            throw reportFailure(.decoding(endpoint: endpoint.key, detail: "metadata が見つかりません"), endpoint, response, accountID)
+            throw reportFailure(.decoding(endpoint: endpoint.key, detail: "metadataが見つかりません"), endpoint, response, accountID)
         }
         let data = Data(jsonText.utf8)
         if let json = try? JSONValue.parse(data) {

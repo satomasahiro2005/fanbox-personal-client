@@ -111,9 +111,7 @@ final class PaymentProfileValidatorTests: XCTestCase {
         XCTAssertEqual(issues(memo: "暗証番号 0000"), [.looksLikeSecurityCode(field: F.memo)], "one issue per field")
     }
 
-    func testStoragePolicyTextsMentionPasswordsAnd3DS() {
-        XCTAssertTrue(SupportText.storagePolicyNote.contains("パスワード"))
-        XCTAssertTrue(SupportText.storagePolicyNote.contains("3Dセキュア"))
+    func testCredentialIssueNamesTheFieldAndPasswords() {
         XCTAssertTrue(PaymentProfileIssue.looksLikeCredential(field: F.memo).message.contains("メモ"))
         XCTAssertTrue(PaymentProfileIssue.looksLikeCredential(field: F.memo).message.contains("パスワード"))
     }

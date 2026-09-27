@@ -102,7 +102,7 @@ struct DraftMediaLimits: Sendable, Hashable {
         }
         let limit = kind == .image ? maxImageBytes : maxFileBytes
         if let size, size > limit {
-            return "「\(fileName)」は大きすぎます（\(label)は \(limit / 1_000_000) MB まで）"
+            return "「\(fileName)」は大きすぎます（\(label)は\(limit / 1_000_000) MBまで）"
         }
         return nil
     }

@@ -14,7 +14,7 @@ struct PaymentFlowView: View {
             case .plan: return "プラン"
             case .account: return "アカウント"
             case .profile: return "支払い方法"
-            case .confirm: return "FANBOX へ"
+            case .confirm: return "FANBOXへ"
             }
         }
     }
@@ -138,8 +138,6 @@ struct PaymentFlowView: View {
                 }
             } header: {
                 Text("1. プランを選択")
-            } footer: {
-                Text("最後に同期したプラン情報です。最新の内容は FANBOX の画面で確認できます。")
             }
         }
     }
@@ -166,8 +164,6 @@ struct PaymentFlowView: View {
                 }
             } header: {
                 Text("2. アカウントを選択")
-            } footer: {
-                Text("選択したアカウントでログインした FANBOX の画面で手続きします。")
             }
 
             if let accountID = selectedAccountID, let current = supports.first(where: { $0.accountID == accountID && $0.isActive }) {
@@ -220,8 +216,6 @@ struct PaymentFlowView: View {
                 }
             } header: {
                 Text("3. Payment Profile（任意）")
-            } footer: {
-                Text("\(SupportText.paymentChoiceNote)。ここで選んだ内容は自分用の記録（手動設定）で、FANBOX 上で確認された情報ではありません。")
             }
         }
     }
@@ -250,19 +244,10 @@ struct PaymentFlowView: View {
             }
 
             Section {
-                Label("決済はアプリ内では行いません。選択したアカウントの FANBOX / pixiv の画面が開きます。", systemImage: "lock.shield")
-                Label(SupportText.paymentChoiceNote, systemImage: "creditcard")
-                Label("画面を閉じると支援状態を再同期します。FANBOX への反映が遅れる場合に備え、数分後にも確認します。", systemImage: "arrow.clockwise")
-                Label("ページが表示されない場合は、Web 画面上部の「ページが表示されない場合」から別のページを開けます。", systemImage: "arrow.triangle.branch")
-            }
-            .font(.footnote)
-            .foregroundStyle(.secondary)
-
-            Section {
                 Button {
                     handOff()
                 } label: {
-                    Label("FANBOX で手続きへ", systemImage: "safari")
+                    Label("FANBOXで手続きへ", systemImage: "safari")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
@@ -274,7 +259,7 @@ struct PaymentFlowView: View {
     }
 
     private var selectedPlanText: String {
-        guard let selectedPlanID else { return "FANBOX の画面で選択" }
+        guard let selectedPlanID else { return "FANBOXの画面で選択" }
         if let plan = plans.first(where: { $0.planID == selectedPlanID }) {
             return "\(plan.title) \(SupportText.monthly(plan.fee))"
         }
@@ -425,7 +410,7 @@ struct PaymentFlowStepIndicator: View {
             }
         }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("ステップ \(current.rawValue + 1) / \(PaymentFlowView.Step.allCases.count): \(current.title)")
+        .accessibilityLabel("ステップ\(current.rawValue + 1) / \(PaymentFlowView.Step.allCases.count): \(current.title)")
     }
 }
 

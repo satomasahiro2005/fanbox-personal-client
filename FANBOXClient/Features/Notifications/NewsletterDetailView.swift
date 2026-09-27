@@ -136,7 +136,7 @@ struct NewsletterDetailView: View {
                         }
                     }
                 } label: {
-                    Label("Web で開く", systemImage: "safari")
+                    Label("Webで開く", systemImage: "safari")
                 }
             } label: {
                 Image(systemName: "ellipsis.circle")
