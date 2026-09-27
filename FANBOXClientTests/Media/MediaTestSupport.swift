@@ -13,6 +13,8 @@ final class MediaMockHTTPClient: HTTPClient, @unchecked Sendable {
     var payload: Data
     var statusCode = 200
     var delay: Duration?
+    /// Like a URLSession task: waits this long even when cancelled, then fails with `.cancelled` if it was.
+    var uncancellableDelay: Duration?
 
     init(payload: Data = MediaTestFixtures.pngData()) {
         self.payload = payload
@@ -33,6 +35,10 @@ final class MediaMockHTTPClient: HTTPClient, @unchecked Sendable {
             accountIDs.append(accountID)
         }
         if let delay { try await Task.sleep(for: delay) }
+        if let uncancellableDelay {
+            try? await Task.detached { try await Task.sleep(for: uncancellableDelay) }.value
+            if Task.isCancelled { throw RemoteError.cancelled }
+        }
         let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("media-mock-\(UUID().uuidString).tmp")
         try payload.write(to: temporary)
         progress?(0.5)
@@ -63,12 +69,15 @@ final class MediaTestHarness {
     let env: AppEnvironment
     let http: MediaMockHTTPClient
     let media: MediaService
+    /// Per-test parent of both cache roots: the trash of a "すべて削除" is detached next to them, so it stays private.
+    let parent: URL
     let root: URL
 
     init() {
         env = AppEnvironment.preview(seedDemo: false)
         http = MediaMockHTTPClient()
-        root = FileManager.default.temporaryDirectory.appendingPathComponent("MediaTests-\(UUID().uuidString)", isDirectory: true)
+        parent = FileManager.default.temporaryDirectory.appendingPathComponent("MediaTests-\(UUID().uuidString)", isDirectory: true)
+        root = parent.appendingPathComponent("cache", isDirectory: true)
         media = MediaService(store: env.store, http: http, network: env.networkMode, settings: env.settings, cacheRoot: root)
         // Keep background maintenance out of the way; tests call refreshUsage / enforceCapacity explicitly.
         media.maintenanceDelay = .seconds(3600)
@@ -122,7 +131,6 @@ final class MediaTestHarness {
     }
 
     func cleanup() {
-        try? FileManager.default.removeItem(at: root)
-        try? FileManager.default.removeItem(at: media.fileCache.pinnedRoot)
+        try? FileManager.default.removeItem(at: parent)
     }
 }

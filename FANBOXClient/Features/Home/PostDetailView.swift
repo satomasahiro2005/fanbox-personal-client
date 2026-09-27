@@ -74,6 +74,9 @@ struct PostDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { toolbarContent }
         .task { await start() }
+        .onChange(of: accounts.map(\.id)) { _, _ in
+            if didStart { dropDisabledOverride() }
+        }
         .environment(\.openURL, OpenURLAction { url in
             if PostDetailEmbedLink.isFanboxHost(url), let account = browserAccountID {
                 env.web.openWeb(account: account, destination: .url(url))
@@ -85,6 +88,7 @@ struct PostDetailView: View {
             ImageViewer(items: start.showsCover ? coverItems : imageItems, startIndex: start.index, postID: postID,
                         creatorID: post?.creatorID, accountID: selectedAccountID)
         }
+        .closesOnNotificationRoute($viewerStart)
         .navigationDestination(isPresented: $showCreator) {
             if let creatorID = post?.creatorID {
                 CreatorDetailView(creatorID: creatorID)
@@ -444,8 +448,11 @@ struct PostDetailView: View {
         )
     }
 
+    /// The cheapest plan that unlocks the post. Plan rows from support listings hold only supported plans, so without the
+    /// creator's full list nothing is preselected and the payment flow reads the list first.
     private func matchingPlanID(_ post: Post) -> String? {
-        creatorPlans.filter { $0.fee >= post.feeRequired }.min { $0.fee < $1.fee }?.planID
+        guard env.store.hasFetchedPlanList(creatorID: post.creatorID) else { return nil }
+        return creatorPlans.filter { $0.fee >= post.feeRequired }.min { $0.fee < $1.fee }?.planID
     }
 
     private func displayedLikeCount(_ post: Post) -> Int {
@@ -488,11 +495,20 @@ struct PostDetailView: View {
         selectedAccountID = PostAccountLogic.effectiveAccountID(override: accountOverride, best: best, enabledAccountIDs: enabled)
     }
 
+    /// A manual choice of an account that is no longer enabled goes back to the automatic choice (nothing is fetched,
+    /// shown or opened in the browser as a hidden account).
+    private func dropDisabledOverride() {
+        if let override = accountOverride, !env.store.enabledAccountIDs().contains(override) { accountOverride = nil }
+        resolveSelectedAccount()
+    }
+
     /// First appearance: pick the account, mark read, fetch only what is missing — text first: the body, then the
     /// comment preview, and only then (detached) the auto-save media. Re-appearing (e.g. back from comments) only
     /// refreshes the history timestamp, so a manual 未読 survives navigation.
     private func start() async {
         guard !didStart else {
+            // The account chosen here may have been turned off meanwhile (Settings, from another tab): it is dropped.
+            dropDisabledOverride()
             touchLastViewed()
             return
         }

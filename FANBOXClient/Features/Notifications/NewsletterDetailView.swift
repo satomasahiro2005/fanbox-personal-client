@@ -118,8 +118,11 @@ struct NewsletterDetailView: View {
             Menu {
                 if let newsletter {
                     Button {
-                        newsletter.isRead.toggle()
-                        env.store.save()
+                        // The おたより and its inbox event share one read state; the badge counts the event.
+                        if NotificationReadActions.setNewsletterRead(newsletterID: newsletterID, read: !newsletter.isRead,
+                                                                     store: env.store) {
+                            Task { await env.notifications.updateBadge() }
+                        }
                     } label: {
                         Label(newsletter.isRead ? "未読にする" : "既読にする",
                               systemImage: newsletter.isRead ? "envelope.badge" : "envelope.open")

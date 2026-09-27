@@ -83,7 +83,7 @@ private struct CreatorFansList: View {
         _fans = Query(filter: #Predicate<Fan> { $0.accountID == accountID }, sort: [SortDescriptor(\.name)])
         _plans = Query(filter: #Predicate<Plan> { $0.creatorID == creatorID }, sort: [SortDescriptor(\.fee)])
         let resource = SyncResource.fans.rawValue
-        _syncStates = Query(filter: #Predicate<SyncState> { $0.accountID == accountID && $0.resourceRaw == resource })
+        _syncStates = Query(filter: #Predicate<SyncState> { $0.accountID == accountID && $0.resourceRaw == resource && $0.scope == "" })
     }
 
     /// Plans known locally plus plans only seen on fan rows.

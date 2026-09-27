@@ -83,6 +83,120 @@ final class FixSyncNotifyReplyQueueTests: XCTestCase {
         XCTAssertEqual(h.replies.attentionCount, 0)
     }
 
+    /// A POST refused by the rate limit (it never left the device) needs no "maybe sent" check, which the same cooldown
+    /// would refuse too: it is simply retried.
+    func testRateLimitedReplyIsRetriedWithoutAMaybeSentConfirmation() async throws {
+        let h = try SyncHarness()
+        let a = h.addAccount("A", pixivUserID: "pA", isMain: true)
+        h.mock.update {
+            $0.addCommentResults = [.rateLimited(retryAfter: 30)]
+            $0.commentErrors = [.rateLimited(retryAfter: 30)]      // a lookup during the cooldown would be refused
+        }
+        let id = h.replies.submit(postID: "p1", body: "こんにちは", accountID: a.id)
+        await h.replies.flush()
+        let item = try XCTUnwrap(h.replies.item(id: id))
+        XCTAssertEqual(item.state, .queued)
+        XCTAssertNil(item.lastAttemptAt, "the refused POST did not land")
+
+        h.replies.handleConnectivityRestored()          // clears the wait
+        await h.replies.flush()
+        XCTAssertEqual(item.state, .sent)
+        XCTAssertEqual(h.mock.count("comments|"), 0, "no lookup for a request that was refused")
+        XCTAssertEqual(h.mock.count("addComment"), 2)
+    }
+
+    /// A reply of an account turned off meanwhile (a comment screen still showing it) is never posted as that hidden
+    /// identity; it waits, queued.
+    func testReplyOfADisabledAccountIsNotSent() async throws {
+        let h = try SyncHarness()
+        _ = h.addAccount("A", pixivUserID: "pA", isMain: true)
+        let b = h.addAccount("B", pixivUserID: "pB")
+        b.enabled = false
+        h.store.save()
+        let id = h.replies.submit(postID: "p1", body: "こんにちは", accountID: b.id)
+        await h.replies.flush()
+        XCTAssertEqual(h.mock.count("addComment"), 0)
+        XCTAssertEqual(h.replies.item(id: id)?.state, .queued)
+    }
+
+    /// A reply of a quarantined or logged-out account refused with 401 (it has no session) leaves that state alone: only a
+    /// verified login ends it, and "expired" would bring back its requests and the re-login notice.
+    func testRefusedReplyKeepsAQuarantineAndALogout() async throws {
+        let h = try SyncHarness()
+        let a = h.addAccount("A", pixivUserID: "pA", isMain: true)
+        let b = h.addAccount("B", pixivUserID: "pB")
+        a.sessionState = .error
+        b.sessionState = .loggedOut
+        h.store.save()
+        h.mock.update { $0.addCommentResults = [.unauthorized, .unauthorized] }
+        h.replies.submit(postID: "p1", body: "こんにちは", accountID: a.id)
+        h.replies.submit(postID: "p1", body: "こんばんは", accountID: b.id)
+        await h.replies.flush()
+        XCTAssertEqual(h.mock.count("addComment"), 2)
+        XCTAssertEqual(a.sessionState, .error)
+        XCTAssertEqual(b.sessionState, .loggedOut)
+    }
+
+    /// Removing an account deletes its queue rows outside the queue: the 確認が必要な返信 banner and the 送信キュー count
+    /// follow at once (offline, no queue run would refresh them).
+    func testRemovingAnAccountClearsItsReplyCounts() async throws {
+        let env = AppEnvironment.preview(seedDemo: false)
+        _ = env.accounts.addDemoAccount(name: "A")
+        let b = env.accounts.addDemoAccount(name: "B")
+        env.store.context.insert(OutgoingComment(accountID: b.id, postID: "p1", body: "返信", state: .failed))
+        env.store.save()
+        env.replies.countsChanged()
+        XCTAssertEqual(env.replies.attentionCount, 1)
+
+        await env.accounts.remove(accountID: b.id)
+        XCTAssertEqual(env.replies.attentionCount, 0)
+        XCTAssertEqual(env.replies.pendingCount, 0)
+    }
+
+    /// Cancelling a queued reply while the queue is sending an earlier one: the cancelled row is gone and never sent.
+    func testCancellingAQueuedReplyWhileAnotherIsSendingIsSafe() async throws {
+        let h = try SyncHarness()
+        let a = h.addAccount("A", pixivUserID: "pA", isMain: true)
+        h.setOffline(true)
+        let first = h.replies.submit(postID: "p1", body: "一通目", accountID: a.id)
+        let second = h.replies.submit(postID: "p1", body: "二通目", accountID: a.id)
+        h.mock.update { $0.addCommentDelayNanoseconds = 200_000_000 }
+        h.setOffline(false)
+        let flush = Task { await h.replies.flush() }
+        var spins = 0
+        while h.mock.count("addComment") == 0 && spins < 100_000 { spins += 1; await Task.yield() }
+        h.replies.cancel(id: second)
+        await flush.value
+        XCTAssertEqual(h.mock.count("addComment"), 1)
+        XCTAssertEqual(h.replies.item(id: first)?.state, .sent)
+        XCTAssertNil(h.replies.item(id: second))
+    }
+
+    /// Removing an account while a user retry of its reply is being sent: the removal waits for that send, so nothing
+    /// writes to the queue row after it is deleted, and nothing is sent for the account afterwards.
+    func testAccountRemovalWaitsForAUserRetryBeingSent() async throws {
+        let h = try SyncHarness()
+        let a = h.addAccount("A", pixivUserID: "pA", isMain: true)
+        let id = h.replies.saveDraft(postID: "p1", body: "送信中の返信", accountID: a.id)
+        let item = try XCTUnwrap(h.replies.item(id: id))
+        item.state = .failed
+        h.store.save()
+        h.mock.update { $0.addCommentDelayNanoseconds = 300_000_000 }
+        let retry = Task { await h.replies.retry(id: id) }
+        var spins = 0
+        while h.mock.count("addComment") == 0 && spins < 100_000 { spins += 1; await Task.yield() }
+        XCTAssertEqual(item.state, .sending)
+
+        await h.replies.prepareForRemoval(accountID: a.id)
+        XCTAssertEqual(item.state, .sent, "the running send ended before the account's rows go")
+        await retry.value
+
+        let later = h.replies.saveDraft(postID: "p1", body: "次の返信", accountID: a.id)
+        h.replies.item(id: later)?.state = .failed
+        await h.replies.retry(id: later)
+        XCTAssertEqual(h.mock.count("addComment"), 1, "nothing is sent for an account being removed")
+    }
+
     func testRejectedRepliesFailAndAmbiguousOnesNeedConfirmation() {
         XCTAssertFalse(ReplyQueue.mayHaveReachedServer(.forbidden))
         XCTAssertFalse(ReplyQueue.mayHaveReachedServer(.rateLimited(retryAfter: 10)))

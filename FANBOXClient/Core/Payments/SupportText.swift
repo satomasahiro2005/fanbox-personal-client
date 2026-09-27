@@ -184,6 +184,12 @@ enum SupportText {
         return c.year == calendar.component(.year, from: now) ? md : "\(c.year ?? 0)/\(md)"
     }
 
+    /// "2026/10/1" in JST: the date of a payment row, in the same calendar as its month section and 前回.
+    static func paymentDate(_ date: Date, calendar: Calendar = SupportBilling.calendar) -> String {
+        let c = calendar.dateComponents([.year, .month, .day], from: date)
+        return "\(c.year ?? 0)/\(c.month ?? 0)/\(c.day ?? 0)"
+    }
+
     /// "前回9/2 ¥500", or "前回9/2" when FANBOX did not report the amount.
     static func lastPaymentText(_ payment: LastPayment, showsAmount: Bool = true, now: Date = .now,
                                 calendar: Calendar = SupportBilling.calendar) -> String {

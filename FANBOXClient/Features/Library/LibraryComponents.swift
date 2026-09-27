@@ -29,7 +29,7 @@ enum LibraryListKind: String, Hashable, CaseIterable, Identifiable {
 
     var emptyMessage: String {
         switch self {
-        case .favorites: return "投稿のお気に入りに追加するとここに表示されます。"
+        case .favorites: return "投稿をお気に入りに追加するとここに表示されます。"
         case .unread: return "未読の投稿はありません。"
         case .readLater: return "「あとで読む」に追加した投稿がここに表示されます。"
         case .memo: return "メモを書いた投稿がここに表示されます。"
@@ -290,12 +290,30 @@ struct StorageUsageSummaryView: View {
 struct LibraryPostListView: View {
     let kind: LibraryListKind
 
+    static let pageSize = 500
+    /// Rows read so far; "さらに表示" reads the next page (the list is as long as the count on the Library screen).
+    @State private var limit = LibraryPostListView.pageSize
+
+    var body: some View {
+        LibraryPostList(kind: kind, limit: limit) { limit += Self.pageSize }
+            .navigationTitle(kind.title)
+            .accessibilityIdentifier("libraryList_\(kind.rawValue)")
+    }
+}
+
+private struct LibraryPostList: View {
+    let kind: LibraryListKind
+    let limit: Int
+    let loadMore: () -> Void
+
     @Environment(AppEnvironment.self) private var env
     @Query private var posts: [Post]
 
-    init(kind: LibraryListKind) {
+    init(kind: LibraryListKind, limit: Int, loadMore: @escaping () -> Void) {
         self.kind = kind
-        _posts = Query(kind.descriptor(limit: 500))
+        self.limit = limit
+        self.loadMore = loadMore
+        _posts = Query(kind.descriptor(limit: limit))
     }
 
     var body: some View {
@@ -310,10 +328,13 @@ struct LibraryPostListView: View {
                 }
                 .swipeActions(edge: .trailing) { swipeAction(for: post) }
             }
+            if posts.count >= limit {
+                Button("さらに表示") { loadMore() }
+                    .frame(maxWidth: .infinity)
+                    .accessibilityIdentifier("libraryLoadMore")
+            }
         }
         .listStyle(.plain)
-        .navigationTitle(kind.title)
-        .accessibilityIdentifier("libraryList_\(kind.rawValue)")
     }
 
     @ViewBuilder

@@ -155,7 +155,7 @@ struct LibraryTagSuggestions: ViewModifier {
                     .filter { partial.isEmpty || $0.name.hasPrefix(partial) }
                     .prefix(8)
                 ForEach(Array(summaries)) { tag in
-                    Label("#\(tag.name)  (\(tag.count))", systemImage: "number")
+                    Label("#\(tag.name)（\(tag.count)）", systemImage: "number")
                         .searchCompletion(completion(for: tag.name))
                 }
             }

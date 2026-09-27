@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Observation
 import PhotosUI
@@ -37,6 +38,9 @@ final class UploadQueue {
     @ObservationIgnored private var sendCheckedDraftIDs: Set<String> = []
     /// Drafts whose FANBOX revision this run has already checked.
     @ObservationIgnored private var revisionCheckedDraftIDs: Set<String> = []
+    /// Content of each checked post (`RemoteEditablePost.contentFingerprint`): a revision after an upload is adopted only
+    /// while the content is still this, so an edit made elsewhere during a long upload is not taken for the upload's own.
+    @ObservationIgnored private var checkedContent: [String: [String]] = [:]
 
     init(store: LocalStore, remote: RemoteDataSourceProvider, network: NetworkModeController,
          mediaStore: DraftMediaStore = DraftMediaStore()) {
@@ -247,6 +251,7 @@ final class UploadQueue {
         }
         isRunning = true
         revisionCheckedDraftIDs = []
+        checkedContent = [:]
         while isNetworkAvailable, let job = nextQueuedJob() {
             let keepGoing = await process(job)
             if !keepGoing { break }
@@ -305,18 +310,20 @@ final class UploadQueue {
 
         // An upload into an existing post outside a send: the post must still be the revision this draft is based on.
         var adoptsRevision = false
-        if let postID, !sendCheckedDraftIDs.contains(job.draftID) {
-            if !revisionCheckedDraftIDs.contains(job.draftID) {
-                switch await checkRevision(draftID: job.draftID, postID: postID, source: source, context: context) {
+        let jobDraftID = job.draftID
+        if let postID, !sendCheckedDraftIDs.contains(jobDraftID) {
+            if !revisionCheckedDraftIDs.contains(jobDraftID) {
+                switch await checkRevision(draftID: jobDraftID, postID: postID, source: source, context: context) {
                 case .current:
-                    revisionCheckedDraftIDs.insert(job.draftID)
+                    revisionCheckedDraftIDs.insert(jobDraftID)
                 case .conflict:
-                    pauseUnfinished(draftID: job.draftID, reason: Self.conflictMessage)
+                    pauseUnfinished(draftID: jobDraftID, reason: Self.conflictMessage)
                     return true
                 case .unreachable:
                     return false   // offline: stay queued, the next run checks again
                 case .failed(let reason):
-                    if let job = self.job(id: jobID) { markFailed(job, reason: reason) }
+                    // Every waiting job of the draft needs the same check: one read decides for all of them.
+                    failQueued(draftID: jobDraftID, reason: reason)
                     return true
                 }
             }
@@ -409,6 +416,12 @@ final class UploadQueue {
                 return true
             case .offline, .blockedByPolicy, .cancelled:
                 // Connectivity / policy / cancellation: stay queued and stop; the next run picks it up again.
+                if adoptsRevision, remoteError != .blockedByPolicy, job.progress > 0, let draft = store.draft(id: draftID),
+                   draft.remotePostID == postID {
+                    // The file was being sent when the connection went, so it may have reached FANBOX: a revision it
+                    // bumped (with the content left as checked) is this draft's own. Nothing sent is nothing remembered.
+                    draft.rememberOwnWrite(keptContent: checkedContent[draftID].map(RemoteEditablePost.digest))
+                }
                 job.state = .queued
                 job.progress = 0
                 job.updatedAt = .now
@@ -489,21 +502,45 @@ final class UploadQueue {
             }
         }
         guard let draft = store.draft(id: draftID) else { return .unreachable }
-        if let base = draft.remoteUpdatedAt, let now = current.updatedAt, now.timeIntervalSince(base) > 1 { return .conflict }
-        if let now = current.updatedAt, draft.remoteUpdatedAt != now {
-            draft.remoteUpdatedAt = now
-            store.save()
-        }
+        if draft.isEditedElsewhere(revision: current.updatedAt, contentDigest: current.contentDigest) { return .conflict }
+        draft.setBaseline(revision: current.updatedAt)
+        store.save()
+        checkedContent[draftID] = current.contentFingerprint
         return .current
     }
 
-    /// Best effort: the post's revision after this draft's own upload becomes the draft's baseline.
+    /// Best effort: the post's revision after this draft's own upload becomes the draft's baseline — only while the post
+    /// holds the content checked before the upload (an upload adds media, it changes nothing else). Content changed
+    /// meanwhile is an edit made elsewhere: the baseline stays, so the next check / send refuses to overwrite it. A post
+    /// that cannot be read leaves the upload remembered with that content (`Draft.ownWriteAt` / `ownWriteContent`).
     private func adoptRevision(draftID: String, postID: String, source: RemoteDataSource, context: AccountContext) async {
-        guard let fresh = try? await RequestContext.$priority.withValue(.interactiveRead, operation: {
+        let fresh = try? await RequestContext.$priority.withValue(.interactiveRead, operation: {
             try await source.editablePost(id: postID, account: context)
-        }), let draft = store.draft(id: draftID), draft.remotePostID == postID, let updatedAt = fresh.updatedAt else { return }
-        draft.remoteUpdatedAt = updatedAt
+        })
+        guard let draft = store.draft(id: draftID), draft.remotePostID == postID else { return }
+        guard let fresh else {
+            draft.rememberOwnWrite(keptContent: checkedContent[draftID].map(RemoteEditablePost.digest))
+            store.save()
+            return
+        }
+        if let checked = checkedContent[draftID], checked != fresh.contentFingerprint {
+            revisionCheckedDraftIDs.remove(draftID)
+            return
+        }
+        draft.setBaseline(revision: fresh.updatedAt)
         store.save()
+    }
+
+    /// Marks every waiting job of a draft failed (the active one finishes on its own).
+    private func failQueued(draftID: String, reason: String) {
+        var changed = false
+        for job in jobs(draftID: draftID) where job.state == .queued && job.id != activeJobID {
+            job.state = .failed
+            job.lastError = reason
+            job.updatedAt = .now
+            changed = true
+        }
+        if changed { store.save() }
     }
 
     /// Pauses one job (it cannot run as things are; never a failure).
@@ -588,6 +625,9 @@ final class DraftService {
     /// Debounce interval of autosave (SPEC §19).
     @ObservationIgnored var autosaveDelay: Duration = .milliseconds(500)
     @ObservationIgnored private var pendingSave: Task<Void, Never>?
+    /// Imports in flight ("accountID|postID"): a second 編集 of the same post joins the first instead of making a second
+    /// local draft.
+    @ObservationIgnored private var importTasks: [String: Task<String, Error>] = [:]
 
     init(store: LocalStore, uploads: UploadQueue, remote: RemoteDataSourceProvider, web: WebBridge) {
         self.store = store
@@ -848,8 +888,26 @@ final class DraftService {
     /// FANBOX ids (nothing is uploaded again), paragraphs keep their text styles and empty spacing paragraphs, and the
     /// FANBOX status / fee / comment permission / revision are recorded so a later send never changes them by accident.
     /// Content that cannot be written back natively is kept visibly and blocks the native update (web editor instead).
-    /// An unsent local edit of the same post is reused.
+    /// An unsent local edit of the same post is reused, and so is an import of it that is still running.
     func importRemotePost(postID: String, accountID: String) async throws -> Draft {
+        let key = "\(accountID)|\(postID)"
+        let draftID: String
+        if let running = importTasks[key] {
+            draftID = try await running.value
+        } else {
+            let task = Task { @MainActor [weak self] () throws -> String in
+                guard let self else { throw RemoteError.cancelled }
+                return try await self.performImport(postID: postID, accountID: accountID).id
+            }
+            importTasks[key] = task
+            defer { importTasks[key] = nil }
+            draftID = try await task.value
+        }
+        guard let draft = store.draft(id: draftID) else { throw RemoteError.notFound }
+        return draft
+    }
+
+    private func performImport(postID: String, accountID: String) async throws -> Draft {
         let existing = store.fetch(FetchDescriptor<Draft>(predicate: #Predicate { $0.accountID == accountID },
                                                           sortBy: [SortDescriptor(\.updatedAt, order: .reverse)]))
             .filter { $0.remotePostID == postID }
@@ -857,6 +915,7 @@ final class DraftService {
             return draft
         }
         guard let account = store.account(id: accountID) else { throw RemoteError.invalidRequest("アカウントが見つかりません") }
+        guard account.enabled else { throw RemoteError.invalidRequest(Self.disabledAccountMessage) }
         guard uploads.isNetworkAvailable else { throw RemoteError.offline }
         let context = account.context
         let source = remote.dataSource(for: context)
@@ -981,6 +1040,8 @@ final class DraftService {
         guard let account = store.account(id: draft.accountID) else {
             return fail(draft, .invalidRequest("アカウントが見つかりません"))
         }
+        // A turned-off account never writes (its drafts are hidden everywhere).
+        guard account.enabled else { return fail(draft, .invalidRequest(Self.disabledAccountMessage)) }
         guard account.creatorID != nil else {
             return fail(draft, .invalidRequest("このアカウントにはCreatorページがありません"))
         }
@@ -997,6 +1058,7 @@ final class DraftService {
         guard uploads.isNetworkAvailable else { return fail(draft, .offline) }
 
         // 1. Existing post: re-read its current state before uploading / writing anything.
+        var checked: RemoteEditablePost?
         if let postID = draft.remotePostID {
             let previousStatus = draft.status
             draft.status = .publishing
@@ -1007,20 +1069,29 @@ final class DraftService {
                     try await source.editablePost(id: postID, account: context)
                 }
             } catch {
-                guard let draft = store.draft(id: draftID) else { return .failure(RemoteError.creatorWrapping(error)) }
-                return fail(draft, RemoteError.creatorWrapping(error))
+                let remoteError = RemoteError.creatorWrapping(error)
+                guard let draft = store.draft(id: draftID) else { return .failure(remoteError) }
+                // Deleted on FANBOX: the draft can be sent as a new post instead (`detachFromRemotePost`).
+                if remoteError == .notFound { return fail(draft, remoteError, message: Self.remotePostMissingMessage) }
+                return fail(draft, remoteError)
             }
             guard let draft = store.draft(id: draftID) else { return .failure(.notFound) }
             let known = draft.remoteStatus
             draft.remoteStatusRaw = current.status.rawValue
-            if let base = draft.remoteUpdatedAt, let now = current.updatedAt, now.timeIntervalSince(base) > 1 {
+            if draft.isEditedElsewhere(revision: current.updatedAt, contentDigest: current.contentDigest) {
                 return fail(draft, .invalidRequest(Self.conflictMessage))
             }
             if let known, known != .unknown, known != current.status {
-                return fail(draft, .invalidRequest("FANBOX側で公開状態が「\(current.status.creatorLabel)」に変わっています。内容を確認してから送信し直してください。"))
+                return fail(draft, .invalidRequest(Self.statusChangedMessage(current.status)))
+            }
+            // A post whose status was not known locally is only sent as published while it is live: "更新（公開のまま）"
+            // never publishes a FANBOX draft or a taken-down post.
+            if publish, known == .unknown, current.status != .published {
+                return fail(draft, .invalidRequest(Self.statusChangedMessage(current.status)))
             }
             // The revision just checked is this send's baseline (a post created by an earlier attempt may have had none).
-            if let now = current.updatedAt { draft.remoteUpdatedAt = now }
+            draft.setBaseline(revision: current.updatedAt)
+            checked = current
             plan = DraftSendPlanner.plan(draft: draft, capabilities: capabilities, publish: publish, remoteStatus: current.status)
             checkLocalMedia(of: draft, capabilities: capabilities, into: &plan)
             if let refusal = refusal(of: plan, draft: draft, acceptWarnings: acceptWarnings, allowUnpublish: allowUnpublish) {
@@ -1029,6 +1100,10 @@ final class DraftService {
                 return refusal
             }
         }
+        guard store.draft(id: draftID) != nil else { return .failure(.notFound) }
+        // A post.create of an earlier attempt whose answer was lost may have created the post: adopt it, never create a
+        // second one.
+        if let failure = await resolveLostCreate(draftID: draftID, source: source, context: context) { return failure }
         guard let draft = store.draft(id: draftID) else { return .failure(.notFound) }
 
         // 2. Post-bound media: a new post is created FIRST and its id stored before anything is uploaded into it, so a
@@ -1036,6 +1111,7 @@ final class DraftService {
         var continuation: String?
         if capabilities.uploadsNeedPost && draft.remotePostID == nil && Self.needsPostBoundWork(draft, capabilities: capabilities) {
             draft.status = .publishing
+            draft.createAttemptAt = .now
             store.save()
             do {
                 let postID = try await RequestContext.$priority.withValue(.interactiveWrite) {
@@ -1050,7 +1126,7 @@ final class DraftService {
                 let remoteError = RemoteError.creatorWrapping(error)
                 AppLog.creator.error("post.create before uploads failed: \(remoteError.userMessage, privacy: .public)")
                 guard let draft = store.draft(id: draftID) else { return .failure(remoteError) }
-                return fail(draft, remoteError)
+                return failCreate(draft, remoteError)
             }
         } else if capabilities.uploadsNeedPost && draft.remotePostID != nil {
             continuation = Self.continueNote
@@ -1059,12 +1135,14 @@ final class DraftService {
 
         // Steps 3–5 write into the FANBOX post (uploads, link cards, the save). When a later step fails, the post's new
         // revision becomes the baseline (best effort), so the retry does not take this send's own writes for an edit
-        // made elsewhere.
+        // made elsewhere. Before the save only while the post still holds what step 1 read: an edit made elsewhere during
+        // the uploads is never adopted.
         let postBound = capabilities.uploadsNeedPost && draft.remotePostID != nil
         var wroteIntoPost = postBound && Self.needsPostBoundWork(draft, capabilities: capabilities)
+        var expectedContent = checked?.contentFingerprint
         func settled(_ failure: Result<DraftSendReceipt, RemoteError>) async -> Result<DraftSendReceipt, RemoteError> {
             if wroteIntoPost, let postID = store.draft(id: draftID)?.remotePostID {
-                await adoptRevision(draftID: draftID, postID: postID, source: source, context: context)
+                await adoptRevision(draftID: draftID, postID: postID, source: source, context: context, expecting: expectedContent)
             }
             return failure
         }
@@ -1085,6 +1163,30 @@ final class DraftService {
                 return await settled(failure)
             }
         }
+        // 3c. Uploads / link cards took time: the post must still be what step 1 read (an edit or a status change made
+        //     meanwhile in the web editor is never overwritten, nor is a post published meanwhile taken down).
+        if let checked, wroteIntoPost, let postID = store.draft(id: draftID)?.remotePostID {
+            let fresh: RemoteEditablePost
+            do {
+                fresh = try await RequestContext.$priority.withValue(.interactiveRead) {
+                    try await source.editablePost(id: postID, account: context)
+                }
+            } catch {
+                guard let draft = store.draft(id: draftID) else { return .failure(RemoteError.creatorWrapping(error)) }
+                return await settled(fail(draft, RemoteError.creatorWrapping(error)))
+            }
+            guard let draft = store.draft(id: draftID) else { return .failure(.notFound) }
+            if fresh.status != checked.status {
+                draft.remoteStatusRaw = fresh.status.rawValue
+                return fail(draft, .invalidRequest(Self.statusChangedMessage(fresh.status)))
+            }
+            if fresh.contentFingerprint != checked.contentFingerprint {
+                return fail(draft, .invalidRequest(Self.conflictMessage))
+            }
+            // Only this send's own uploads / link cards changed the post: its revision is the baseline.
+            draft.setBaseline(revision: fresh.updatedAt)
+            store.save()
+        }
         guard let draft = store.draft(id: draftID) else { return .failure(.notFound) }
         let isMediaPost = draft.remotePostID != nil && capabilities.allowedKinds(in: draft.remotePostType) != nil
 
@@ -1097,11 +1199,13 @@ final class DraftService {
         }
         guard uploads.isNetworkAvailable else { return await settled(fail(draft, .offline)) }
 
-        // 5. Create / update with interactiveWrite priority.
+        // 5. Create / update with interactiveWrite priority. The save replaces the post's content: what it holds after a
+        //    failed save is this send's own doing.
         draft.status = .publishing
-        store.save()
         let existingID = draft.remotePostID
-        if existingID != nil { wroteIntoPost = true }
+        if existingID != nil { wroteIntoPost = true } else { draft.createAttemptAt = .now }
+        expectedContent = nil
+        store.save()
         let body = payload.draft
         let webIDs = payload.webItemBlockIDs
         do {
@@ -1118,13 +1222,17 @@ final class DraftService {
             commitSent(draft, postID: postID, published: body.publish, leavesWebItems: !webIDs.isEmpty, keepsTextBlocks: isMediaPost,
                        unpublished: plan.unpublishes)
             let webItems = DraftSendPlanner.webItems(for: draft, blockIDs: webIDs)
-            // 6. Revision baseline for the next conflict check (best effort read).
+            // 6. Revision baseline for the next conflict check (best effort read). When it fails, the write is remembered:
+            //    the next send takes a revision up to now for this app's own update, not for an edit made elsewhere.
             if let fresh = try? await RequestContext.$priority.withValue(.interactiveRead, operation: {
                 try await source.editablePost(id: postID, account: context)
             }), let draft = store.draft(id: draftID) {
-                draft.remoteUpdatedAt = fresh.updatedAt ?? draft.remoteUpdatedAt
+                draft.setBaseline(revision: fresh.updatedAt)
                 draft.remoteStatusRaw = fresh.status.rawValue
                 if let permission = fresh.commentPermission { draft.commentPermission = permission }
+                store.save()
+            } else if let draft = store.draft(id: draftID) {
+                draft.rememberOwnWrite(keptContent: nil)
                 store.save()
             }
             return .success(DraftSendReceipt(postID: postID, sentPublished: body.publish, webItems: webItems))
@@ -1133,6 +1241,7 @@ final class DraftService {
             guard let draft = store.draft(id: draftID) else { return .failure(partial.underlying) }
             // Persist the new id FIRST: the retry updates this post instead of creating another one.
             draft.remotePostID = partial.postID
+            draft.createAttemptAt = nil
             draft.remoteStatusRaw = RemotePostStatus.draft.rawValue
             draft.remoteFeeRequired = nil
             draft.remoteUpdatedAt = nil
@@ -1147,6 +1256,7 @@ final class DraftService {
             let remoteError = RemoteError.creatorWrapping(error)
             AppLog.creator.error("publish failed: \(remoteError.userMessage, privacy: .public)")
             guard let draft = store.draft(id: draftID) else { return .failure(remoteError) }
+            if existingID == nil { return failCreate(draft, remoteError) }
             if continuation == Self.createdDraftNote {
                 return await settled(fail(draft, remoteError, message: "FANBOXに下書きを作成してメディアを送信しましたが、内容の保存に失敗しました（\(remoteError.userMessage)）。再送すると同じ下書きを更新します（送信済みのメディアは再送しません）。"))
             }
@@ -1155,13 +1265,86 @@ final class DraftService {
     }
 
     /// Best effort: the post's current revision becomes the draft's baseline for the next conflict check (read right
-    /// after this app's own writes into the post).
-    private func adoptRevision(draftID: String, postID: String, source: RemoteDataSource, context: AccountContext) async {
-        guard let fresh = try? await RequestContext.$priority.withValue(.interactiveRead, operation: {
+    /// after this app's own writes into the post). When it cannot be read, the write is remembered (`Draft.ownWriteAt`).
+    /// `expecting`: the content (`RemoteEditablePost.contentFingerprint`) the post held before those writes. Content
+    /// changed meanwhile is an edit made elsewhere: the baseline stays, so the next send refuses to overwrite it. It is
+    /// remembered with the write too, so a revision read later is adopted only with that content.
+    private func adoptRevision(draftID: String, postID: String, source: RemoteDataSource, context: AccountContext,
+                               expecting: [String]? = nil) async {
+        let fresh = try? await RequestContext.$priority.withValue(.interactiveRead, operation: {
             try await source.editablePost(id: postID, account: context)
-        }), let draft = store.draft(id: draftID), draft.remotePostID == postID, let updatedAt = fresh.updatedAt else { return }
-        draft.remoteUpdatedAt = updatedAt
+        })
+        guard let draft = store.draft(id: draftID), draft.remotePostID == postID else { return }
+        if let fresh {
+            if let expecting, expecting != fresh.contentFingerprint { return }
+            draft.setBaseline(revision: fresh.updatedAt)
+        } else {
+            draft.rememberOwnWrite(keptContent: expecting.map(RemoteEditablePost.digest))
+        }
         store.save()
+    }
+
+    static let disabledAccountMessage = "このアカウントは無効になっています"
+    /// Shown when the linked FANBOX post no longer exists (deleted on FANBOX); `detachFromRemotePost` offers the way out.
+    static let remotePostMissingMessage = "FANBOXで投稿が見つかりませんでした（削除された可能性があります）"
+    /// A post.create whose answer was lost could not be matched with the creator's posts.
+    static let lostCreateMessage = "前回の送信でFANBOXに下書きが作成されたか確認できませんでした。FANBOXの投稿一覧を確認してください。"
+
+    static func statusChangedMessage(_ status: RemotePostStatus) -> String {
+        "FANBOX側で公開状態が「\(status.creatorLabel)」に変わっています。内容を確認してから送信し直してください。"
+    }
+
+    /// A failed post.create: when the request may have created the post although its answer was lost (timeout, dropped
+    /// connection, cancellation, a server error), the attempt is remembered and the next send looks for the post it may
+    /// have created (`resolveLostCreate`) instead of creating a second one. Any other answer from FANBOX clears it.
+    private func failCreate(_ draft: Draft, _ error: RemoteError) -> Result<DraftSendReceipt, RemoteError> {
+        if !Self.createOutcomeUnknown(error) { draft.createAttemptAt = nil }
+        return fail(draft, error)
+    }
+
+    static func createOutcomeUnknown(_ error: RemoteError) -> Bool {
+        switch error {
+        case .offline, .network, .cancelled: return true
+        // A 5xx may come after the post was stored (or from a gateway that gave up waiting for FANBOX).
+        case .server(let status): return (500...599).contains(status)
+        default: return false
+        }
+    }
+
+    /// Before a new post is created: an earlier post.create of this draft whose answer was lost may have created it. The
+    /// creator's managed posts are read and an untitled FANBOX draft created since that attempt is adopted (uploads and
+    /// the save then go into it). nil = go on (adopted, or nothing was created); a failure when it cannot be told.
+    private func resolveLostCreate(draftID: String, source: RemoteDataSource,
+                                   context: AccountContext) async -> Result<DraftSendReceipt, RemoteError>? {
+        guard let draft = store.draft(id: draftID), draft.remotePostID == nil, let attempt = draft.createAttemptAt else { return nil }
+        let listed: [RemotePostSummary]
+        do {
+            listed = try await RequestContext.$priority.withValue(.interactiveRead) {
+                try await source.managedPosts(account: context, cursor: nil).items
+            }
+        } catch {
+            let remoteError = RemoteError.creatorWrapping(error)
+            guard let draft = store.draft(id: draftID) else { return .failure(remoteError) }
+            return fail(draft, remoteError)
+        }
+        guard let draft = store.draft(id: draftID), draft.remotePostID == nil else { return nil }
+        let since = attempt.addingTimeInterval(-Draft.ownWriteTolerance)
+        let candidates = listed.filter { post in
+            post.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && (post.remoteStatus ?? .draft) == .draft
+                && max(post.updatedAt, post.publishedAt) >= since
+        }
+        switch candidates.count {
+        case 0:
+            draft.createAttemptAt = nil
+            store.save()
+            return nil
+        case 1:
+            recordCreatedPost(draft, postID: candidates[0].id)
+            await adoptRevision(draftID: draftID, postID: candidates[0].id, source: source, context: context)
+            return nil
+        default:
+            return fail(draft, .invalidRequest(Self.lostCreateMessage))
+        }
     }
 
     static let createdDraftNote = "FANBOXに下書きを作成済みです。再送すると同じ下書きに続きから送信します（完了した項目は再送しません）。"
@@ -1182,6 +1365,7 @@ final class DraftService {
     /// Stores the id of the post just created for uploads (before anything is uploaded into it).
     private func recordCreatedPost(_ draft: Draft, postID: String) {
         draft.remotePostID = postID
+        draft.createAttemptAt = nil
         draft.remoteStatusRaw = RemotePostStatus.draft.rawValue
         draft.remoteFeeRequired = nil
         draft.remoteUpdatedAt = nil
@@ -1288,16 +1472,20 @@ final class DraftService {
     /// Records a successful send: FANBOX status / fee, and the sent text as the new baseline of every paragraph
     /// (a multi-line text block becomes one block per paragraph, exactly like the post on FANBOX).
     /// `keepsTextBlocks`: image- / file-type post, whose text blocks are paragraphs of one plain text (never split by line).
-    /// `unpublished`: a live post was taken down. FANBOX then reports `archived`, which this app does not model (unknown);
-    /// the read that follows the send records the real status.
+    /// `unpublished`: a live post was taken down; FANBOX then reports `archived` (非公開), and a taken-down post saved again
+    /// without publishing stays archived. The read that follows the send records the real status.
     private func commitSent(_ draft: Draft, postID: String, published: Bool, leavesWebItems: Bool, keepsTextBlocks: Bool = false,
                             unpublished: Bool = false) {
-        // A new post got the default comment permission (or the one sent): later updates keep it without asking.
-        if draft.remotePostID == nil && draft.commentPermission == nil {
+        // The post now has the comment permission that was sent (the default when none was known) and exactly the tags
+        // that were sent: later updates keep them without asking.
+        if draft.commentPermission == nil {
             draft.commentPermission = .default(feeRequired: draft.feeRequired)
         }
+        draft.tagsUnverified = false
+        let wasArchived = draft.remotePostID != nil && draft.remoteStatus == .archived
         draft.remotePostID = postID
-        let status: RemotePostStatus = published ? .published : (unpublished ? .unknown : .draft)
+        draft.createAttemptAt = nil
+        let status: RemotePostStatus = published ? .published : (unpublished || wasArchived ? .archived : .draft)
         draft.remoteStatusRaw = status.rawValue
         draft.remoteFeeRequired = draft.feeRequired
         draft.status = published ? .published : .readyToPublish
@@ -1391,6 +1579,42 @@ final class DraftService {
 
     // MARK: Delete
 
+    // MARK: Deleted FANBOX post
+
+    /// The draft's FANBOX post no longer exists (a send could not find it, or a complete managed listing lacks it).
+    func isRemotePostMissing(_ draft: Draft) -> Bool {
+        guard let postID = draft.remotePostID else { return false }
+        return draft.lastError == Self.remotePostMissingMessage || store.post(id: postID)?.isRemovedFromFanbox == true
+    }
+
+    /// Unlinks a draft from its deleted FANBOX post so it can be sent as a new post; its content is kept. Media and link
+    /// cards stored into the old post are uploaded / registered again from their local copies (an imported item without
+    /// one is reported by the send), and the old post's status, revision and settings no longer apply.
+    func detachFromRemotePost(draftID: String) {
+        guard let draft = store.draft(id: draftID), draft.remotePostID != nil else { return }
+        uploads.removeJobs(draftID: draftID)
+        for block in draft.blocks where block.remoteMediaID != nil {
+            block.remoteMediaID = nil
+            block.remoteMedia = nil
+        }
+        draft.remotePostID = nil
+        draft.remoteStatusRaw = nil
+        draft.remoteFeeRequired = nil
+        draft.remoteUpdatedAt = nil
+        draft.remotePostTypeRaw = nil
+        draft.nativeUpdateBlocker = nil
+        draft.tagsUnverified = false
+        draft.ownWriteAt = nil
+        draft.ownWriteContent = nil
+        draft.createAttemptAt = nil
+        draft.webHandoffAt = nil
+        draft.publishedAt = nil
+        draft.lastError = nil
+        draft.status = .local
+        draft.updatedAt = .now
+        store.save()
+    }
+
     /// Deletes a local draft, its blocks, upload jobs and media files. Never touches the FANBOX post.
     func deleteDraft(draftID: String) {
         uploads.removeJobs(draftID: draftID)
@@ -1400,5 +1624,27 @@ final class DraftService {
         }
         mediaStore.removeAll(draftID: draftID)
         store.save()
+    }
+}
+
+extension RemoteEditablePost {
+    /// What an edit in the web editor changes and this app's own uploads / link card registrations do not (those only add
+    /// to the post's media maps; the body references them after the save): title, fee, status, tags, the R-18 flag and
+    /// the body. Media items of an image- / file-type post are left out (an upload may add to them).
+    var contentFingerprint: [String] {
+        var parts = [title, String(feeRequired), status.rawValue, tagsKnown ? tags.joined(separator: "\u{1F}") : "?",
+                     String(hasAdultContent), postType.rawValue]
+        for block in blocks where postType == .article || block.mediaID == nil {
+            parts.append([block.kind.rawValue, block.text, block.mediaID ?? "", block.url ?? "", block.embedContentID ?? ""]
+                .joined(separator: "\u{1F}"))
+        }
+        return parts
+    }
+
+    /// `contentFingerprint` as a short stable digest (kept on the draft with `Draft.ownWriteAt`).
+    var contentDigest: String { Self.digest(contentFingerprint) }
+
+    static func digest(_ fingerprint: [String]) -> String {
+        SHA256.hash(data: Data(fingerprint.joined(separator: "\u{1E}").utf8)).map { String(format: "%02x", $0) }.joined()
     }
 }

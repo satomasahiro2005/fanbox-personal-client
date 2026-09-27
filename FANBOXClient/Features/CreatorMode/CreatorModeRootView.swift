@@ -169,7 +169,7 @@ private struct CreatorModeAccountView: View {
         Section {
             Button {
                 let draft = env.drafts.createDraft(accountID: accountID)
-                env.router.open(.draft(draftID: draft.id))
+                env.router.open(.draft(draftID: draft.id), in: .creatorMode)
             } label: {
                 Label("新規投稿", systemImage: "square.and.pencil")
             }
@@ -302,7 +302,7 @@ private struct CreatorModeAccountView: View {
         async let fanList = env.sync.sync(.fans, accountID: accountID, reason: reason)
         async let planList = env.sync.sync(.plans, accountID: accountID, scope: creatorID, reason: reason)
         let outcomes = await [dashboard, managed, comments, fanList, planList]
-        syncError = outcomes.compactMap(\.error).first
+        syncError = outcomes.compactMap { $0.error ?? $0.partialError }.first
     }
 
     private func startEditing(_ post: Post) {
@@ -312,7 +312,7 @@ private struct CreatorModeAccountView: View {
             defer { importingPostID = nil }
             do {
                 let draft = try await env.drafts.importRemotePost(postID: post.postID, accountID: accountID)
-                env.router.open(.draft(draftID: draft.id))
+                env.router.open(.draft(draftID: draft.id), in: .creatorMode)
             } catch {
                 editFailure = CreatorPostEditFailure(postID: post.postID, error: RemoteError.creatorWrapping(error))
             }
@@ -409,7 +409,7 @@ struct CreatorManagedPostsView: View {
                 CreatorManagedPostRow(post: post)
             }
             .swipeActions(edge: .trailing) {
-                Button("編集") { edit(post) }.tint(.accentColor)
+                Button("編集") { edit(post) }.tint(.accentColor).disabled(importing)
             }
         }
         .searchable(text: $query, prompt: "タイトルで検索")
@@ -430,12 +430,13 @@ struct CreatorManagedPostsView: View {
     }
 
     private func edit(_ post: Post) {
+        guard !importing else { return }
         importing = true
         Task {
             defer { importing = false }
             do {
                 let draft = try await env.drafts.importRemotePost(postID: post.postID, accountID: accountID)
-                env.router.open(.draft(draftID: draft.id))
+                env.router.open(.draft(draftID: draft.id), in: .creatorMode)
             } catch {
                 editFailure = CreatorPostEditFailure(postID: post.postID, error: RemoteError.creatorWrapping(error))
             }

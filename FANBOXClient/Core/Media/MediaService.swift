@@ -118,6 +118,13 @@ final class MediaService {
         peekCachedFileURL(url: url, variant: variant) != nil
     }
 
+    /// The cached file under a readable name (share / open / Files), valid after the cached file moves between the
+    /// cache roots (pin / unpin). nil when nothing is cached.
+    func namedFileURL(url: String, variant: MediaVariant, fileName: String) -> URL? {
+        guard let source = peekCachedFileURL(url: url, variant: variant) else { return nil }
+        return MediaFileCache.namedLink(to: source, fileName: fileName)
+    }
+
     /// Download progress of an in-flight fetch (nil when not downloading or unknown).
     func progress(url: String, variant: MediaVariant) -> Double? {
         downloadProgress[MediaFileCache.key(url: url, variant: variant)]
@@ -147,26 +154,30 @@ final class MediaService {
 
     // MARK: - Loading
 
-    /// Returns a local file URL, downloading if the policy allows.
+    /// Returns a local file URL, downloading if the policy allows. The URL is where the file is after this request's
+    /// ownership was applied (pinning moves a file between the cache roots).
     func load(_ request: MediaRequest) async throws -> URL {
         let key = MediaFileCache.key(url: request.url, variant: request.variant)
         if let hit = cachedFileURL(url: request.url, variant: request.variant) {
             applyOwnership(url: request.url, variant: request.variant, request: request)
-            return hit
+            return currentFileURL(url: request.url, variant: request.variant) ?? hit
         }
 
         let fetch: InFlightFetch
-        if let existing = inFlight[key] {
+        if let existing = inFlight[key], !existing.task.isCancelled {
+            // A fetch every earlier waiter gave up on is not joined (it ends with `.cancelled`): a new one starts.
             fetch = existing
         } else {
             let decision = decision(kind: request.kind, variant: request.variant, trigger: request.trigger)
             guard decision == .allowed else { throw RemoteError.blockedByPolicy }
+            let box = InFlightFetchBox()
             let task = Task { @MainActor [weak self] () throws -> URL in
                 guard let self else { throw RemoteError.cancelled }
-                defer { self.finishFetch(key: key) }
+                defer { self.finishFetch(key: key, fetch: box.fetch) }
                 return try await self.fetchAndStore(request, key: key)
             }
             fetch = InFlightFetch(task: task)
+            box.fetch = fetch
             inFlight[key] = fetch
             activeFetchCount = inFlight.count
         }
@@ -181,13 +192,23 @@ final class MediaService {
             }
         } onCancel: {
             // Cancel the shared download only when every waiter has gone away (e.g. cells scrolled off screen).
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 fetch.cancelledWaiters += 1
-                if fetch.cancelledWaiters >= fetch.waiters { fetch.task.cancel() }
+                if fetch.cancelledWaiters >= fetch.waiters {
+                    fetch.task.cancel()
+                    // Nobody joins a cancelled fetch: a new request for the key starts its own.
+                    if self?.inFlight[key] === fetch { self?.finishFetch(key: key, fetch: fetch) }
+                }
             }
         }
         applyOwnership(url: request.url, variant: request.variant, request: request)
-        return fileURL
+        // Another waiter of the same fetch may have pinned (moved) the file meanwhile.
+        return currentFileURL(url: request.url, variant: request.variant) ?? fileURL
+    }
+
+    /// Where the cached file of `url` + `variant` is now (nil without an entry).
+    private func currentFileURL(url: String, variant: MediaVariant) -> URL? {
+        cachedEntry(url: url, variant: variant).map { fileCache.fileURL(relativePath: $0.relativePath) }
     }
 
     /// Decoded image for display (downsampled to `request.decodeVariant`).
@@ -198,16 +219,26 @@ final class MediaService {
             if request.pin { applyOwnership(url: request.url, variant: request.variant, request: request) }
             return cached
         }
-        let fileURL = try await load(request)
+        var fileURL = try await load(request)
         let variant = request.variant
         let decodeVariant = request.decodeVariant
-        let decoded = await Task.detached(priority: .userInitiated) {
-            ImageDownsampler.decode(fileURL: fileURL, variant: decodeVariant)
-        }.value
+        func decode(_ url: URL) async -> UIImage? {
+            await Task.detached(priority: .userInitiated) { ImageDownsampler.decode(fileURL: url, variant: decodeVariant) }.value
+        }
+        var decoded = await decode(fileURL)
+        if decoded == nil, let current = currentFileURL(url: request.url, variant: variant), current != fileURL {
+            // The file moved between the cache roots (pinned / unpinned) while it was decoded: decode it where it is now.
+            fileURL = current
+            decoded = await decode(current)
+        }
         guard let decoded else {
-            // Corrupt / non-image payload: drop file + row so the next attempt re-fetches.
-            if let entry = cachedEntry(url: request.url, variant: request.variant) {
+            // Corrupt / non-image payload: drop file + row so the next attempt re-fetches — only when the row still points
+            // at the file that failed (a file that moved is not "corrupt").
+            if let entry = cachedEntry(url: request.url, variant: variant),
+               fileCache.fileURL(relativePath: entry.relativePath) == fileURL {
+                let releasedPost = entry.isPinned ? entry.postID : nil
                 remove(entry)
+                if let releasedPost { releaseOfflineState(postIDs: [releasedPost]) }
                 store.save()
                 refreshUsage()
             }
@@ -269,10 +300,37 @@ final class MediaService {
             remove(entry)
         }
         if let post = store.post(id: postID) {
+            if post.offlineState != .none { post.mediaReleasedAt = .now }
             post.offlineState = .none
         }
         store.save()
         refreshUsage()
+    }
+
+    /// Whether the post's saved media was deleted — by the user (キャッシュ削除 / すべて削除 / one image) or because saved
+    /// media exceeded the capacity. A "recent N" rule does not save it again (it would re-download what was just deleted,
+    /// on every sync, also after a relaunch) until the user saves the post explicitly.
+    func isReleased(postID: String) -> Bool {
+        store.post(id: postID)?.mediaReleasedAt != nil
+    }
+
+    /// The user saved the post again: rules may cover it again.
+    func forgetRelease(postID: String) {
+        if let post = store.post(id: postID), post.mediaReleasedAt != nil { post.mediaReleasedAt = nil }
+    }
+
+    /// Remembers that these posts' saved media was deleted (`isReleased`). Caller saves.
+    private func markReleased(_ postIDs: Set<String>) {
+        guard !postIDs.isEmpty else { return }
+        let ids = Array(postIDs)
+        let now = Date.now
+        for post in store.fetch(FetchDescriptor<Post>(predicate: #Predicate { ids.contains($0.postID) })) { post.mediaReleasedAt = now }
+    }
+
+    /// Saved media alone is at or above the capacity: saving more would only evict other saved media.
+    var isSavedMediaAtCapacity: Bool {
+        guard let limit = settings.cacheCapacity.bytes else { return false }
+        return usage.pinnedBytes >= limit
     }
 
     /// `includePinned == false` keeps every saved post's media (explicit, "recent N" and auto-saved posts are pinned).
@@ -284,7 +342,9 @@ final class MediaService {
             urlIndex = [:]
             fileCache.removeEverything()
             let none = OfflineState.none.rawValue
+            let now = Date.now
             for post in store.fetch(FetchDescriptor<Post>(predicate: #Predicate { $0.offlineStateRaw != none })) {
+                post.mediaReleasedAt = now
                 post.offlineState = .none
             }
         } else {
@@ -303,7 +363,10 @@ final class MediaService {
         guard let entry = store.first(#Predicate<MediaCacheEntry> { $0.key == key }) else { return }
         let releasedPost = entry.isPinned ? entry.postID : nil
         remove(entry)
-        if let releasedPost { releaseOfflineState(postIDs: [releasedPost]) }
+        if let releasedPost {
+            releaseOfflineState(postIDs: [releasedPost])
+            markReleased([releasedPost])
+        }
         store.save()
         refreshUsage()
     }
@@ -346,6 +409,7 @@ final class MediaService {
         }
         // Saved media had to go (pinned data alone exceeds the capacity): those posts are no longer fully offline.
         releaseOfflineState(postIDs: releasedPosts)
+        markReleased(releasedPosts)
         store.save()
         refreshUsage()
         AppLog.media.info("evicted \(victims.count, privacy: .public) cached media files (\(releasedPosts.count, privacy: .public) saved posts released)")
@@ -379,7 +443,13 @@ final class MediaService {
     func reconcile() async {
         let cache = fileCache
         let cutoff = Date.now.addingTimeInterval(-300)
-        let onDisk = await Task.detached(priority: .background) { cache.relativePaths(modifiedBefore: cutoff) }.value
+        let onDisk = await Task.detached(priority: .background) { () -> [String] in
+            // A "すべて削除" cut short by suspension left its detached copy behind: finish deleting it. Old readable-name
+            // links keep deleted files' bytes on disk: they go too.
+            cache.removeLeftoverTrash()
+            MediaFileCache.removeNamedLinks(modifiedBefore: cutoff)
+            return cache.relativePaths(modifiedBefore: cutoff)
+        }.value
         let entries = store.fetch(FetchDescriptor<MediaCacheEntry>())
         var changed = false
         var releasedPosts: Set<String> = []
@@ -438,7 +508,9 @@ final class MediaService {
             let httpRequest = HTTPRequest(url: remoteURL, timeout: 60, priority: request.priority,
                                           endpointKey: "media.\(request.variant.rawValue)")
             let throttle = MediaProgressThrottle()
-            let (temporaryURL, response) = try await http.download(httpRequest, accountID: request.accountID) { [weak self] fraction in
+            // A turned-off account sends nothing, whatever account a row or list still remembers for the media.
+            let accountID = request.accountID.flatMap { store.account(id: $0)?.enabled == false ? nil : $0 }
+            let (temporaryURL, response) = try await http.download(httpRequest, accountID: accountID) { [weak self] fraction in
                 guard throttle.shouldForward(fraction) else { return }
                 Task { @MainActor in self?.reportProgress(key: key, fraction: fraction) }
             }
@@ -477,7 +549,9 @@ final class MediaService {
         return fileCache.fileURL(relativePath: relativePath)
     }
 
-    private func finishFetch(key: String) {
+    /// Drops the in-flight record of `fetch` (a newer fetch of the same key keeps its own).
+    private func finishFetch(key: String, fetch: InFlightFetch?) {
+        guard let fetch, inFlight[key] === fetch else { return }
         inFlight[key] = nil
         downloadProgress[key] = nil
         activeFetchCount = inFlight.count
@@ -629,4 +703,11 @@ private final class InFlightFetch {
     init(task: Task<URL, Error>) {
         self.task = task
     }
+}
+
+/// Lets the fetch task refer to its own `InFlightFetch` (created after the task). The reference cycle ends when the
+/// task finishes and releases its closure.
+@MainActor
+private final class InFlightFetchBox {
+    var fetch: InFlightFetch?
 }

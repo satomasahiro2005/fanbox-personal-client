@@ -67,7 +67,10 @@ actor RateGate {
     private struct LaneState {
         var lastStart: Date?
         var waiters: [Waiter] = []
-        var wakeScheduled = false
+        /// When the pending wake-up fires (nil = none), and its generation: a wake-up superseded by an earlier one is
+        /// ignored when it fires.
+        var wakeAt: Date?
+        var wakeGeneration: UInt64 = 0
     }
 
     private struct BreakerKey: Hashable {
@@ -282,18 +285,24 @@ actor RateGate {
         }
     }
 
+    /// One wake-up per lane, at the earliest due time: a head that is due before the pending wake-up (typically an
+    /// interactive request queued behind a background one waiting up to `maxBudgetWait` for the budget) gets its own.
     private func scheduleWake(_ lane: Lane, after seconds: TimeInterval) {
-        guard lanes[lane]?.wakeScheduled != true else { return }
-        lanes[lane]?.wakeScheduled = true
+        let target = clock().addingTimeInterval(seconds)
+        if let pending = lanes[lane]?.wakeAt, pending <= target { return }
+        let generation = (lanes[lane]?.wakeGeneration ?? 0) &+ 1
+        lanes[lane]?.wakeGeneration = generation
+        lanes[lane]?.wakeAt = target
         let sleeper = self.sleeper
         Task {
             try? await sleeper(seconds)
-            self.wake(lane)
+            self.wake(lane, generation: generation)
         }
     }
 
-    private func wake(_ lane: Lane) {
-        lanes[lane]?.wakeScheduled = false
+    private func wake(_ lane: Lane, generation: UInt64) {
+        guard lanes[lane]?.wakeGeneration == generation else { return }     // superseded by an earlier wake-up
+        lanes[lane]?.wakeAt = nil
         pump(lane)
     }
 

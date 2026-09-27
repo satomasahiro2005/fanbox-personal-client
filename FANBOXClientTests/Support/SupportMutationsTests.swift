@@ -81,6 +81,22 @@ final class SupportMutationsTests: XCTestCase {
         XCTAssertNil(fresh.paymentProfileID)
     }
 
+    /// The payment flow preselects the support's own profile; handing off with it unchanged is not a new choice.
+    func testRecordPaymentIntentWithTheSameProfileKeepsVerification() throws {
+        let store = try makeStore()
+        let verifiedAt = Date(timeIntervalSince1970: 1_790_000_000)
+        SupportMutations.setAssignment(store: store, accountID: "A", creatorID: "c1", planID: "p1", profileID: "prof", state: .verified,
+                                       now: verifiedAt)
+        let same = SupportMutations.recordPaymentIntent(store: store, accountID: "A", creatorID: "c1", planID: "p2", profileID: "prof")
+        XCTAssertEqual(same.planID, "p2")
+        XCTAssertEqual(same.verificationState, .verified)
+        XCTAssertEqual(same.lastVerifiedAt, verifiedAt)
+
+        let other = SupportMutations.recordPaymentIntent(store: store, accountID: "A", creatorID: "c1", planID: "p2", profileID: "other")
+        XCTAssertEqual(other.paymentProfileID, "other")
+        XCTAssertEqual(other.verificationState, .manual, "a different profile is a new choice")
+    }
+
     func testDeleteProfileResetsAssignmentsToUnknown() throws {
         let store = try makeStore()
         guard case .success(let profile) = SupportMutations.saveProfile(PaymentProfileDraft(nickname: "Card", type: .creditCard), store: store),

@@ -133,6 +133,7 @@ struct SupportCreatorDetailView: View {
                 editRequest = nil
             }
         }
+        .closesOnNotificationRoute($editRequest)
         .paymentFlowSheet($flowRequest)
     }
 
@@ -244,7 +245,7 @@ struct AssignmentEditorSheet: View {
                         Text(accountDefault.map { "アカウントの既定に従う（\(PaymentProfileSnapshot($0).shortLabel)）" } ?? "アカウントの既定に従う")
                             .tag(String?.none)
                         ForEach(profiles) { p in
-                            Text("\(p.nickname)  \(p.displayDetail)").tag(Optional(p.id))
+                            Text(PaymentProfileSnapshot(p).shortLabel).tag(Optional(p.id))
                         }
                     }
                     .pickerStyle(.inline)

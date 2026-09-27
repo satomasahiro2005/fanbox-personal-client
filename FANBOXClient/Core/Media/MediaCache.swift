@@ -173,17 +173,24 @@ struct MediaFileCache: Sendable {
         FileManager.default.fileExists(atPath: fileURL(relativePath: relativePath).path)
     }
 
+    /// Deletes a cached file and its readable-name links (a link would keep the bytes on disk, uncounted).
     func removeFile(relativePath: String) {
         try? FileManager.default.removeItem(at: fileURL(relativePath: relativePath))
+        Self.removeNamedLinks(relativePath: relativePath)
     }
 
-    /// Atomically detaches both cache directories (rename) and deletes them in the background.
+    /// Name prefix of the directories `removeEverything` detaches before deleting them.
+    static let trashPrefix = ".media-trash-"
+
+    /// Atomically detaches both cache directories (rename) and deletes them in the background. A deletion cut short
+    /// (the app was suspended / ended) is finished by `removeLeftoverTrash`.
     func removeEverything() {
+        Self.removeNamedLinks(modifiedBefore: .distantFuture)
         for directory in [root, pinnedRoot] {
             let fm = FileManager.default
             guard fm.fileExists(atPath: directory.path) else { continue }
             let trash = directory.deletingLastPathComponent()
-                .appendingPathComponent(".media-trash-\(UUID().uuidString)", isDirectory: true)
+                .appendingPathComponent(Self.trashPrefix + UUID().uuidString, isDirectory: true)
             do {
                 try fm.moveItem(at: directory, to: trash)
                 Task.detached(priority: .background) {
@@ -192,6 +199,69 @@ struct MediaFileCache: Sendable {
             } catch {
                 try? fm.removeItem(at: directory)
             }
+        }
+    }
+
+    /// Deletes trash directories an earlier `removeEverything` left behind (hidden, uncounted, never purged by iOS in
+    /// Application Support). Returns how many were removed.
+    @discardableResult
+    func removeLeftoverTrash() -> Int {
+        let fm = FileManager.default
+        var removed = 0
+        for parent in Set([root.deletingLastPathComponent(), pinnedRoot.deletingLastPathComponent()]) {
+            guard let names = try? fm.contentsOfDirectory(atPath: parent.path) else { continue }
+            for name in names where name.hasPrefix(Self.trashPrefix) {
+                if (try? fm.removeItem(at: parent.appendingPathComponent(name, isDirectory: true))) != nil { removed += 1 }
+            }
+        }
+        return removed
+    }
+
+    /// Where `namedLink` puts its links: tmp/SharedMedia/<cached file name without extension>/<readable name>.
+    static var namedLinksRoot: URL {
+        FileManager.default.temporaryDirectory.appendingPathComponent("SharedMedia", isDirectory: true)
+    }
+
+    /// Deletes the readable-name links of one cached file.
+    static func removeNamedLinks(relativePath: String) {
+        let stem = ((relativePath as NSString).lastPathComponent as NSString).deletingPathExtension
+        guard !stem.isEmpty else { return }
+        try? FileManager.default.removeItem(at: namedLinksRoot.appendingPathComponent(stem, isDirectory: true))
+    }
+
+    /// Deletes readable-name links made before `cutoff` (`.distantFuture`: all of them).
+    @discardableResult
+    static func removeNamedLinks(modifiedBefore cutoff: Date) -> Int {
+        let fm = FileManager.default
+        let keys: [URLResourceKey] = [.contentModificationDateKey]
+        guard let directories = try? fm.contentsOfDirectory(at: namedLinksRoot, includingPropertiesForKeys: keys) else { return 0 }
+        var removed = 0
+        for directory in directories {
+            let modified = (try? directory.resourceValues(forKeys: Set(keys)).contentModificationDate) ?? .distantPast
+            guard modified < cutoff else { continue }
+            if (try? fm.removeItem(at: directory)) != nil { removed += 1 }
+        }
+        return removed
+    }
+
+    /// A hard link (or copy) of a cached file under a readable name, for share sheets, Files and QuickLook (the cache
+    /// names files by hash). A hard link stays valid when the cached file later moves between the roots. It goes when
+    /// the cached file is deleted (`removeFile` / `removeEverything`); old links are swept by `MediaService.reconcile`.
+    static func namedLink(to source: URL, fileName: String) -> URL? {
+        let fm = FileManager.default
+        var name = fileName.replacingOccurrences(of: "/", with: "／").replacingOccurrences(of: ":", with: "：")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if name.isEmpty || name.hasPrefix(".") { name = source.lastPathComponent }
+        let directory = namedLinksRoot.appendingPathComponent(source.deletingPathExtension().lastPathComponent, isDirectory: true)
+        let target = directory.appendingPathComponent(name, isDirectory: false)
+        if fm.fileExists(atPath: target.path), byteSize(of: target) == byteSize(of: source) { return target }
+        try? fm.removeItem(at: target)
+        do {
+            try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+            do { try fm.linkItem(at: source, to: target) } catch { try fm.copyItem(at: source, to: target) }
+            return target
+        } catch {
+            return nil
         }
     }
 
@@ -240,10 +310,17 @@ struct MediaEvictionCandidate: Sendable, Hashable {
 ///
 ///     Unpinned → Old → Original Image → Display Image → Thumbnail
 ///
-/// Sort order used: unpinned before pinned; within that, "old" entries (not accessed for `oldThreshold`) first;
-/// then variant original → display → thumbnail; then least-recently-accessed first.
+/// Sort order used: unpinned before pinned; within that, files in use right now (created or accessed within
+/// `recentThreshold`: a download the user just made, a file a player / preview / share sheet holds) go last; then "old"
+/// entries (not accessed for `oldThreshold`) first; then variant original → display → thumbnail; then
+/// least-recently-accessed first.
 enum MediaEvictionPlanner {
     static let oldThreshold: TimeInterval = 30 * 24 * 60 * 60
+    static let recentThreshold: TimeInterval = 15 * 60
+
+    static func isRecent(_ candidate: MediaEvictionCandidate, now: Date) -> Bool {
+        now.timeIntervalSince(candidate.lastAccessedAt) < recentThreshold
+    }
 
     static func variantRank(_ variant: MediaVariant) -> Int {
         switch variant {
@@ -261,6 +338,8 @@ enum MediaEvictionPlanner {
     static func order(_ candidates: [MediaEvictionCandidate], now: Date = .now) -> [MediaEvictionCandidate] {
         candidates.sorted { a, b in
             if a.isPinned != b.isPinned { return !a.isPinned }
+            let recentA = isRecent(a, now: now), recentB = isRecent(b, now: now)
+            if recentA != recentB { return recentB }
             let oldA = isOld(a, now: now), oldB = isOld(b, now: now)
             if oldA != oldB { return oldA }
             let rankA = variantRank(a.variant), rankB = variantRank(b.variant)

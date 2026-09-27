@@ -131,12 +131,14 @@ extension MediaService {
 /// their format.
 @MainActor
 enum PhotoLibrarySaver {
-    /// Asks for add-only access, picks (and if needed loads) the file, then adds it to Photos.
+    /// Asks for add-only access, picks (and if needed loads) the file, then adds it to Photos. `alreadySaved`: the variant
+    /// an earlier save of this image put into Photos; the same file is not added a second time.
     @discardableResult
-    static func save(_ source: ImageSaveSource, media: MediaService) async throws -> ImageSaveFile {
+    static func save(_ source: ImageSaveSource, media: MediaService, alreadySaved: MediaVariant? = nil) async throws -> ImageSaveFile {
         let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
         guard status == .authorized || status == .limited else { throw PhotoSaveError.denied }
         let file = try await media.fileForSaving(source)
+        if isAlreadyInPhotos(file, source: source, savedVariant: alreadySaved) { return file }
         let fileURL = file.fileURL
         let data: Data
         do {
@@ -153,6 +155,13 @@ enum PhotoLibrarySaver {
             throw PhotoSaveError(error)
         }
         return file
+    }
+
+    /// The chosen file is the one an earlier save already put into Photos (e.g. the cached smaller image again, because
+    /// FANBOX refused the derived original): nothing new to add.
+    nonisolated static func isAlreadyInPhotos(_ file: ImageSaveFile, source: ImageSaveSource, savedVariant: MediaVariant?) -> Bool {
+        guard let savedVariant, let savedURL = source.urls[savedVariant] else { return false }
+        return source.urls[file.variant] == savedURL
     }
 
     /// The creation request of `performChanges` (runs on the Photos queue).

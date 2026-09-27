@@ -51,6 +51,22 @@ final class FixSyncNotifyNotificationTests: XCTestCase {
         XCTAssertEqual(NotificationCommentResolver.bellIDs(fromRemoteIDs: ["acc-1:991", "acc-2:bell:post_comment:1:2"]), ["991"])
     }
 
+    /// A creator thanking several fans with the same text: the reply to someone else is never the target, and two equal
+    /// candidates are ambiguous even though the text is known.
+    func testResolverNeverPicksAReplyAddressedToSomeoneElse() {
+        let toOther = Candidate(id: "r-y", parentID: "cy", authorName: "X", body: "ありがとうございます！", createdAt: t0, isOwn: false,
+                                parentAuthorUserID: "fanY")
+        let toMe = Candidate(id: "r-a", parentID: "ca", authorName: "X", body: "ありがとうございます！", createdAt: t0.addingTimeInterval(5),
+                             isOwn: false, parentAuthorUserID: "pA")
+        func resolve(_ candidates: [Candidate], receivers: Set<String>?) -> String? {
+            NotificationCommentResolver.resolve(type: .commentReply, message: "ありがとうございます！", actorName: "X", timestamp: t0,
+                                                bellIDs: [], postTitle: nil, candidates: candidates, replyParentAuthors: receivers)
+        }
+        XCTAssertNil(resolve([toOther], receivers: ["pA"]), "my comment's reply is not local yet: nothing to answer")
+        XCTAssertEqual(resolve([toOther, toMe], receivers: ["pA"]), "r-a")
+        XCTAssertNil(resolve([toOther, toMe], receivers: nil), "two equal replies are ambiguous")
+    }
+
     // MARK: Threaded reply from the notification (§45 通知から即コメント返信)
 
     func testPrefetchResolvesTheCommentSoTheReplyIsThreaded() async throws {
@@ -77,6 +93,28 @@ final class FixSyncNotifyNotificationTests: XCTestCase {
         XCTAssertEqual(item.parentCommentID, "c2")
         XCTAssertEqual(item.rootCommentID, "c1")
         XCTAssertEqual(item.state, .sent)
+    }
+
+    /// A comment bell on my post that is not stored locally (published on the web): the new comment still counts as a
+    /// comment on my post (Creator Mode 未読), and a later listing that cannot tell never hides it again.
+    func testCommentBellOnAnOwnPostWithoutALocalRowStaysInCreatorMode() async throws {
+        let h = try SyncHarness()
+        let me = h.addAccount("Creator", pixivUserID: "pMe", creatorID: "mine", isMain: true)
+        let now = Date.now
+        h.mock.update {
+            $0.comments["web1"] = [RemoteComment(id: "c1", postID: "web1", authorUserID: "fan", authorName: "Fan", body: "新作楽しみです",
+                                                 createdAt: now)]
+        }
+        let ids = h.store.upsertNotifications([fanboxCommentBell("b1", postID: "web1", body: "新作楽しみです", at: now)], account: me.context)
+        XCTAssertNil(h.store.post(id: "web1"))
+        await h.notifications.prefetch(eventID: ids[0])
+        let comment = try XCTUnwrap(h.store.comments(postID: "web1").first)
+        XCTAssertTrue(comment.isOnOwnPost)
+        XCTAssertFalse(comment.isRead, "a new comment on my post is unread")
+
+        h.store.upsertComments([RemoteComment(id: "c1", postID: "web1", authorUserID: "fan", authorName: "Fan", body: "新作楽しみです",
+                                              createdAt: now)], postID: "web1", account: me.context)
+        XCTAssertTrue(comment.isOnOwnPost, "never downgraded by a listing without the post")
     }
 
     func testReplyResolvesTheCommentOnDemandWhenThePrefetchHadNotRun() async throws {
@@ -117,6 +155,143 @@ final class FixSyncNotifyNotificationTests: XCTestCase {
         let second = await h.notifications.handleReply(eventID: ids[0], text: "もう一度")
         XCTAssertEqual(second.flatMap { h.replies.item(id: $0) }?.state, .draft)
         XCTAssertEqual(h.mock.count("addComment"), 0)
+    }
+
+    /// Every account that received the event was removed: nothing is sent, and a notice carries the text (it is not
+    /// dropped silently) and opens the thread.
+    func testReplyWithoutAnyReceivingAccountLeftPostsANotice() async throws {
+        let h = try SyncHarness()
+        let fan = h.addAccount("Fan", pixivUserID: "pF", isMain: true)
+        let ids = h.store.upsertNotifications([fanboxCommentBell("b1", type: .commentReply, postID: "p1", body: "こんにちは")],
+                                              account: fan.context)
+        let event = try XCTUnwrap(h.store.notificationEvent(id: ids[0]))
+        event.accountIDs = []       // what removing the receiving account leaves
+        h.store.save()
+        let replyID = await h.notifications.handleReply(eventID: ids[0], text: "消えないで")
+        XCTAssertNil(replyID)
+        XCTAssertEqual(h.mock.count("addComment"), 0)
+        let notice = try XCTUnwrap(h.poster.requests.first)
+        XCTAssertEqual(notice.content.title, "返信を送信しませんでした")
+        XCTAssertTrue(notice.content.body.contains("消えないで"))
+        XCTAssertEqual(notice.content.userInfo[NotificationService.eventIDKey] as? String, ids[0])
+    }
+
+    /// The reply text is on disk before the thread is re-read (iOS may suspend or end the app during that request).
+    func testNotificationReplyIsSavedBeforeTheThreadIsRead() async throws {
+        let h = try SyncHarness()
+        let me = h.addAccount("Creator", pixivUserID: "pMe", creatorID: "mine", isMain: true)
+        h.store.upsertManagedPosts([SyncFixtures.summary("own1", creator: "mine")], account: me.context)
+        let now = Date.now
+        h.mock.update {
+            $0.comments["own1"] = [RemoteComment(id: "c9", postID: "own1", authorUserID: "fan", authorName: "Fan", body: "はじめまして",
+                                                 createdAt: now)]
+            $0.commentsDelayNanoseconds = 200_000_000
+        }
+        let ids = h.store.upsertNotifications([fanboxCommentBell("b1", postID: "own1", body: "はじめまして", at: now)], account: me.context)
+        let reply = Task { await h.notifications.handleReply(eventID: ids[0], text: "ようこそ") }
+        var spins = 0
+        while h.mock.count("comments|") == 0 && spins < 100_000 { spins += 1; await Task.yield() }
+        XCTAssertEqual(h.store.fetch(FetchDescriptor<OutgoingComment>()).map(\.body), ["ようこそ"], "saved while the thread is being read")
+
+        let replyID = await reply.value
+        let item = try XCTUnwrap(replyID.flatMap { h.replies.item(id: $0) })
+        XCTAssertEqual(item.parentCommentID, "c9")
+        XCTAssertEqual(item.origin, .notificationAction)
+        XCTAssertEqual(item.state, .sent)
+        XCTAssertEqual(h.store.fetch(FetchDescriptor<OutgoingComment>()).count, 1, "the saved text is the one sent")
+    }
+
+    /// A notification of an account that was disabled afterwards is never answered as another account.
+    func testReplyToADisabledAccountsNotificationIsNotSentAsAnotherAccount() async throws {
+        let h = try SyncHarness()
+        let main = h.addAccount("Main", pixivUserID: "pMain", isMain: true)
+        let b = h.addAccount("B", pixivUserID: "pB")
+        let now = Date.now
+        h.mock.update {
+            $0.comments["p1"] = [RemoteComment(id: "c1", postID: "p1", authorUserID: "x", authorName: "X", body: "ありがとう", createdAt: now)]
+        }
+        let ids = h.store.upsertNotifications([fanboxCommentBell("b1", type: .commentReply, postID: "p1", body: "ありがとう", actor: "X",
+                                                                 at: now)], account: b.context)
+        b.enabled = false
+        h.store.save()
+        XCTAssertNil(h.notifications.preferredAccount(for: try XCTUnwrap(h.store.notificationEvent(id: ids[0]))))
+
+        let replyID = await h.notifications.handleReply(eventID: ids[0], text: "どういたしまして")
+        XCTAssertEqual(h.mock.count("addComment"), 0)
+        let item = try XCTUnwrap(replyID.flatMap { h.replies.item(id: $0) })
+        XCTAssertEqual(item.state, .draft)
+        XCTAssertEqual(item.accountID, b.id, "kept for the receiving account, never \(main.id)")
+    }
+
+    // MARK: Banners of an interrupted run
+
+    func testProcessMarksEveryBannerDueBeforeThePrefetch() async throws {
+        let h = try SyncHarness()
+        let a = h.addAccount("A", pixivUserID: "pA", isMain: true)
+        h.mock.update {
+            $0.details[a.id] = ["p1": SyncFixtures.detail("p1"), "p2": SyncFixtures.detail("p2")]
+            $0.postDelayNanoseconds = 200_000_000
+        }
+        let ids = h.store.upsertNotifications([SyncFixtures.notification("r1", type: .newPost, postID: "p1"),
+                                              SyncFixtures.notification("r2", type: .newPost, postID: "p2")], account: a.context)
+        let run = Task { await h.notifications.process(newEventIDs: ids) }
+        var spins = 0
+        while h.mock.count("post|") == 0 && spins < 100_000 { spins += 1; await Task.yield() }
+        XCTAssertTrue(ids.allSatisfy { h.store.notificationEvent(id: $0)?.deliveryPendingSince != nil },
+                      "due before the first (slow) prefetch starts")
+        await run.value
+        XCTAssertEqual(h.poster.requests.count, 2)
+        XCTAssertTrue(ids.allSatisfy { h.store.notificationEvent(id: $0)?.deliveryPendingSince == nil })
+    }
+
+    /// Banners the loop never reached (iOS suspended / ended the app) are posted by the next launch / activation.
+    func testDueBannersOfAnInterruptedRunAreDeliveredLater() async throws {
+        let h = try SyncHarness()
+        let a = h.addAccount("A", pixivUserID: "pA", isMain: true)
+        let ids = h.store.upsertNotifications([SyncFixtures.notification("r1", type: .newPost, postID: "p1"),
+                                              SyncFixtures.notification("r2", type: .comment, postID: "p2")], account: a.context)
+        let silent = h.store.upsertNotifications([SyncFixtures.notification("r3", type: .newPost, postID: "p3")], account: a.context)
+        for id in ids { h.store.notificationEvent(id: id)?.deliveryPendingSince = .now }     // marked, then the app was ended
+        h.store.save()
+
+        await h.notifications.redeliverPending()
+        XCTAssertEqual(Set(h.poster.requests.map(\.identifier)), Set(ids))
+        XCTAssertTrue(ids.allSatisfy { h.store.notificationEvent(id: $0)?.deliveredLocally == true })
+        XCTAssertEqual(h.store.notificationEvent(id: silent[0])?.deliveredLocally, false, "an event imported silently stays silent")
+        await h.notifications.redeliverPending()
+        XCTAssertEqual(h.poster.requests.count, 2, "posted once")
+    }
+
+    /// Activation while `process` is still running: an event being prefetched is left to the loop (its banner carries the
+    /// text), and one whose banner is being posted is not posted a second time.
+    func testRedeliveryDuringARunningProcessPostsEachBannerOnce() async throws {
+        let h = try SyncHarness()
+        let a = h.addAccount("A", pixivUserID: "pA", isMain: true)
+        let slow = SlowRecordingPoster()
+        h.notifications.poster = slow
+        let ids = h.store.upsertNotifications([SyncFixtures.notification("r1", type: .newPost, postID: "p1"),
+                                              SyncFixtures.notification("r2", type: .newPost, postID: "p2")], account: a.context)
+        for id in ids { h.store.notificationEvent(id: id)?.deliveryPendingSince = .now }
+        h.store.notificationEvent(id: ids[1])?.prefetchState = .inProgress       // the loop is still prefetching it
+        h.store.save()
+
+        async let first: Void = h.notifications.deliver(eventID: ids[0])
+        async let redelivery: Void = h.notifications.redeliverPending()
+        _ = await (first, redelivery)
+        XCTAssertEqual(slow.requests.map(\.identifier), [ids[0]])
+        XCTAssertEqual(h.store.notificationEvent(id: ids[1])?.deliveredLocally, false, "left to the running loop")
+    }
+
+    /// No banner for an account that was turned off while its sync was still running.
+    func testNoBannerForADisabledAccount() async throws {
+        let h = try SyncHarness()
+        _ = h.addAccount("A", pixivUserID: "pA", isMain: true)
+        let b = h.addAccount("B", pixivUserID: "pB")
+        let ids = h.store.upsertNotifications([SyncFixtures.notification("r1", type: .newPost, postID: "p1")], account: b.context)
+        b.enabled = false
+        h.store.save()
+        await h.notifications.deliver(eventID: ids[0])
+        XCTAssertTrue(h.poster.requests.isEmpty)
     }
 
     // MARK: Delivery level (SPEC §24.2)
@@ -207,6 +382,31 @@ final class FixSyncNotifyNotificationTests: XCTestCase {
         XCTAssertEqual(h.store.post(id: "p1")?.hasCachedBody, true)
     }
 
+    /// A failed おたより prefetch retried after its only receiver was turned off sends nothing: not as that account, and not
+    /// as the main account, which never received it.
+    func testNewsletterPrefetchRetryOfADisabledReceiverSendsNothing() async throws {
+        let h = try SyncHarness()
+        let main = h.addAccount("Main", pixivUserID: "pMain", isMain: true)
+        let b = h.addAccount("B", pixivUserID: "pB")
+        let letter = RemoteNewsletter(id: "nl1", creatorID: "c1", creatorName: "C1", creatorIconURL: nil, title: nil, body: "本文",
+                                      createdAt: .now, isRead: false)
+        let newIDs = h.store.upsertNewsletters([letter], account: b.context)
+        let events = h.store.ensureNewsletterEvents(newsletterIDs: newIDs, account: b.context)
+        let event = try XCTUnwrap(h.store.notificationEvent(id: events[0]))
+        event.prefetchState = .failed
+        b.enabled = false
+        h.store.save()
+        h.mock.update {
+            $0.newsletters[b.id] = [letter]
+            $0.newsletters[main.id] = [letter]
+        }
+
+        await h.notifications.retryFailedPrefetches()
+        let explicit = await h.engine.refreshNewsletter(id: "nl1", accountID: b.id)
+        XCTAssertNotNil(explicit)
+        XCTAssertEqual(h.mock.count("newsletter|"), 0)
+    }
+
     func testNewSupporterPrefetchRefreshesTheFanList() async throws {
         let h = try SyncHarness()
         let me = h.addAccount("Creator", pixivUserID: "pMe", creatorID: "mine", isMain: true)
@@ -248,6 +448,35 @@ final class FixSyncNotifyNotificationTests: XCTestCase {
         XCTAssertTrue(requests.isEmpty)
     }
 
+    /// Commenters' avatars are not images of the post (they would be listed and pinned with it), and a disabled
+    /// account's session never fetches the media.
+    func testCommentAvatarsAreNotImagesOfThePostAndSkipADisabledAccount() async throws {
+        let h = try SyncHarness()
+        let b = h.addAccount("B", pixivUserID: "pB")
+        let a = h.addAccount("A", pixivUserID: "pA", isMain: true)
+        var requests: [MediaRequest] = []
+        h.notifications.mediaPrefetcher = { requests.append($0) }
+        var summary = SyncFixtures.summary("p1", creator: "mine")
+        summary.coverImageURL = "https://example.invalid/cover.jpg"
+        h.store.upsertPostSummaries([summary], account: a.context, source: .home)
+        let now = Date.now
+        h.mock.update {
+            $0.comments["p1"] = [RemoteComment(id: "c1", postID: "p1", authorUserID: "u1", authorName: "Fan",
+                                               authorIconURL: "https://example.invalid/fan.jpg", body: "素敵です", createdAt: now)]
+        }
+        let ids = h.store.upsertNotifications([fanboxCommentBell("b1", postID: "p1", body: "素敵です", at: now)], account: b.context)
+        _ = h.store.upsertNotifications([fanboxCommentBell("a1", postID: "p1", body: "素敵です", at: now)], account: a.context)
+        b.enabled = false
+        h.store.save()
+        XCTAssertEqual(h.store.notificationEvent(id: ids[0])?.accountIDs.first, b.id, "the turned-off account received it first")
+
+        await h.notifications.prefetch(eventID: ids[0])
+        let avatar = try XCTUnwrap(requests.first { $0.url == "https://example.invalid/fan.jpg" })
+        XCTAssertNil(avatar.postID)
+        XCTAssertEqual(requests.first { $0.url == "https://example.invalid/cover.jpg" }?.postID, "p1")
+        XCTAssertTrue(requests.allSatisfy { $0.accountID == a.id })
+    }
+
     // MARK: Cross-account dedupe of FANBOX comment bells (SPEC §27)
 
     func testSameCommentBellFromTwoAccountsIsOneEvent() throws {
@@ -268,6 +497,22 @@ final class FixSyncNotifyNotificationTests: XCTestCase {
         XCTAssertTrue(h.store.upsertNotifications([fanboxCommentBell("222", postID: "p1", body: "同じコメント", at: at)], account: b.context).isEmpty)
         XCTAssertEqual(h.store.upsertNotifications([fanboxCommentBell("223", postID: "p1", body: "別のコメント", at: at)], account: b.context).count, 1)
         XCTAssertEqual(h.store.fetch(FetchDescriptor<NotificationEvent>()).count, 2)
+    }
+
+    /// A creator thanking two of my accounts with the same short text wrote two replies: two events, one per account.
+    func testIdenticalRepliesToTwoAccountsStayTwoEvents() throws {
+        let h = try SyncHarness()
+        let a = h.addAccount("A", pixivUserID: "pA")
+        let b = h.addAccount("B", pixivUserID: "pB")
+        let at = Date.now
+        let fromA = h.store.upsertNotifications([fanboxCommentBell("111", type: .commentReply, postID: "p1", body: "ありがとうございます！",
+                                                                   actor: "X", at: at)], account: a.context)
+        let fromB = h.store.upsertNotifications([fanboxCommentBell("222", type: .commentReply, postID: "p1", body: "ありがとうございます！",
+                                                                   actor: "X", at: at.addingTimeInterval(40))], account: b.context)
+        XCTAssertEqual(fromA.count, 1)
+        XCTAssertEqual(fromB.count, 1, "B gets its own event (and its own banner)")
+        XCTAssertEqual(h.store.notificationEvent(id: fromA[0])?.accountIDs, [a.id])
+        XCTAssertEqual(h.store.notificationEvent(id: fromB[0])?.accountIDs, [b.id])
     }
 
     // MARK: Inbox retention (SPEC §27 scalability)
@@ -300,4 +545,17 @@ final class FixSyncNotifyNotificationTests: XCTestCase {
         XCTAssertNotNil(h.store.notificationEvent(id: "newPost|legacy2"))
         XCTAssertNotNil(h.store.notificationEvent(id: "newPost|p-new"))
     }
+}
+
+/// Posts after a short delay, like the system center, so overlapping deliveries can be observed.
+@MainActor
+private final class SlowRecordingPoster: LocalNotificationPosting {
+    var requests: [UNNotificationRequest] = []
+
+    func post(_ request: UNNotificationRequest) async throws {
+        try await Task.sleep(nanoseconds: 50_000_000)
+        requests.append(request)
+    }
+
+    func setBadge(_ count: Int) async {}
 }

@@ -89,6 +89,30 @@ final class FixTransportRateGateTests: XCTestCase {
         try await gate.admit(endpointKey: "post.info", host: api, priority: .interactiveRead)
     }
 
+    /// A background request parked on the budget (wake-up far away) never holds back a later interactive request: it
+    /// gets its own, earlier wake-up.
+    func testInteractiveRequestIsNotHeldBehindABackgroundBudgetWakeUp() async throws {
+        var config = RateGate.Configuration()
+        config.backgroundHeavyPerMinute = 1
+        let (gate, clock) = makeGate(config)
+        try await gate.admit(endpointKey: "post.info", host: api, priority: .backgroundSync)       // spends the budget
+        clock.advance(40)                                                                            // it frees in 20 s
+        let background = Task { try await gate.admit(endpointKey: "post.info", host: self.api, priority: .backgroundSync) }
+        await netModWaitUntil { clock.pendingSleeps == 1 }
+        try await gate.admit(endpointKey: "post.info", host: api, priority: .interactiveRead)      // starts now
+        let log = NetModLog()
+        let second = Task { try await gate.admit(endpointKey: "post.info", host: self.api, priority: .interactiveRead); log.append("tap2") }
+        await netModWaitUntil { clock.pendingSleeps == 2 }
+
+        clock.advance(1)
+        await netModWaitUntil { log.values == ["tap2"] }
+        XCTAssertEqual(log.values, ["tap2"], "served after the 1 s spacing, not at the background wake-up 19 s later")
+
+        clock.advance(19)
+        try await second.value
+        try await background.value
+    }
+
     func testRateLimitStartsDeviceWideCooldownForEveryPriority() async throws {
         let (gate, clock) = makeGate()
         await gate.recordRateLimited(retryAfter: 120)

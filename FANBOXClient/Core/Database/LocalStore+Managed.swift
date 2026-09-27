@@ -51,4 +51,12 @@ extension LocalStore {
         let key = SyncState.key(accountID: accountID, resource: resource, scope: scope)
         return first(#Predicate<SyncState> { $0.key == key })
     }
+
+    /// True once the creator's complete plan list (plan.listCreator) was read by any account. Plan rows written by support
+    /// listings alone cover only the plans some account supports.
+    func hasFetchedPlanList(creatorID: String) -> Bool {
+        let raw = SyncResource.plans.rawValue
+        return fetch(FetchDescriptor<SyncState>(predicate: #Predicate { $0.resourceRaw == raw && $0.scope == creatorID }))
+            .contains { $0.lastSuccessfulSync != nil }
+    }
 }

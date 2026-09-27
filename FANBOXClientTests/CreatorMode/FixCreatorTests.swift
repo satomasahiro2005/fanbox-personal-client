@@ -185,6 +185,375 @@ final class FixCreatorTests: XCTestCase {
         XCTAssertEqual(draft.remoteStatus, .draft, "fresh status recorded for the next attempt")
     }
 
+    // MARK: Taken-down posts (FANBOX `archived`)
+
+    /// A taken-down post is modelled as 非公開: saving it keeps it hidden, and a post whose status was not known locally
+    /// is never published by "更新（公開のまま）".
+    func testTakenDownPostIsNeverRepublishedByAnUpdate() async throws {
+        let h = harness!
+        XCTAssertEqual(FanboxAdapter.postStatus("archived"), .archived)
+        h.remote.with { $0.editable = self.publishedEditable(status: .archived) }
+        let draft = try await h.drafts.importRemotePost(postID: "post-1", accountID: h.account.id)
+        XCTAssertEqual(draft.remoteStatus, .archived)
+        let save = try XCTUnwrap(h.drafts.plan(draftID: draft.id, publish: false))
+        XCTAssertFalse(save.unpublishes)
+        XCTAssertFalse(save.sendsPublished)
+        XCTAssertTrue(try XCTUnwrap(h.drafts.plan(draftID: draft.id, publish: true)).notes.contains { $0.contains("再び公開") })
+
+        // Linked by an earlier version that recorded the take-down as "unknown": "更新（公開のまま）" is refused.
+        draft.remoteStatusRaw = RemotePostStatus.unknown.rawValue
+        draft.orderedBlocks[0].text = "typo fixed"
+        h.drafts.touch(draft)
+        let refused = await h.drafts.send(draftID: draft.id, publish: true)
+        guard case .failure(.invalidRequest) = refused else { return XCTFail("expected a refusal, got \(refused)") }
+        XCTAssertTrue(h.remote.snapshot.updated.isEmpty, "the taken-down post is not published again")
+        XCTAssertEqual(draft.remoteStatus, .archived, "recorded for the editor")
+
+        _ = try await h.drafts.send(draftID: draft.id, publish: false).get()
+        XCTAssertEqual(h.remote.snapshot.updated.last?.1.publish, false)
+    }
+
+    /// Creator Mode's post.listManaged has no counts or like state (and may lack tags / the R-18 flag / the page name):
+    /// a refresh never overwrites what reader listings stored. A taken-down post leaves reader views.
+    func testManagedListingKeepsWhatItDoesNotCarry() throws {
+        let h = harness!
+        let reader = RemotePostSummary(id: "m1", creatorID: "me", creatorName: "Me", title: "公開済み", publishedAt: .now,
+                                       tags: ["イラスト"], likeCount: 12, commentCount: 3, isLiked: true, hasAdultContent: true)
+        h.store.upsertPostSummaries([reader], account: h.account.context, source: .creator)
+        let body = try FanboxFixtures.decodeBody(FanboxManagedPostListBody.self, #"""
+        [{"id":"m1","title":"公開済み","status":"archived","feeRequired":0,
+          "updatedAt":"2026-09-05T10:00:00+09:00","publishedAt":"2026-09-05T10:00:00+09:00"}]
+        """#)
+        let summaries = FanboxAdapter.managedPostSummaries(body.items, creatorID: "me", creatorName: nil, creatorIconURL: nil)
+        XCTAssertEqual(summaries.first?.remoteStatus, .archived)
+        h.store.upsertManagedPosts(summaries, account: h.account.context)
+
+        let post = try XCTUnwrap(h.store.post(id: "m1"))
+        XCTAssertEqual(post.likeCount, 12)
+        XCTAssertEqual(post.commentCount, 3)
+        XCTAssertTrue(post.isLiked)
+        XCTAssertEqual(post.fanboxTags, ["イラスト"])
+        XCTAssertTrue(post.hasAdultContent)
+        XCTAssertEqual(post.creatorName, "Me")
+        XCTAssertEqual(h.store.creator(id: "me")?.name, "Me", "the page id never replaces its name")
+        XCTAssertEqual(post.managedStatus, .archived)
+        XCTAssertFalse(post.isVisibleToReaders)
+    }
+
+    // MARK: The app's own writes vs. edits made elsewhere
+
+    /// The read right after a successful update failed: the next send does not take the app's own update for an edit made
+    /// elsewhere, while an edit made later is still refused.
+    func testOwnUpdateWhoseReadBackFailedIsNotAConflict() async throws {
+        let h = harness!
+        let base = Date.now.addingTimeInterval(-600)
+        h.remote.with { $0.editable = self.publishedEditable(updatedAt: base) }
+        let draft = try await h.drafts.importRemotePost(postID: "post-1", accountID: h.account.id)
+        draft.orderedBlocks[0].text = "first edit"
+        h.remote.with { $0.failEditableCalls = [3] }        // import, the check, then the read after the update
+        _ = try await h.drafts.send(draftID: draft.id, publish: true).get()
+        XCTAssertEqual(draft.remoteUpdatedAt, base, "the new revision could not be read")
+        XCTAssertNotNil(draft.ownWriteAt)
+
+        draft.orderedBlocks[0].text = "second edit"
+        h.drafts.touch(draft)
+        _ = try await h.drafts.send(draftID: draft.id, publish: true).get()
+        XCTAssertEqual(h.remote.snapshot.updated.count, 2, "the app's own update is not an edit made elsewhere")
+        XCTAssertNil(draft.ownWriteAt)
+
+        h.remote.with { $0.editable?.updatedAt = Date.now.addingTimeInterval(3_600) }     // edited in the web editor
+        draft.orderedBlocks[0].text = "third edit"
+        h.drafts.touch(draft)
+        let conflict = await h.drafts.send(draftID: draft.id, publish: true)
+        XCTAssertEqual(conflict.failureValue, .invalidRequest(DraftService.conflictMessage))
+        XCTAssertEqual(h.remote.snapshot.updated.count, 2)
+    }
+
+    /// A post this app created whose revision could not be read back still detects a later edit in the web editor (a
+    /// missing baseline never turns the check off).
+    func testCreatedPostWithoutABaselineStillDetectsALaterWebEdit() async throws {
+        let h = harness!
+        let draft = h.drafts.createDraft(accountID: h.account.id)
+        draft.title = "New"
+        draft.orderedBlocks[0].text = "Body"
+        _ = try await h.drafts.send(draftID: draft.id, publish: true).get()     // no editable post: the read back fails
+        XCTAssertEqual(draft.remotePostID, "new-post-1")
+        XCTAssertNil(draft.remoteUpdatedAt)
+
+        h.remote.with {
+            $0.editable = RemoteEditablePost(id: "new-post-1", title: "New (web)", feeRequired: 0, planID: nil, status: .published,
+                                             blocks: [RemoteBlock(kind: .paragraph, text: "Body and more")], tags: [],
+                                             hasAdultContent: false, publishedAt: .now, updatedAt: Date.now.addingTimeInterval(3_600))
+        }
+        draft.orderedBlocks[0].text = "Body, fixed"
+        h.drafts.touch(draft)
+        let result = await h.drafts.send(draftID: draft.id, publish: true)
+        XCTAssertEqual(result.failureValue, .invalidRequest(DraftService.conflictMessage))
+        XCTAssertTrue(h.remote.snapshot.updated.isEmpty, "the web editor's work is not overwritten")
+    }
+
+    /// An edit made in the web editor while a queued upload ran is not adopted as the upload's own revision.
+    func testWebEditDuringAQueueUploadIsNotTakenForTheUploadsOwn() async throws {
+        let h = harness!
+        h.remote.with {
+            $0.capabilities = .demo
+            $0.editable = self.publishedEditable(status: .draft)
+        }
+        let draft = try await h.drafts.importRemotePost(postID: "post-1", accountID: h.account.id)
+        let base = try XCTUnwrap(draft.remoteUpdatedAt)
+        _ = try h.addMediaBlock(to: draft, kind: .image, name: "a.jpg")
+        _ = try h.addMediaBlock(to: draft, kind: .image, name: "b.jpg")
+        var edited = publishedEditable(status: .draft, updatedAt: base.addingTimeInterval(300))
+        edited.title = "Webで直したタイトル"
+        h.remote.with { $0.editableAfterUpload = edited }
+        h.uploads.enqueue(draftID: draft.id)
+        await h.uploads.run()
+        XCTAssertEqual(draft.remoteUpdatedAt, base, "the edit is not adopted as the upload's own")
+        XCTAssertEqual(h.uploads.jobs(draftID: draft.id).map(\.state), [.completed, .paused], "the next upload stops at the conflict")
+
+        let send = await h.drafts.send(draftID: draft.id, publish: false)
+        XCTAssertEqual(send.failureValue, .invalidRequest(DraftService.conflictMessage))
+        XCTAssertTrue(h.remote.snapshot.updated.isEmpty)
+    }
+
+    /// The read after a queued upload failed, and the post was edited in the web editor during the upload: the edit's
+    /// revision falls inside the app's own-write window but its content changed, so the next send refuses it.
+    func testWebEditDuringAnUploadWhoseReadBackFailedIsNotAdopted() async throws {
+        let h = harness!
+        h.remote.with {
+            $0.capabilities = .demo
+            $0.editable = self.publishedEditable(status: .draft)
+        }
+        let draft = try await h.drafts.importRemotePost(postID: "post-1", accountID: h.account.id)
+        let base = try XCTUnwrap(draft.remoteUpdatedAt)
+        _ = try h.addMediaBlock(to: draft, kind: .image, name: "a.jpg")
+        var edited = publishedEditable(status: .draft, updatedAt: base.addingTimeInterval(300))
+        edited.title = "Webで直したタイトル"
+        h.remote.with {
+            $0.editableAfterUpload = edited
+            $0.failEditableCalls = [3]      // import, the queue's check, then the read after the upload
+        }
+        h.uploads.enqueue(draftID: draft.id)
+        await h.uploads.run()
+        XCTAssertEqual(h.uploads.jobs(draftID: draft.id).map(\.state), [.completed])
+        XCTAssertNotNil(draft.ownWriteAt)
+        XCTAssertEqual(draft.remoteUpdatedAt, base)
+
+        let send = await h.drafts.send(draftID: draft.id, publish: false)
+        XCTAssertEqual(send.failureValue, .invalidRequest(DraftService.conflictMessage))
+        XCTAssertTrue(h.remote.snapshot.updated.isEmpty, "the web editor's title is not overwritten")
+        XCTAssertEqual(draft.remoteUpdatedAt, base)
+    }
+
+    /// An upload whose revision could not be read back is still the app's own when the content is unchanged: the next
+    /// send adopts it and saves.
+    func testOwnUploadWhoseReadBackFailedIsAdoptedWithUnchangedContent() async throws {
+        let h = harness!
+        h.remote.with {
+            $0.capabilities = .demo
+            $0.editable = self.publishedEditable(status: .draft)
+        }
+        let draft = try await h.drafts.importRemotePost(postID: "post-1", accountID: h.account.id)
+        let base = try XCTUnwrap(draft.remoteUpdatedAt)
+        _ = try h.addMediaBlock(to: draft, kind: .image, name: "a.jpg")
+        h.remote.with {
+            $0.editableAfterUpload = self.publishedEditable(status: .draft, updatedAt: base.addingTimeInterval(300))
+            $0.failEditableCalls = [3]
+        }
+        h.uploads.enqueue(draftID: draft.id)
+        await h.uploads.run()
+        XCTAssertNotNil(draft.ownWriteAt)
+
+        _ = try await h.drafts.send(draftID: draft.id, publish: false).get()
+        XCTAssertEqual(h.remote.snapshot.updated.count, 1)
+    }
+
+    /// A post published elsewhere while the send's uploads ran is never taken down by the send's draft save.
+    func testPostPublishedDuringTheSendsUploadsIsNotTakenDown() async throws {
+        let h = harness!
+        h.remote.with {
+            $0.capabilities = .demo
+            $0.editable = self.publishedEditable(status: .draft)
+        }
+        let draft = try await h.drafts.importRemotePost(postID: "post-1", accountID: h.account.id)
+        let base = try XCTUnwrap(draft.remoteUpdatedAt)
+        _ = try h.addMediaBlock(to: draft, kind: .image, name: "a.jpg")
+        h.remote.with { $0.editableAfterUpload = self.publishedEditable(status: .published, updatedAt: base.addingTimeInterval(120)) }
+        let result = await h.drafts.send(draftID: draft.id, publish: false)
+        guard case .failure(.invalidRequest) = result else { return XCTFail("expected a refusal, got \(result)") }
+        XCTAssertTrue(h.remote.snapshot.updated.isEmpty)
+        XCTAssertEqual(draft.remoteStatus, .published)
+    }
+
+    /// A send whose upload failed does not adopt an edit made elsewhere while its uploads ran: the retry refuses to
+    /// overwrite it.
+    func testWebEditDuringTheSendsUploadsIsNotAdoptedWhenAnUploadFails() async throws {
+        let h = harness!
+        h.remote.with {
+            $0.capabilities = .demo
+            $0.editable = self.publishedEditable(status: .draft)
+        }
+        let draft = try await h.drafts.importRemotePost(postID: "post-1", accountID: h.account.id)
+        let base = try XCTUnwrap(draft.remoteUpdatedAt)
+        _ = try h.addMediaBlock(to: draft, kind: .image, name: "a.jpg")
+        _ = try h.addMediaBlock(to: draft, kind: .image, name: "b.jpg")
+        var edited = publishedEditable(status: .draft, updatedAt: base.addingTimeInterval(300))
+        edited.title = "Webで直したタイトル"
+        h.remote.with {
+            $0.editableAfterUpload = edited
+            $0.failOnce = ["b.jpg"]
+        }
+        let first = await h.drafts.send(draftID: draft.id, publish: false)
+        guard case .failure(.invalidRequest) = first else { return XCTFail("expected the upload failure, got \(first)") }
+        XCTAssertEqual(draft.remoteUpdatedAt, base, "the edit is not adopted as the send's own")
+
+        let retry = await h.drafts.send(draftID: draft.id, publish: false)
+        XCTAssertEqual(retry.failureValue, .invalidRequest(DraftService.conflictMessage))
+        XCTAssertTrue(h.remote.snapshot.updated.isEmpty, "the web editor's title is not overwritten")
+    }
+
+    /// A failing revision check decides for every waiting upload of the draft with one read.
+    func testFailedRevisionCheckFailsTheDraftsUploadsWithOneRead() async throws {
+        let h = harness!
+        h.remote.with {
+            $0.capabilities = .demo
+            $0.editable = self.publishedEditable(status: .draft)
+        }
+        let draft = try await h.drafts.importRemotePost(postID: "post-1", accountID: h.account.id)
+        for name in ["a.jpg", "b.jpg", "c.jpg"] { _ = try h.addMediaBlock(to: draft, kind: .image, name: name) }
+        h.remote.with { $0.editable = nil }        // every read fails
+        let before = h.remote.snapshot.editableCalls
+        h.uploads.enqueue(draftID: draft.id)
+        await h.uploads.run()
+        XCTAssertEqual(h.remote.snapshot.editableCalls - before, 1)
+        XCTAssertEqual(h.uploads.jobs(draftID: draft.id).map(\.state), [.failed, .failed, .failed])
+        XCTAssertTrue(h.remote.snapshot.uploadCalls.isEmpty)
+    }
+
+    /// The FANBOX post was deleted: the draft is not stuck, it can be sent as a new post with its content.
+    func testDraftOfADeletedPostCanBeSentAsANewPost() async throws {
+        let h = harness!
+        h.remote.with { $0.editable = self.publishedEditable() }
+        let draft = try await h.drafts.importRemotePost(postID: "post-1", accountID: h.account.id)
+        draft.orderedBlocks[0].text = "keep me"
+        h.drafts.touch(draft)
+        h.remote.with { $0.editable = nil }
+        let missing = await h.drafts.send(draftID: draft.id, publish: true)
+        XCTAssertEqual(missing.failureValue, .notFound)
+        XCTAssertTrue(h.drafts.isRemotePostMissing(draft))
+
+        h.drafts.detachFromRemotePost(draftID: draft.id)
+        XCTAssertNil(draft.remotePostID)
+        XCTAssertFalse(h.drafts.isRemotePostMissing(draft))
+        let sent = try await h.drafts.send(draftID: draft.id, publish: true).get()
+        XCTAssertEqual(sent.postID, "new-post-1")
+        XCTAssertEqual(h.remote.snapshot.created.first?.blocks.first?.text, "keep me")
+    }
+
+    /// Media of the deleted post has no copy on this device: the send names that (it is not an upload to wait for), and
+    /// the rest of the draft is sent once the block is removed.
+    func testDeletedPostsMediaWithoutALocalCopyIsReportedAsSuch() async throws {
+        let h = harness!
+        var editable = publishedEditable()
+        editable.blocks.append(RemoteBlock(kind: .image, mediaID: "img-9", thumbnailURL: "https://example.invalid/t.jpg"))
+        h.remote.with { $0.editable = editable }
+        let draft = try await h.drafts.importRemotePost(postID: "post-1", accountID: h.account.id)
+        let image = try XCTUnwrap(draft.orderedBlocks.first { $0.kind == .image })
+        h.remote.with { $0.editable = nil }
+        _ = await h.drafts.send(draftID: draft.id, publish: true)
+        XCTAssertTrue(h.drafts.isRemotePostMissing(draft))
+        h.drafts.detachFromRemotePost(draftID: draft.id)
+
+        let message = DraftPostMapping.missingCopiesMessage(count: 1)
+        XCTAssertEqual(h.drafts.plan(draftID: draft.id, publish: true)?.validationError, .invalidRequest(message))
+        let refused = await h.drafts.send(draftID: draft.id, publish: true)
+        XCTAssertEqual(refused.failureValue, .invalidRequest(message))
+        XCTAssertTrue(h.remote.snapshot.created.isEmpty)
+
+        h.drafts.deleteBlock(image)
+        _ = try await h.drafts.send(draftID: draft.id, publish: true).get()
+        XCTAssertEqual(h.remote.snapshot.created.first?.blocks.map(\.kind), [.text])
+    }
+
+    /// A post.create whose answer was lost created the post: the retry adopts it instead of creating a second one.
+    func testCreateWhoseAnswerWasLostIsAdoptedInsteadOfCreatingAgain() async throws {
+        let h = harness!
+        let draft = h.drafts.createDraft(accountID: h.account.id)
+        draft.title = "New"
+        draft.orderedBlocks[0].text = "Body"
+        h.remote.with { $0.createError = RemoteError.network(code: -1001, detail: "timed out") }
+        let lost = await h.drafts.send(draftID: draft.id, publish: false)
+        XCTAssertEqual(lost.failureValue, .network(code: -1001, detail: "timed out"))
+        XCTAssertNil(draft.remotePostID)
+
+        var landed = RemotePostSummary(id: "landed-1", creatorID: "me", creatorName: "Me", title: "", publishedAt: .now)
+        landed.remoteStatus = .draft
+        h.remote.with {
+            $0.createError = nil
+            $0.managed = [landed]
+            $0.editable = RemoteEditablePost(id: "landed-1", title: "", feeRequired: 0, planID: nil, status: .draft, blocks: [], tags: [],
+                                             hasAdultContent: false, publishedAt: nil, updatedAt: .now)
+        }
+        let retry = try await h.drafts.send(draftID: draft.id, publish: false).get()
+        XCTAssertEqual(retry.postID, "landed-1")
+        XCTAssertEqual(h.remote.snapshot.created.count, 1, "never a second post.create")
+        XCTAssertEqual(h.remote.snapshot.updated.map(\.0), ["landed-1"])
+    }
+
+    /// A post.create that may have been carried out (no answer, or a server error) is looked for before the next one; a
+    /// refusal that provably created nothing is not.
+    func testCreateOutcomeIsUnknownWithoutAnAnswerOrOnAServerError() {
+        let unknown: [RemoteError] = [.offline, .network(code: -1001, detail: "timed out"), .cancelled,
+                                      .server(status: 500), .server(status: 503), .server(status: 504)]
+        for error in unknown { XCTAssertTrue(DraftService.createOutcomeUnknown(error), "\(error)") }
+        let refused: [RemoteError] = [.edgeBlocked(retryAfter: nil), .rateLimited(retryAfter: nil), .csrfUnavailable,
+                                      .unauthorized, .invalidRequest("x")]
+        for error in refused { XCTAssertFalse(DraftService.createOutcomeUnknown(error), "\(error)") }
+    }
+
+    /// A turned-off account never writes: its draft (reachable from search before it was hidden there) is not sent.
+    func testDraftOfADisabledAccountIsNeverSent() async throws {
+        let h = harness!
+        let draft = h.drafts.createDraft(accountID: h.account.id)
+        draft.title = "T"
+        draft.orderedBlocks[0].text = "x"
+        h.account.enabled = false
+        h.store.save()
+        let result = await h.drafts.send(draftID: draft.id, publish: true)
+        XCTAssertEqual(result.failureValue, .invalidRequest(DraftService.disabledAccountMessage))
+        XCTAssertTrue(h.remote.snapshot.created.isEmpty)
+    }
+
+    /// …nor reads one of its posts into a new draft (「編集」).
+    func testPostOfADisabledAccountIsNeverImported() async throws {
+        let h = harness!
+        h.remote.with { $0.editable = self.publishedEditable() }
+        h.account.enabled = false
+        h.store.save()
+        do {
+            _ = try await h.drafts.importRemotePost(postID: "post-1", accountID: h.account.id)
+            XCTFail("imported as a turned-off account")
+        } catch {
+            XCTAssertEqual(error as? RemoteError, .invalidRequest(DraftService.disabledAccountMessage))
+        }
+        XCTAssertEqual(h.remote.snapshot.editableCalls, 0)
+    }
+
+    /// Two 編集 taps on a post that is still being imported make one local draft.
+    func testSecondEditOfAPostBeingImportedJoinsTheFirst() async throws {
+        let h = harness!
+        h.remote.with {
+            $0.editable = self.publishedEditable()
+            $0.editableDelayNanoseconds = 100_000_000
+        }
+        let first = Task { try await h.drafts.importRemotePost(postID: "post-1", accountID: h.account.id).id }
+        let second = Task { try await h.drafts.importRemotePost(postID: "post-1", accountID: h.account.id).id }
+        let ids = try await [first.value, second.value]
+        XCTAssertEqual(ids[0], ids[1])
+        XCTAssertEqual(h.store.fetch(FetchDescriptor<Draft>()).count, 1)
+        XCTAssertEqual(h.remote.snapshot.editableCalls, 1)
+    }
+
     // MARK: Plan picker fidelity
 
     func testImportSelectsThePlanMatchingTheFee() async throws {
@@ -461,6 +830,50 @@ final class FixCreatorTests: XCTestCase {
         XCTAssertEqual(CreatorFormatting.monthKey(lateAugustUTC), FanboxDateParser.monthKey(lateAugustUTC))
     }
 
+    /// A dashboard refresh where one source failed keeps that metric's value from earlier this month, and the failure
+    /// shows in Creator Mode instead of a silent 取得不可. It is not a failed sync: no Home banner, and a refused source
+    /// does not expire the session the other sources just used.
+    func testDashboardMetricThatCouldNotBeReadKeepsItsValue() async throws {
+        let h = harness!
+        h.store.upsertDashboard(RemoteCreatorDashboard(month: "2026-09", supporterCount: 12, earnings: 12_300, postCount: 4),
+                                account: h.account.context)
+        var partial = RemoteCreatorDashboard(month: "2026-09", supporterCount: 13, earnings: nil, postCount: 5)
+        partial.partialError = .unauthorized
+        partial.failedMetrics = [.earnings]
+        h.remote.with { $0.dashboard = partial }
+        let engine = SyncEngine(store: h.store, remote: CreatorMockProvider(source: h.remote), settings: h.settings, network: h.network)
+        var expired: [String] = []
+        engine.onSessionExpired = { expired.append($0) }
+        let outcome = await engine.sync(.creatorDashboard, accountID: h.account.id, reason: .userRefresh)
+        XCTAssertNil(outcome.error)
+        XCTAssertEqual(outcome.partialError, .unauthorized)
+        XCTAssertNil(engine.lastError)
+        XCTAssertTrue(expired.isEmpty)
+        XCTAssertNotEqual(h.store.account(id: h.account.id)?.sessionState, .expired)
+        let state = h.store.syncState(accountID: h.account.id, resource: .creatorDashboard)
+        XCTAssertNotNil(state.error)
+        XCTAssertNotNil(state.lastSuccessfulSync)
+        let snapshot = try XCTUnwrap(h.store.fetch(FetchDescriptor<CreatorDashboardSnapshot>()).first)
+        XCTAssertEqual(snapshot.earnings, 12_300)
+        XCTAssertEqual(snapshot.earningsSourceRaw, MetricSource.actual.rawValue)
+        XCTAssertEqual(snapshot.supporterCount, 13)
+        XCTAssertEqual(snapshot.postCount, 5)
+    }
+
+    /// A source that answered without a value (nothing failed) makes the metric unavailable: an earlier value is not
+    /// shown as this refresh's actual value (SPEC §17).
+    func testDashboardMetricWithoutAValueBecomesUnavailable() throws {
+        let h = harness!
+        h.store.upsertDashboard(RemoteCreatorDashboard(month: "2026-09", supporterCount: 12, earnings: 12_300, postCount: 4),
+                                account: h.account.context)
+        h.store.upsertDashboard(RemoteCreatorDashboard(month: "2026-09", supporterCount: nil, earnings: 13_000, postCount: 4),
+                                account: h.account.context)
+        let snapshot = try XCTUnwrap(h.store.fetch(FetchDescriptor<CreatorDashboardSnapshot>()).first)
+        XCTAssertNil(snapshot.supporterCount)
+        XCTAssertEqual(snapshot.supporterCountSourceRaw, MetricSource.unavailable.rawValue)
+        XCTAssertEqual(snapshot.earnings, 13_000)
+    }
+
     func testWebReconcileAndCapabilities() {
         XCTAssertTrue(CreatorWebReconcile.needsManagedPostsResync(
             WebSessionRequest(accountID: "a", destination: .managePostEditor(postID: "1"), purpose: .fallback(reason: "x"))))
@@ -578,7 +991,7 @@ final class FixCreatorFanboxRoundTripTests: XCTestCase {
         XCTAssertTrue(body.contains("name=\"status\"\r\n\r\narchived\r\n"), "a published post only moves to published / archived")
         XCTAssertFalse(body.contains("name=\"status\"\r\n\r\ndraft\r\n"))
         XCTAssertEqual(draft.status, .readyToPublish)
-        XCTAssertEqual(draft.remoteStatus, .unknown, "archived is not modelled; a later take-down asks again")
+        XCTAssertEqual(draft.remoteStatus, .archived, "taken down: the next action saves it without publishing")
     }
 
     func testEditedStyledParagraphKeepsShiftedStyles() async throws {
@@ -613,6 +1026,11 @@ final class FixCreatorFanboxRoundTripTests: XCTestCase {
         let body = try XCTUnwrap(h.updateBodies.last)
         XCTAssertTrue(body.contains("name=\"commentingPermissionScope\"\r\n\r\nsupporters\r\n"))
         XCTAssertTrue(body.contains("name=\"tags\"\r\n\r\n[\"既存タグ\"]\r\n"))
+
+        // FANBOX now holds exactly the tags and comment setting that were sent: later updates do not warn again.
+        XCTAssertFalse(draft.tagsUnverified)
+        XCTAssertEqual(draft.commentPermission, .supporters)
+        XCTAssertEqual(try XCTUnwrap(h.drafts.plan(draftID: draft.id, publish: true)).warnings, [])
     }
 
     func testUnsupportedContentBlocksNativeUpdate() async throws {

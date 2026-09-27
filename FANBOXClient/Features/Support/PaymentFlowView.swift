@@ -105,7 +105,8 @@ struct PaymentFlowView: View {
                 }
             }
             Section {
-                if plans.isEmpty {
+                // Rows from support listings may be shown while the full list loads, or after it could not be read.
+                if plans.isEmpty || isLoadingPlans || planLoadError != nil {
                     if isLoadingPlans {
                         HStack(spacing: 8) {
                             ProgressView()
@@ -341,12 +342,13 @@ struct PaymentFlowView: View {
                 step = preselectedAccountID == nil ? .account : .profile
             }
         }
-        if plans.isEmpty {
+        // Plan rows from support listings hold only the supported plans: read the full list once for this creator.
+        if plans.isEmpty || !env.store.hasFetchedPlanList(creatorID: creatorID) {
             await loadPlans()
         }
     }
 
-    /// Local plans first; only when none are cached ask SyncEngine for this creator's plans.
+    /// Local plans first; asks SyncEngine for this creator's plans when none are cached or the full list was never read.
     private func loadPlans() async {
         guard !isLoadingPlans else { return }
         guard let accountID = selectedAccountID ?? preselectedAccountID ?? env.store.mainAccount()?.id ?? enabledAccounts.first?.id else {

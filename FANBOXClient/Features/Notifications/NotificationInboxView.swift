@@ -90,7 +90,7 @@ struct NotificationInboxView: View {
 
     private var newslettersList: some View {
         let accountsByID = Dictionary(accounts.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        let filter = effectiveFilter
+        let filter = effectiveFilter.forNewsletters
         let visible = newsletters.filter {
             filter.matches(type: .newsletter, accountIDs: $0.accountIDs, isRead: $0.isRead)
         }
@@ -188,7 +188,7 @@ struct NotificationInboxView: View {
                 !$0.isRead && enabledOnly.matches(type: .newsletter, accountIDs: $0.accountIDs, isRead: $0.isRead)
             }.count
         }
-        return unread > 0 ? "\(seg.title) (\(unread))" : seg.title
+        return unread > 0 ? "\(seg.title)（\(unread)）" : seg.title
     }
 
     private func accountFilterMenu(accountsByID: [String: Account]) -> some View {
@@ -231,7 +231,10 @@ struct NotificationInboxView: View {
         case .notifications:
             return unreadEvents.contains { filter.matches($0) }
         case .newsletters:
-            return newsletters.contains { !$0.isRead && filter.matches(type: .newsletter, accountIDs: $0.accountIDs, isRead: $0.isRead) }
+            let newsletterFilter = filter.forNewsletters
+            return newsletters.contains {
+                !$0.isRead && newsletterFilter.matches(type: .newsletter, accountIDs: $0.accountIDs, isRead: $0.isRead)
+            }
         }
     }
 

@@ -77,6 +77,11 @@ final class WebFetchHost: NSObject, WKNavigationDelegate {
     private var loadWaiters: [CheckedContinuation<Void, Error>] = []
     private var loadGeneration = 0
     private var mainFrameStatus: Int?
+    /// The load + verification in progress: later callers join it instead of navigating the page again under it.
+    private var readyTask: Task<WebPageMetadata?, Error>?
+    /// Set by `shutdown`: the host is gone for good and never creates a WebView again (a fetch that was waiting when it
+    /// was shut down must not bring back a page nothing can tear down).
+    private(set) var isShutDown = false
 
     init(account: WebFetchAccount, webSessions: WebSessionStore, policy: NetworkPolicyStore) {
         self.account = account
@@ -89,16 +94,46 @@ final class WebFetchHost: NSObject, WKNavigationDelegate {
         return Date().timeIntervalSince(readyAt) < Self.pageMaxAge
     }
 
+    /// A verified page is loaded, possibly older than `pageMaxAge`: while other fetches run in it, it is still used rather
+    /// than reloaded under them.
+    var hasVerifiedPage: Bool { readyAt != nil && webView != nil }
+
+    /// A fetch runs in the page as it is (no load first): the page is fresh, or it is a verified page past its age that
+    /// other fetches still run in (`inUse` counts the caller too). A page being (re)loaded is not verified: it is joined.
+    var usesPageAsIs: Bool { Self.pageUsableAsIs(isFresh: isReady, isVerified: hasVerifiedPage, fetchesInUse: inUse) }
+
+    /// Reloading an aged page under running fetches would navigate away under them; the next fetch that finds it idle
+    /// reloads it.
+    nonisolated static func pageUsableAsIs(isFresh: Bool, isVerified: Bool, fetchesInUse: Int) -> Bool {
+        isFresh || (isVerified && fetchesInUse > 1)
+    }
+
     // MARK: - Ready
 
-    /// Loads https://www.fanbox.cc/ (if needed) and verifies the page's logged-in user. Returns the page metadata.
+    /// Loads https://www.fanbox.cc/ (if needed) and verifies the page's logged-in user. Returns the page metadata (nil when
+    /// the page is used as it is, or when this call joined a load another caller started).
     @discardableResult
     func ensureReady() async throws -> WebPageMetadata? {
-        if isReady { return nil }
+        if usesPageAsIs { return nil }
+        guard !isShutDown else { throw WebFetchHostError.processTerminated }
+        if let readyTask {
+            _ = try await readyTask.value
+            return nil
+        }
+        // Unverified from now on (decided with no suspension since `usesPageAsIs`): a fetch arriving meanwhile joins this
+        // load instead of starting in the page about to be navigated.
         readyAt = nil
         pageCSRFToken = nil
+        let task = Task { @MainActor in try await self.loadAndVerify() }
+        readyTask = task
+        defer { if readyTask == task { readyTask = nil } }
+        return try await task.value
+    }
+
+    private func loadAndVerify() async throws -> WebPageMetadata? {
+        guard !isShutDown else { throw WebFetchHostError.processTerminated }
         try await loadHome()
-        guard let webView else { throw WebFetchHostError.processTerminated }
+        guard let webView, !isShutDown else { throw WebFetchHostError.processTerminated }
         if let status = mainFrameStatus, !(200..<300).contains(status) { throw WebFetchHostError.challenged(status) }
         guard let metadata = await WebPageInspector.inspect(webView) else { throw WebFetchHostError.challenged(nil) }
         if metadata.user == nil && metadata.csrfToken == nil && metadata.isLoggedIn == nil {
@@ -165,8 +200,10 @@ final class WebFetchHost: NSObject, WKNavigationDelegate {
         return windows.first(where: \.isKeyWindow) ?? windows.first
     }
 
-    /// Stops and releases the WebView (the data store itself is untouched).
+    /// Stops and releases the WebView for good (the data store itself is untouched).
     func shutdown() {
+        isShutDown = true
+        readyTask = nil
         loadGeneration += 1
         finishLoad(.failure(WebFetchHostError.processTerminated))
         webView?.stopLoading()
@@ -182,7 +219,7 @@ final class WebFetchHost: NSObject, WKNavigationDelegate {
     /// Runs one request inside the page. `csrfToken` is added as `x-csrf-token` for writes.
     /// - Throws: `RemoteError.edgeBlocked` (TypeError while the network is up), `.offline`, `.network` (timeout / unknown).
     func fetch(_ request: HTTPRequest, csrfToken: String?) async throws -> WebFetchRawResult {
-        guard let webView, isReady else { throw WebFetchHostError.processTerminated }
+        guard let webView, hasVerifiedPage else { throw WebFetchHostError.processTerminated }
         var headers: [String: String] = [:]
         for (name, value) in request.headers where Self.isForwardedHeader(name) { headers[name] = value }
         if request.requiresCSRF {
@@ -209,7 +246,7 @@ final class WebFetchHost: NSObject, WKNavigationDelegate {
             throw RemoteError.network(code: -1, detail: "WebView transport returned no result")
         }
         if let name = object["error"] as? String {
-            throw mapScriptError(name)
+            throw Self.mapScriptError(name, policy: policy.current)
         }
         if (object["type"] as? String) == "opaqueredirect" {
             throw RemoteError.invalidRequest("FANBOXが書き込みをリダイレクトしました")
@@ -222,14 +259,20 @@ final class WebFetchHost: NSObject, WKNavigationDelegate {
         return WebFetchRawResult(status: status, headers: responseHeaders, body: body, url: url)
     }
 
-    private func mapScriptError(_ name: String) -> RemoteError {
+    /// Error names reported by `fetchScript`. A rejected `fetch()` (TypeError) is either a CORS-less edge answer (Cloudflare
+    /// 403 / 429, which reaches JavaScript only as "Failed to fetch") or no connection at all (reset, DNS, Wi-Fi without
+    /// internet): the script tells them apart by reaching the page's own origin (`EdgeBlocked` / `NetworkError`).
+    nonisolated static func mapScriptError(_ name: String, policy snapshot: NetworkPolicySnapshot) -> RemoteError {
+        let online = snapshot.allowsNetwork && snapshot.pathSatisfied
         switch name {
         case "AbortError", "TimeoutError":
             return .network(code: URLError.timedOut.rawValue, detail: "WebView fetch timeout")
-        case "TypeError":
-            // A CORS-less edge answer (Cloudflare 403 / 429) reaches JavaScript only as "Failed to fetch".
-            let snapshot = policy.current
-            return snapshot.allowsNetwork && snapshot.pathSatisfied ? .edgeBlocked(retryAfter: nil) : .offline
+        case "EdgeBlocked", "TypeError":
+            return online ? .edgeBlocked(retryAfter: nil) : .offline
+        case "NetworkError":
+            // Nothing is reachable from the page: a network failure (a read goes through the native transport), never a
+            // block by FANBOX's edge.
+            return online ? .network(code: URLError.networkConnectionLost.rawValue, detail: "WebView fetch failed") : .offline
         default:
             return .network(code: -1, detail: "WebView fetch \(name.prefix(40))")
         }
@@ -265,7 +308,21 @@ final class WebFetchHost: NSObject, WKNavigationDelegate {
       return JSON.stringify({ status: response.status, type: response.type, url: response.url, headers: outHeaders,
                               body: btoa(binary) });
     } catch (e) {
-      return JSON.stringify({ error: (e && e.name) ? String(e.name) : 'Error' });
+      const name = (e && e.name) ? String(e.name) : 'Error';
+      if (name === 'TypeError' && !controller.signal.aborted) {
+        // "Failed to fetch": a CORS-less edge answer, or no connection at all. The page's own origin tells them apart.
+        const probe = new AbortController();
+        const probeTimer = setTimeout(() => probe.abort(), 5000);
+        try {
+          await fetch('/robots.txt', { method: 'HEAD', credentials: 'same-origin', cache: 'no-store', signal: probe.signal });
+          return JSON.stringify({ error: 'EdgeBlocked' });
+        } catch (_) {
+          return JSON.stringify({ error: 'NetworkError' });
+        } finally {
+          clearTimeout(probeTimer);
+        }
+      }
+      return JSON.stringify({ error: name });
     } finally {
       clearTimeout(timer);
     }
@@ -443,8 +500,15 @@ final class WebFetchHostPool: WebFetching {
             host.lastUsed = Date()
             scheduleIdleTeardown()
         }
-        if !host.isReady {
+        // A page past its age that other fetches are still running in is used as it is (`ensureReady` decides again after
+        // the session is prepared); a page being loaded is joined.
+        if !host.usesPageAsIs {
             await prepareSession?(accountID)
+            // Shut down while the session was prepared (background, Offline, memory warning, logout): this host is gone and
+            // must not load a page nothing could tear down any more.
+            guard hosts[accountID] === host, isForeground, !host.isShutDown else {
+                throw WebFetchError.unavailable("web transport shut down")
+            }
             do {
                 if let metadata = try await host.ensureReady(), let ua = metadata.userAgent {
                     await storeUserAgent(ua, accountID: accountID)

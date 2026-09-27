@@ -80,9 +80,11 @@ struct OfflineLibraryView: View {
             Text("画像・添付ファイルが削除されます。投稿本文・コメントなどのテキストは残ります。")
         }
         .sheet(isPresented: $isPickingCreator) { OfflineCreatorPicker() }
+        .closesOnNotificationRoute($isPickingCreator)
         .fullScreenCover(item: $viewer) { selection in
             ImageViewer(items: selection.items, startIndex: selection.index)
         }
+        .closesOnNotificationRoute($viewer)
         .refreshable {
             if segment == .creators { await env.offline.refreshCreatorRules() }
             env.media.refreshUsage()
@@ -175,6 +177,38 @@ enum OfflineLibraryIndex {
         }
         return (names, titles)
     }
+
+    /// The picture (image block or cover of the post, with all its URLs, the post's creator and the account that loads its
+    /// media) each cached image URL of `entries` belongs to, from one PostBlock fetch and one Post fetch.
+    static func pictures(for entries: [OfflineImageItem], store: LocalStore) -> [String: ImageViewerItem] {
+        let postIDs = Array(Set(entries.compactMap(\.postID)))
+        guard !postIDs.isEmpty else { return [:] }
+        let disabled = store.disabledAccountIDs()
+        var result: [String: ImageViewerItem] = [:]
+        var owners: [String: (creatorID: String, accountID: String?)] = [:]
+        func add(_ picture: ImageViewerItem, postID: String) {
+            var picture = picture
+            picture.postID = postID
+            picture.creatorID = owners[postID]?.creatorID
+            picture.accountID = owners[postID]?.accountID
+            for url in picture.urls.values where result[url] == nil { result[url] = picture }
+        }
+        let posts = store.fetch(FetchDescriptor<Post>(predicate: #Predicate { postIDs.contains($0.postID) }))
+        for post in posts {
+            owners[post.postID] = (post.creatorID, OfflineLibraryService.mediaAccount(for: post, excluding: disabled))
+        }
+        let image = PostBlockKind.image.rawValue
+        for block in store.fetch(FetchDescriptor<PostBlock>(predicate: #Predicate {
+            postIDs.contains($0.postID) && $0.kindRaw == image
+        })) {
+            add(ImageViewerItem(block: block), postID: block.postID)
+        }
+        for post in posts {
+            guard let cover = post.coverImageURL, !cover.isEmpty else { continue }
+            add(ImageViewerItem(id: "cover.\(post.postID)", resizedURL: cover), postID: post.postID)
+        }
+        return result
+    }
 }
 
 /// "保存中 42%" / cached size / "本文未取得" line for an offline post.
@@ -241,28 +275,45 @@ struct OfflineImageItem: Hashable, Identifiable {
     var variant: MediaVariant
     var postID: String?
     var isPinned: Bool
+    /// The picture of the post this file is a variant of (`OfflineLibraryIndex.pictures`): the viewer gets all of its
+    /// URLs (「写真に保存」 then saves the original, not the 1200 px sample).
+    var picture: ImageViewerItem? = nil
+    /// Other cached files of the same tile (e.g. the original next to the display image): deleted together.
+    var otherKeys: [String] = []
     var id: String { key }
 
     var viewerItem: ImageViewerItem {
-        ImageViewerItem(id: key,
-                        thumbnailURL: variant == .thumbnail ? url : nil,
-                        displayURL: variant == .display ? url : nil,
-                        originalURL: variant == .original ? url : nil)
+        picture ?? ImageViewerItem(id: key,
+                                   thumbnailURL: variant == .thumbnail ? url : nil,
+                                   displayURL: variant == .display ? url : nil,
+                                   originalURL: variant == .original ? url : nil)
     }
 
-    /// Saved post images: display / original entries (thumbnails only when nothing larger exists for the post),
-    /// deduplicated by URL, in the input order.
-    static func gallery(_ entries: [OfflineImageItem]) -> [OfflineImageItem] {
-        var seenURLs = Set<String>()
+    /// Saved post images, one tile per picture: the display / original / thumbnail files of one image block (or cover)
+    /// share a tile, other files are deduplicated by URL. Thumbnails get a tile only when nothing larger exists for the
+    /// post. In the input order.
+    static func gallery(_ entries: [OfflineImageItem], pictures: [String: ImageViewerItem] = [:]) -> [OfflineImageItem] {
+        var tiles: [String: Int] = [:]
         var postsWithLarge = Set<String>()
         var result: [OfflineImageItem] = []
+        func place(_ entry: OfflineImageItem, newTile: Bool) {
+            var entry = entry
+            if let picture = pictures[entry.url], picture.postID == entry.postID { entry.picture = picture }
+            let tile = entry.picture.map { "picture:\($0.id)" } ?? "url:\(entry.url)"
+            if let index = tiles[tile] {
+                result[index].otherKeys.append(entry.key)
+                if entry.isPinned { result[index].isPinned = true }
+            } else if newTile {
+                tiles[tile] = result.count
+                result.append(entry)
+            }
+        }
         for entry in entries where entry.variant != .thumbnail {
-            if seenURLs.insert(entry.url).inserted { result.append(entry) }
+            place(entry, newTile: true)
             if let postID = entry.postID { postsWithLarge.insert(postID) }
         }
         for entry in entries where entry.variant == .thumbnail {
-            guard let postID = entry.postID, !postsWithLarge.contains(postID) else { continue }
-            if seenURLs.insert(entry.url).inserted { result.append(entry) }
+            place(entry, newTile: entry.postID.map { !postsWithLarge.contains($0) } ?? false)
         }
         return result
     }
@@ -297,9 +348,10 @@ struct OfflineImagesSection: View {
     }
 
     var body: some View {
-        let items = OfflineImageItem.gallery(entries.map {
+        let files = entries.map {
             OfflineImageItem(key: $0.key, url: $0.url, variant: $0.variant, postID: $0.postID, isPinned: $0.isPinned)
-        })
+        }
+        let items = OfflineImageItem.gallery(files, pictures: OfflineLibraryIndex.pictures(for: files, store: env.store))
         let rows = OfflineImageItem.rows(items, columns: Self.columns)
         Section {
             if items.isEmpty {
@@ -362,7 +414,7 @@ struct OfflineImagesSection: View {
                 }
             }
             Button("この画像を削除", systemImage: "trash", role: .destructive) {
-                env.media.removeEntry(key: item.key)
+                for key in [item.key] + item.otherKeys { env.media.removeEntry(key: key) }
             }
         }
     }
@@ -480,6 +532,8 @@ private struct OfflineFileRow: View {
     let displayName: String
     let postTitle: String?
     let fileURL: URL
+    /// The file under its real name (the cache names files by hash), made when the row appears.
+    @State private var sharedURL: URL?
 
     private var icon: String {
         switch item.kind {
@@ -508,11 +562,15 @@ private struct OfflineFileRow: View {
                 .foregroundStyle(.secondary)
             }
             Spacer()
-            ShareLink(item: fileURL) {
+            ShareLink(item: sharedURL ?? fileURL) {
                 Image(systemName: "square.and.arrow.up")
             }
             .buttonStyle(.borderless)
             .accessibilityLabel(Text("共有"))
+        }
+        .task(id: fileURL) {
+            let source = fileURL, name = displayName
+            sharedURL = await Task.detached(priority: .utility) { MediaFileCache.namedLink(to: source, fileName: name) }.value
         }
     }
 }

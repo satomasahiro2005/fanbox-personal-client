@@ -219,6 +219,25 @@ final class FixTransportAccountIdentityTests: XCTestCase {
         XCTAssertNil(afterRemove)
     }
 
+    /// Turning an account off stops its in-flight requests (a sync that was already running must not store or announce
+    /// results for it); unlike a logout, the credential is kept for when it is turned on again.
+    func testDisablingAnAccountRevokesItsInFlightWorkAndKeepsTheCredential() async throws {
+        let a = try await makeAccount(pixivUserID: "1001", name: "Alice")
+        service.setEnabled(accountID: a.id, false)
+        var spins = 0
+        while revoker.calls.isEmpty && spins < 10_000 {
+            spins += 1
+            await Task.yield()
+        }
+        XCTAssertEqual(revoker.calls.map { $0.accountID }, [a.id])
+        let kept = await credentials.credential(for: a.id)
+        XCTAssertEqual(kept, oldCredential)
+
+        service.setEnabled(accountID: a.id, true)
+        for _ in 0..<100 { await Task.yield() }
+        XCTAssertEqual(revoker.calls.count, 1, "turning it on again revokes nothing")
+    }
+
     func testInterruptedProbeCredentialsArePurged() async throws {
         let a = try await makeAccount(pixivUserID: "1001", name: "Alice")
         try await credentials.save(oldCredential, for: AccountService.probeKeyPrefix + "stale")

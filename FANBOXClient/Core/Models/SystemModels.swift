@@ -26,6 +26,9 @@ final class NotificationEvent {
     var isRead: Bool
     /// A local iOS notification has been posted for this event.
     var deliveredLocally: Bool
+    /// Set when the event was handed to the notification pipeline for a banner that has not been posted yet; cleared once
+    /// it is posted or no longer due. An app suspended / ended before the banner went out delivers it later.
+    var deliveryPendingSince: Date?
     var priorityRaw: Int
 
     init(id: String, type: NotificationEventType, accountIDs: [String], title: String, message: String, timestamp: Date,

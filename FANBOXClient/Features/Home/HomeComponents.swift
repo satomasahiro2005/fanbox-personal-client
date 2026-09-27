@@ -40,6 +40,19 @@ struct HomeFlowLayout: Layout {
     }
 }
 
+/// Paging of a local list whose last filter step runs in memory after a bounded fetch (e.g. the Home account filter).
+enum HomeFeedPaging {
+    /// Pages read without asking while nothing matches. Each step refetches every row read so far, so a filter that
+    /// matches nothing stops here and shows its empty state with さらに表示.
+    static let automaticPages = 3
+
+    /// Nothing of the fetched rows matched, but the fetch was full (older stored rows exist): read the next page instead
+    /// of reporting "no matching posts" — automatically up to `automaticPages` pages.
+    static func needsNextPage(visibleCount: Int, fetchedCount: Int, limit: Int, pageSize: Int) -> Bool {
+        visibleCount == 0 && fetchedCount >= limit && limit < automaticPages * pageSize
+    }
+}
+
 /// Feed / detail date text: relative for the last week, absolute otherwise.
 enum HomeDateText {
     static func format(_ date: Date, now: Date = .now) -> String {

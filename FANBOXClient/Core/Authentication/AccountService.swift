@@ -114,6 +114,9 @@ final class AccountService {
     @ObservationIgnored var sessionRevoker: SessionRevoking?
     /// Called after the set of enabled accounts changed (enable / disable / remove), e.g. to refresh the app badge.
     @ObservationIgnored var onEnabledAccountsChanged: (() -> Void)?
+    /// Called by `remove` before the account's rows are deleted: stops and awaits the account's running syncs and reply
+    /// sends. Wired by AppEnvironment.
+    @ObservationIgnored var prepareRemoval: ((String) async -> Void)?
 
     /// Temporary credential keys used to verify a captured session before it is stored for an account.
     static let probeKeyPrefix = "login-probe-"
@@ -422,6 +425,9 @@ final class AccountService {
         let context = store.context
         // Stop in-flight requests first: a late answer must not write cookies / rows for the removed account.
         await sessionRevoker?.revokeSession(accountID: accountID)
+        // Running syncs / reply sends of the account finish (cancelled) before its rows are deleted: a write to a deleted
+        // row is fatal, and a late result would recreate rows for the removed account.
+        await prepareRemoval?(accountID)
         guard store.account(id: accountID) != nil else { return }
 
         // Account-scoped rows.
@@ -466,6 +472,11 @@ final class AccountService {
         for post in store.fetch(FetchDescriptor<Post>()) {
             if post.accessAccountIDs.contains(accountID) { post.accessAccountIDs.removeAll { $0 == accountID } }
             if post.seenByAccountIDs.contains(accountID) { post.seenByAccountIDs.removeAll { $0 == accountID } }
+            post.backfillFeedListings()
+            if post.homeListedByAccountIDs?.contains(accountID) == true { post.homeListedByAccountIDs?.removeAll { $0 == accountID } }
+            if post.supportingListedByAccountIDs?.contains(accountID) == true {
+                post.supportingListedByAccountIDs?.removeAll { $0 == accountID }
+            }
             if post.detailAccountID == accountID { post.detailAccountID = nil }
             if let flags = creatorFlags[post.creatorID] {
                 if !flags.supported && post.isFromSupportedCreator { post.isFromSupportedCreator = false }
@@ -487,6 +498,8 @@ final class AccountService {
         identityWarnings[accountID] = nil
         if wasMain { assignMainIfNeeded() }
         store.save()
+        // Posts only the removed account's feeds listed (creator relation never stored) leave the timeline too.
+        store.refreshRelationFlags(recomputeAllPosts: true)
         onEnabledAccountsChanged?()
         AppLog.auth.info("account removed \(accountID, privacy: .public)")
 
@@ -538,11 +551,17 @@ final class AccountService {
         }
         store.save()
         if changed { enabledAccountsChanged() }
+        if changed && !enabled {
+            // Stop the account's in-flight requests: a sync that was already running must not store results for (or
+            // announce) an account the user just turned off. The credential is kept.
+            let revoker = sessionRevoker
+            Task { await revoker?.revokeSession(accountID: accountID) }
+        }
     }
 
     /// Re-derives the creator / feed relation flags (they count enabled accounts only) and notifies the observer.
     private func enabledAccountsChanged() {
-        store.refreshRelationFlags()
+        store.refreshRelationFlags(recomputeAllPosts: true)
         onEnabledAccountsChanged?()
     }
 
@@ -604,6 +623,12 @@ final class AccountService {
     func checkSession(accountID: String) async -> SessionCheckResult {
         guard let account = store.account(id: accountID) else { return .unchanged(reason: "アカウントが見つかりません") }
         if Self.isPlaceholder(account) { return .unchanged(reason: "ログインが完了していません") }
+        // Logged out / quarantined: the credential was deleted, so a check could only send a guest request (and would
+        // turn a logout into "expired", or clear a quarantine). Both states end only with a verified login.
+        if account.kind == .fanbox, account.sessionState == .loggedOut { return .updated(.loggedOut) }
+        if account.kind == .fanbox, account.sessionState == .error {
+            return .unchanged(reason: "別のpixivアカウントのセッションを検出したため同期を止めています")
+        }
         let context = account.context
         let source = remote.dataSource(for: context)
         validatingAccountIDs.insert(accountID)
@@ -639,7 +664,10 @@ final class AccountService {
             account.sessionCheckedAt = .now
             result = .updated(account.sessionState)
         case .failure(let error):
-            if let state = Self.sessionState(for: error) {
+            if account.sessionState == .error || account.sessionState == .loggedOut {
+                // Quarantined or logged out while the check ran: only a verified login ends these states.
+                result = .updated(account.sessionState)
+            } else if let state = Self.sessionState(for: error) {
                 account.sessionState = state
                 account.sessionCheckedAt = .now
                 result = .updated(state)
@@ -681,9 +709,11 @@ final class AccountService {
         }
     }
 
-    /// Validates every enabled account (sequentially; each is a single lightweight request).
+    /// Validates every enabled account (sequentially; each is a single lightweight request). Logged-out and quarantined
+    /// accounts have no session to check.
     func validateAllSessions() async {
-        for account in store.accounts() where !Self.isPlaceholder(account) {
+        for account in store.accounts() where !Self.isPlaceholder(account)
+            && !(account.kind == .fanbox && (account.sessionState == .loggedOut || account.sessionState == .error)) {
             await validateSession(accountID: account.id)
         }
     }
@@ -795,6 +825,10 @@ final class AccountService {
         let webProfileID = account.webProfileID
         if await webSessions.hasSessionCookie(webProfileID: webProfileID) { return }
         guard let credential = await credentials.credential(for: accountID), credential.hasSessionCookie else { return }
+        // Logged out / removed / quarantined while the credential was read: its cleared web store never gets it back.
+        guard let current = store.account(id: accountID), current.sessionState != .loggedOut, current.sessionState != .error else {
+            return
+        }
         await webSessions.install(credential, webProfileID: webProfileID)
     }
 

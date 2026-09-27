@@ -142,6 +142,7 @@ struct CreatorDetailView: View {
                 CreatorMemoEditor(creator: creator)
             }
         }
+        .closesOnNotificationRoute($isEditingMemo)
     }
 
     private func toggleFavorite() {
@@ -210,6 +211,7 @@ struct CreatorDetailHeader: View {
                 let items = CreatorHeaderImage.viewerItems(iconURL: creator?.iconURL, coverURL: creator?.coverImageURL)
                 ImageViewer(items: items, startIndex: CreatorHeaderImage.startIndex(of: tapped, in: items), creatorID: creatorID)
             }
+            .closesOnNotificationRoute($viewer)
 
             VStack(alignment: .leading, spacing: 6) {
                 HStack(alignment: .firstTextBaseline) {

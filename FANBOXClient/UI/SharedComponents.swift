@@ -18,11 +18,22 @@ enum Formatters {
         date.formatted(.dateTime.hour().minute())
     }
 
+    /// "3時間前" / "2日後": no space between the number and the Japanese (the system formatter writes "3 時間前"), the same
+    /// wording as the notification inbox.
     static func relative(_ date: Date, now: Date = .now) -> String {
-        let f = RelativeDateTimeFormatter()
-        f.locale = Locale(identifier: "ja_JP")
-        f.unitsStyle = .short
-        return f.localizedString(for: date, relativeTo: now)
+        let seconds = now.timeIntervalSince(date)
+        let distance = abs(seconds)
+        if distance < 60 { return "たった今" }
+        let suffix = seconds >= 0 ? "前" : "後"
+        let minutes = Int(distance / 60)
+        if minutes < 60 { return "\(minutes)分\(suffix)" }
+        let hours = minutes / 60
+        if hours < 24 { return "\(hours)時間\(suffix)" }
+        let days = hours / 24
+        if days < 7 { return "\(days)日\(suffix)" }
+        if days < 30 { return "\(days / 7)週間\(suffix)" }
+        if days < 365 { return "\(days / 30)か月\(suffix)" }
+        return "\(days / 365)年\(suffix)"
     }
 
     static func bytes(_ count: Int64) -> String {

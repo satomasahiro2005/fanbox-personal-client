@@ -74,6 +74,33 @@ final class OfflineLibraryServiceTests: XCTestCase {
         XCTAssertFalse(entries.contains(where: \.isPinned))
     }
 
+    /// Offline解除 while the save is still downloading: nothing stays pinned for a post that is not saved.
+    func testReleasingAPostWhileItIsBeingSavedLeavesNothingPinned() async throws {
+        let post = makeRichPost()
+        h.http.delay = .milliseconds(100)
+        let saving = Task { await offline.save(postID: "p1") }
+        var spins = 0
+        while h.http.downloadCount == 0 && spins < 100_000 { spins += 1; await Task.yield() }
+        offline.remove(postID: "p1")
+        _ = await saving.value
+        XCTAssertEqual(post.offlineState, OfflineState.none)
+        XCTAssertFalse(h.entries(postID: "p1").contains(where: \.isPinned))
+        // Sequential, checked before each request: at most the one in flight (and the next already started) went out.
+        XCTAssertLessThanOrEqual(h.http.downloadCount, 2, "the rest is not downloaded")
+    }
+
+    /// Media requests never carry a disabled account's session.
+    func testMediaIsNeverFetchedWithADisabledAccountsSession() {
+        let post = h.insertPost(id: "d1")
+        post.detailAccountID = "B"
+        post.accessAccountIDs = ["B", "A"]
+        h.addImageBlock(to: post, index: 0, thumbnail: nil, display: "https://img.example.com/d1.jpg", original: nil)
+        let requests = OfflineLibraryService.mediaRequests(for: post, trigger: .manual, priority: .foregroundMedia, pin: true,
+                                                           includeAttachments: false, disabledAccountIDs: ["B"])
+        XCTAssertEqual(requests.map(\.accountID), ["A"])
+        XCTAssertEqual(OfflineLibraryService.mediaAccount(for: post, excluding: []), "B")
+    }
+
     func testSaveWhileOfflineKeepsTextOnly() async throws {
         let post = makeRichPost()
         post.bodyText = "offline body"

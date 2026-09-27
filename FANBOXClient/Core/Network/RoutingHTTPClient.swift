@@ -170,6 +170,8 @@ final class RoutingHTTPClient: CredentialBackedHTTPClient, SessionRevoking, @unc
         var edgeResponse: HTTPResponse?
         var breakerRemaining: TimeInterval?
         var webUnavailable: String?
+        /// The native attempt had no CSRF token: it sent nothing.
+        var nativeHadNoToken = false
 
         for transport in plan {
             if let remaining = await gate.breakerRemaining(accountID: accountID, endpointKey: request.endpointKey, transport: transport) {
@@ -184,6 +186,7 @@ final class RoutingHTTPClient: CredentialBackedHTTPClient, SessionRevoking, @unc
                     response = try await native.send(request, accountID: accountID)
                 } catch RemoteError.csrfUnavailable where plan.last == .webView && transport != plan.last {
                     // Nothing was sent (no token for the URLSession); the page of the WebView has its own token.
+                    nativeHadNoToken = true
                     continue
                 }
                 if let edge = await classify(response, request: request, accountID: accountID, transport: .native) {
@@ -218,6 +221,9 @@ final class RoutingHTTPClient: CredentialBackedHTTPClient, SessionRevoking, @unc
         }
         if let edgeResponse { return edgeResponse }
         if let breakerRemaining { throw RemoteError.edgeBlocked(retryAfter: breakerRemaining) }
+        // Neither transport sent anything (no token for the URLSession, the page unusable): a refusal, not a network error
+        // with an unknown outcome (a reply would otherwise be flagged "maybe sent").
+        if nativeHadNoToken { throw RemoteError.csrfUnavailable }
         throw RemoteError.network(code: -1, detail: "WebView transport unavailable (\(webUnavailable ?? "no transport"))")
     }
 

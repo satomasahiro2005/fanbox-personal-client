@@ -19,14 +19,25 @@ final class Draft {
     var createdAt: Date
     var updatedAt: Date
     var publishedAt: Date?
-    /// FANBOX-side status of `remotePostID` ("published" / "draft" / "scheduled" / "unknown"), as last seen (import, pre-send
-    /// check or a successful send). nil = new post, or a draft imported before this field existed (treated as "maybe published").
+    /// FANBOX-side status of `remotePostID` ("published" / "draft" / "scheduled" / "archived" / "unknown"), as last seen
+    /// (import, pre-send check or a successful send). nil = new post, or a draft imported before this field existed (treated
+    /// as "maybe published").
     var remoteStatusRaw: String?
     /// Fee (minimum support) the FANBOX post had when imported / last sent. Used to warn about gating changes.
     var remoteFeeRequired: Int?
     /// FANBOX `updatedAt` the local copy is based on. A newer remote value means the post changed elsewhere (e.g. the web
     /// editor) and a native update would overwrite that change, so the update is refused.
     var remoteUpdatedAt: Date?
+    /// This app wrote into `remotePostID` at this time but could not read the resulting revision back: a newer revision up
+    /// to this time (plus clock tolerance) is its own write, not an edit made elsewhere (`isEditedElsewhere`).
+    var ownWriteAt: Date?
+    /// Digest of the post's content checked before that write (`RemoteEditablePost.contentDigest`) when the write left the
+    /// content as it was (media uploads). A revision inside the `ownWriteAt` window is its own only while the content is
+    /// still this. nil = the write replaced the content (a save): the window alone decides.
+    var ownWriteContent: String?
+    /// A post.create for this draft was sent at this time and its answer was lost: FANBOX may hold the empty draft it
+    /// created, which the next send adopts instead of creating a second one.
+    var createAttemptAt: Date?
     /// Comment permission read from FANBOX (`CommentPermission` raw value). nil = unknown.
     var commentPermissionRaw: String?
     /// Why this post cannot be updated natively (non-article post, scheduled post, unsupported blocks). nil = no blocker.
@@ -79,6 +90,39 @@ final class Draft {
     /// FANBOX post type (article when unknown / new).
     var remotePostType: PostType {
         remotePostTypeRaw.flatMap(PostType.init(rawValue:)) ?? .article
+    }
+}
+
+extension Draft {
+    /// Clock difference between the device and FANBOX tolerated when a revision is compared with `ownWriteAt`.
+    static let ownWriteTolerance: TimeInterval = 120
+
+    /// Whether FANBOX's current revision `updatedAt` of the linked post means it was changed elsewhere (e.g. the web
+    /// editor) since the revision this local copy is based on. A newer revision that is this app's own unread write
+    /// (`ownWriteAt`, with the content that write left as it was) is not; without any baseline nothing can be told
+    /// (legacy drafts). `contentDigest`: the post's current `RemoteEditablePost.contentDigest`.
+    func isEditedElsewhere(revision: Date?, contentDigest: String) -> Bool {
+        guard let revision else { return false }
+        if let base = remoteUpdatedAt, revision.timeIntervalSince(base) <= 1 { return false }
+        if let ownWriteAt {
+            if revision.timeIntervalSince(ownWriteAt) > Self.ownWriteTolerance { return true }
+            return ownWriteContent.map { $0 != contentDigest } ?? false
+        }
+        return remoteUpdatedAt != nil
+    }
+
+    /// This app wrote into the post and could not read the result back. `keptContent`: the content digest checked before
+    /// a write that does not change it (an upload); nil for a save.
+    func rememberOwnWrite(keptContent: String?) {
+        ownWriteAt = .now
+        ownWriteContent = keptContent
+    }
+
+    /// The revision just read is the baseline of the local copy (nothing unread of this app's own is pending).
+    func setBaseline(revision: Date?) {
+        if let revision { remoteUpdatedAt = revision }
+        ownWriteAt = nil
+        ownWriteContent = nil
     }
 }
 

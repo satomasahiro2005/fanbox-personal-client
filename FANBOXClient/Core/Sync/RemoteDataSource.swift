@@ -66,6 +66,7 @@ protocol RemoteDataSource: Sendable {
     func supportingPlanListing(account: AccountContext) async throws -> RemoteSupportListing
     func notificationBatch(account: AccountContext, cursor: String?) async throws -> RemoteNotificationBatch
     func postMetadata(id: String, account: AccountContext) async throws -> RemotePostSummary
+    func fanListing(account: AccountContext, cursor: String?) async throws -> RemoteFanListing
 }
 
 /// Chooses the remote implementation per account kind.
@@ -84,6 +85,21 @@ struct RemoteSupportListing: Sendable, Equatable {
 
     init(supports: [RemoteSupport], problem: String? = nil) {
         self.supports = supports
+        self.problem = problem
+    }
+
+    var isComplete: Bool { problem == nil }
+}
+
+/// A fan-list page together with a completeness verdict (same rule as `RemoteSupportListing`): `problem` is non-nil when
+/// the response could not be read completely (`null` list, undecodable or id-less items). An incomplete listing never
+/// marks supporters as ended: a dropped item may be any of them.
+struct RemoteFanListing: Sendable {
+    var page: RemotePage<RemoteFan>
+    var problem: String?
+
+    init(page: RemotePage<RemoteFan>, problem: String? = nil) {
+        self.page = page
         self.problem = problem
     }
 
@@ -134,6 +150,11 @@ extension RemoteDataSource {
     /// Supporting plans with a completeness verdict. Default: the plain listing, assumed complete.
     func supportingPlanListing(account: AccountContext) async throws -> RemoteSupportListing {
         RemoteSupportListing(supports: try await supportingPlans(account: account))
+    }
+
+    /// Fan-list page with a completeness verdict. Default: the plain page, assumed complete.
+    func fanListing(account: AccountContext, cursor: String?) async throws -> RemoteFanListing {
+        RemoteFanListing(page: try await fans(account: account, cursor: cursor))
     }
 
     /// Notifications plus embedded post summaries. Default: the plain page without posts.

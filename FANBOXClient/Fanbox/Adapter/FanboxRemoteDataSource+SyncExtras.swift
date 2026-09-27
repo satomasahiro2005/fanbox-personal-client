@@ -124,3 +124,60 @@ struct FanboxSupportingPlanAudit: FanboxResponseBody {
 
     static var responseSchema: [String: Set<String>] { FanboxPlanListBody.responseSchema }
 }
+
+/// A wrapped or bare list read with an element count, like `FanboxSupportingPlanAudit`, for other listings that are used
+/// to detect disappearance.
+struct FanboxAuditedList<Element: Decodable & SchemaDescribed, Key: FanboxListWrapperKey>: FanboxResponseBody {
+    var items: [Element]
+    /// Elements that were present but could not be decoded as an object.
+    var undecodableCount: Int
+    /// Non-nil when the list itself was not readable (e.g. `fans: null`).
+    var shapeProblem: String?
+
+    init(from decoder: Decoder) throws {
+        if var array = try? decoder.unkeyedContainer() {
+            (items, undecodableCount) = Self.decodeCounting(&array)
+            shapeProblem = nil
+            return
+        }
+        let container = try decoder.container(keyedBy: AnyCodingKey.self)
+        for key in Key.keys {
+            let codingKey = AnyCodingKey(key)
+            guard container.contains(codingKey) else { continue }
+            if var nested = try? container.nestedUnkeyedContainer(forKey: codingKey) {
+                (items, undecodableCount) = Self.decodeCounting(&nested)
+                shapeProblem = nil
+            } else {
+                items = []
+                undecodableCount = 0
+                shapeProblem = "\(key)が配列ではありません"
+            }
+            return
+        }
+        let found = container.allKeys.map(\.stringValue).sorted()
+        throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath,
+                                                debugDescription: "Expected an array or one of \(Key.keys) (found keys: \(found))"))
+    }
+
+    private static func decodeCounting(_ container: inout UnkeyedDecodingContainer) -> ([Element], Int) {
+        var items: [Element] = []
+        var failed = 0
+        while !container.isAtEnd {
+            if let value = try? container.decode(Element.self) {
+                items.append(value)
+            } else if (try? container.decode(JSONValue.self)) != nil {
+                failed += 1
+            } else {
+                // Could not even skip the element; count the rest as unreadable and stop.
+                failed += 1
+                break
+            }
+        }
+        return (items, failed)
+    }
+
+    static var responseSchema: [String: Set<String>] { FanboxWrappedList<Element, Key>.responseSchema }
+}
+
+/// relationship.listFans (supporters) with its completeness audit: the fan listing ends supporters missing from it.
+typealias FanboxFanListAudit = FanboxAuditedList<FanboxFanDTO, FanboxFansKey>

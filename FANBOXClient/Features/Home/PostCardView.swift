@@ -79,7 +79,8 @@ struct PostCardView: View {
                     .overlay(Text("R-18").font(.caption2.bold()).foregroundStyle(.secondary))
             } else {
                 RemoteImageView(thumbnailURL: post.coverImageURL, maxVariant: .thumbnail, postID: post.postID, creatorID: post.creatorID,
-                                accountID: post.accessAccountIDs.first ?? post.seenByAccountIDs.first, contentMode: .fill)
+                                accountID: (post.accessAccountIDs + post.seenByAccountIDs).first(where: enabledAccountIDs.contains),
+                                contentMode: .fill)
             }
         }
         .frame(width: 76, height: 76)

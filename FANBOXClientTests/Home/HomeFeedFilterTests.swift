@@ -152,6 +152,63 @@ final class HomeFeedFilterTests: XCTestCase {
         XCTAssertFalse(all.apply(store.fetch(all.descriptor(limit: nil))).contains { $0.postID == "b1" })
     }
 
+    /// A post only a disabled account's Home timeline listed (a creator followed on the web, relation not stored yet) leaves
+    /// the timeline at launch: an earlier build turned the account off without re-deriving its posts.
+    func testLaunchRemovesPostsOnlyADisabledAccountsFeedListed() throws {
+        let env = AppEnvironment.preview(seedDemo: false)
+        let store = env.store
+        let a = Account(id: "A", kind: .demo, displayName: "A", isMain: true, sortOrder: 0)
+        let b = Account(id: "B", kind: .demo, displayName: "B", sortOrder: 1)
+        [a, b].forEach(store.context.insert)
+        store.save()
+        store.upsertPostSummaries([SyncFixtures.summary("x1", creator: "newlyFollowed")], account: b.context, source: .home)
+        store.upsertPostSummaries([SyncFixtures.summary("a1", creator: "listedByA")], account: a.context, source: .home)
+        // What the earlier build's setEnabled did: flip the flag without re-deriving anything.
+        b.enabled = false
+        store.save()
+
+        env.refreshStoredFlagsAtLaunch()
+        let all = HomeFeedFilter(kind: .all)
+        XCTAssertEqual(all.apply(store.fetch(all.descriptor(limit: nil))).map(\.postID), ["a1"])
+
+        // Later launches with the same enabled accounts do not re-derive every post again.
+        let x1 = try XCTUnwrap(store.post(id: "x1"))
+        x1.isFromFollowedCreator = true
+        env.refreshStoredFlagsAtLaunch()
+        XCTAssertTrue(x1.isFromFollowedCreator, "no full pass: the enabled accounts did not change")
+
+        // B turned on again (by an earlier build, without re-deriving): the next launch brings back what B's Home listed.
+        x1.isFromFollowedCreator = false
+        b.enabled = true
+        store.save()
+        env.refreshStoredFlagsAtLaunch()
+        XCTAssertEqual(Set(all.apply(store.fetch(all.descriptor(limit: nil))).map(\.postID)), ["a1", "x1"])
+    }
+
+    /// A row stored before the feed listings were recorded takes them from the feeds that listed it (`seenByAccountIDs`).
+    func testLegacyPostTakesItsFeedListingsFromTheFeedsThatListedIt() throws {
+        let store = LocalStore(container: try PersistenceController.makeContainer(inMemory: true))
+        let a = Account(id: "A", kind: .demo, displayName: "A", isMain: true, sortOrder: 0)
+        let b = Account(id: "B", kind: .demo, displayName: "B", sortOrder: 1)
+        [a, b].forEach(store.context.insert)
+        let legacy = Post(postID: "old", creatorID: "c", creatorName: "C", title: "T", publishedAt: t0)
+        legacy.isFromFollowedCreator = true
+        legacy.seenByAccountIDs = ["B"]
+        legacy.homeListedByAccountIDs = nil
+        legacy.supportingListedByAccountIDs = nil
+        store.context.insert(legacy)
+        store.save()
+
+        b.enabled = false
+        store.refreshRelationFlags(recomputeAllPosts: true)
+        XCTAssertEqual(legacy.homeListedByAccountIDs, ["B"])
+        XCTAssertEqual(legacy.supportingListedByAccountIDs, [])
+        XCTAssertFalse(legacy.isFromFollowedCreator)
+        b.enabled = true
+        store.refreshRelationFlags(recomputeAllPosts: true)
+        XCTAssertTrue(legacy.isFromFollowedCreator)
+    }
+
     func testUserActionsWriteLocalMetadata() throws {
         let container = try PersistenceController.makeContainer(inMemory: true)
         let store = LocalStore(container: container)
@@ -169,6 +226,52 @@ final class HomeFeedFilterTests: XCTestCase {
         XCTAssertTrue(p.isReadLater)
     }
 
+    /// The account filter runs after the newest rows are read: when none of them matches but the read was full, older rows
+    /// are read instead of showing "該当する投稿がありません" — a few pages only, then さらに表示 reads on.
+    func testAccountFilterReadsOlderRowsBeforeReportingNoMatch() throws {
+        let store = LocalStore(container: try PersistenceController.makeContainer(inMemory: true))
+        let pageSize = 10
+        for i in 0..<(pageSize + 5) {
+            let p = Post(postID: "a\(i)", creatorID: "c", creatorName: "C", title: "A", publishedAt: t0.addingTimeInterval(Double(1_000 + i)))
+            p.isFromFollowedCreator = true
+            p.seenByAccountIDs = ["A"]
+            store.context.insert(p)
+        }
+        let older = Post(postID: "b1", creatorID: "c", creatorName: "C", title: "B", publishedAt: t0)
+        older.isFromFollowedCreator = true
+        older.seenByAccountIDs = ["B"]
+        store.context.insert(older)
+        for i in 0..<(4 * pageSize) {
+            let p = Post(postID: "x\(i)", creatorID: "c", creatorName: "C", title: "X", publishedAt: t0.addingTimeInterval(Double(-1 - i)))
+            p.isFromFollowedCreator = true
+            p.seenByAccountIDs = ["A"]
+            store.context.insert(p)
+        }
+        store.save()
+
+        // What HomeFeedList does: read `limit` rows, filter in memory, read the next page while the rule asks for it.
+        func page(_ filter: HomeFeedFilter) -> (visible: [String], limit: Int) {
+            var limit = pageSize
+            while true {
+                let fetched = store.fetch(filter.descriptor(limit: limit))
+                let visible = filter.apply(fetched)
+                guard HomeFeedPaging.needsNextPage(visibleCount: visible.count, fetchedCount: fetched.count, limit: limit,
+                                                   pageSize: pageSize) else { return (visible.map(\.postID), limit) }
+                limit += pageSize
+            }
+        }
+        let b = page(HomeFeedFilter(kind: .all, accountID: "B"))
+        XCTAssertEqual(b.visible, ["b1"], "B's older row is found under the newest page of A's rows")
+        XCTAssertEqual(b.limit, 2 * pageSize)
+
+        let none = page(HomeFeedFilter(kind: .all, accountID: "Z"))
+        XCTAssertEqual(none.visible, [])
+        XCTAssertEqual(none.limit, HomeFeedPaging.automaticPages * pageSize, "stops after a few pages (さらに表示 reads on)")
+
+        XCTAssertFalse(HomeFeedPaging.needsNextPage(visibleCount: 0, fetchedCount: 120, limit: 300, pageSize: 300),
+                       "everything stored was read")
+    }
+
     func testDateText() {
         let now = t0
         XCTAssertEqual(HomeDateText.format(now.addingTimeInterval(0.4), now: now), "たった今", "tiny future skew")
@@ -176,6 +279,10 @@ final class HomeFeedFilterTests: XCTestCase {
         XCTAssertEqual(HomeDateText.format(now.addingTimeInterval(-30 * 24 * 3600), now: now),
                        Formatters.shortDate(now.addingTimeInterval(-30 * 24 * 3600)))
         XCTAssertNotEqual(HomeDateText.format(now.addingTimeInterval(-3600), now: now), "たった今")
+        // No space between the number and the Japanese (the inbox writes "3時間前" too).
+        XCTAssertEqual(HomeDateText.format(now.addingTimeInterval(-3 * 3600), now: now), "3時間前")
+        XCTAssertEqual(Formatters.relative(now.addingTimeInterval(-2 * 24 * 3600), now: now), "2日前")
+        XCTAssertEqual(Formatters.relative(now.addingTimeInterval(-5 * 60), now: now), "5分前")
     }
 
     func testPlanLabel() {

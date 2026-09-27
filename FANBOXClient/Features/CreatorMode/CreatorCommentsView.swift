@@ -79,7 +79,7 @@ private struct CreatorCommentsList: View {
         _posts = Query(filter: #Predicate<Post> { $0.creatorID == creatorID })
         _pendingReplies = Query(filter: #Predicate<OutgoingComment> { $0.accountID == accountID })
         let resource = SyncResource.creatorComments.rawValue
-        _syncStates = Query(filter: #Predicate<SyncState> { $0.accountID == accountID && $0.resourceRaw == resource })
+        _syncStates = Query(filter: #Predicate<SyncState> { $0.accountID == accountID && $0.resourceRaw == resource && $0.scope == "" })
     }
 
     private var postTitles: [String: String] {
@@ -169,6 +169,7 @@ private struct CreatorCommentsList: View {
             }
             .presentationDetents([.medium, .large])
         }
+        .closesOnNotificationRoute($replyTarget)
         .confirmationDialog("このコメントを削除しますか？", isPresented: Binding(get: { deleteTarget != nil }, set: { if !$0 { deleteTarget = nil } }),
                             titleVisibility: .visible, presenting: deleteTarget) { comment in
             Button("削除", role: .destructive) { delete(comment) }

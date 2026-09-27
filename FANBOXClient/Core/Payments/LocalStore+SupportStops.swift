@@ -7,7 +7,9 @@ extension LocalStore {
     /// Records FANBOX's `isSupported && isStopped` (creator.listFollowing, docs/API.md §7.2 / §18.10) on this account's
     /// supports. Called by `applyFollowing`; creators without an `isStopped` value are left alone.
     /// - active + stopped → `stoppingObservedAt = now` (excluded from 来月予定 this billing month).
-    /// - active + `isStopped == false` → the observation is cleared (resumed, or never stopped).
+    /// - active + `isSupported && isStopped == false` → the observation is cleared (resumed, or never stopped). A creator
+    ///   that is no longer supported (`isSupported == false`, the state after a stop took effect) keeps the observation:
+    ///   it is what explains the support leaving plan.listSupporting at month end.
     /// - missing (recent, unexplained) + stopped → the disappearance is explained by FANBOX: recorded as 支援終了 and
     ///   removed from "要確認".
     func applyStopObservations(_ creators: [RemoteCreator], account: AccountContext, now: Date = .now) {
@@ -22,7 +24,7 @@ extension LocalStore {
             case .active:
                 if stopped {
                     s.stoppingObservedAt = now
-                } else if creator.isStopped == false, s.stoppingObservedAt != nil {
+                } else if creator.isSupported == true, creator.isStopped == false, s.stoppingObservedAt != nil {
                     s.stoppingObservedAt = nil
                 }
             case .missing:

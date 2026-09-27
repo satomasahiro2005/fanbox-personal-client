@@ -118,6 +118,11 @@ struct AccountWebSessionView: View {
     private var account: Account? { accounts.first }
     private var isLogin: Bool { request.purpose == .login }
     private var isOffline: Bool { env.networkMode.effectiveMode == .offline }
+    /// Offline by choice (通信モード「Offline」): the web view is taken down (SPEC §30). Offline only because no network path
+    /// is available (Automatic): the page stays under the offline notice (nothing can be sent without a path, and every
+    /// navigation is cancelled meanwhile), so a moment without signal does not throw away a payment popup or a half-typed
+    /// login.
+    private var isOfflineByChoice: Bool { isOffline && env.settings.networkModePreference == .offline }
 
     var body: some View {
         NavigationStack {
@@ -156,7 +161,8 @@ struct AccountWebSessionView: View {
         .interactiveDismissDisabled()
         .task { await prepare() }
         .onChange(of: isOffline) { _, offline in
-            // SPEC §30: switching to Offline stops the page immediately (the web view is replaced by the offline state).
+            // SPEC §30: switching to Offline stops the page immediately (by choice, the web view is also replaced by the
+            // offline state).
             if offline { controller.stopLoading() }
         }
         .onDisappear {
@@ -174,14 +180,24 @@ struct AccountWebSessionView: View {
     @ViewBuilder
     private var content: some View {
         if let account {
-            if isOffline {
+            if isOfflineByChoice {
                 offlineState
             } else if case .mismatch = identity {
                 identityMismatchState
             } else if isPrepared {
-                AccountWebView(accountID: account.id, webProfileID: account.webProfileID, initialURL: request.destination.url,
+                // A web view created again (after Offline by choice) continues on the page it showed, not on the requested
+                // one (whose fallback may already have been followed).
+                AccountWebView(accountID: account.id, webProfileID: account.webProfileID,
+                               initialURL: controller.currentURL ?? request.destination.url,
                                controller: controller, webSessions: env.webSessions, research: env.research,
                                policy: env.policyStore, fallbackURLs: request.destination.fallbacks.map(\.url))
+                    .overlay {
+                        if isOffline {
+                            offlineState
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                .background(Color(.systemBackground))
+                        }
+                    }
             } else {
                 ProgressView()
             }

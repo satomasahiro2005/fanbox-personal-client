@@ -244,7 +244,15 @@ struct RemoteImageView: View {
                     show(decoded, variant: variant)
                 } catch is CancellationError {
                     return
+                } catch RemoteError.cancelled where Task.isCancelled {
+                    return
                 } catch RemoteError.cancelled {
+                    // A shared download another view gave up on, not this view's task: let the next pass fetch it again.
+                    phase = image == nil ? .failed : .idle
+                    if autoRetries < Self.maxAutoRetries {
+                        autoRetries += 1
+                        retryNonce += 1
+                    }
                     return
                 } catch RemoteError.blockedByPolicy {
                     phase = .blocked

@@ -47,10 +47,12 @@ struct CommentThreadView: View {
         return comments.filter { !$0.isRemoved || parentIDs.contains($0.commentID) }
     }
 
+    /// Queue items of enabled accounts only: a turned-off account's drafts and replies are hidden with it (and kept).
     private var visibleOutgoing: [OutgoingComment] {
         let known = Set(comments.map(\.commentID))
+        let enabled = Set(accounts.map(\.id))
         let ids = Set(CommentThreadBuilder.visiblePending(outgoing.map { ($0.id, $0.state, $0.sentCommentID) }, knownCommentIDs: known))
-        return outgoing.filter { ids.contains($0.id) && $0.id != editingDraftID }
+        return outgoing.filter { ids.contains($0.id) && $0.id != editingDraftID && enabled.contains($0.accountID) }
     }
 
     private var threads: [CommentThread] {
@@ -138,6 +140,12 @@ struct CommentThreadView: View {
             }
         }
         .task { await start() }
+        .onChange(of: accounts.map(\.id)) { _, ids in
+            // The composer's account was turned off meanwhile: its text stays that account's draft (hidden with it), and
+            // the composer starts over with an enabled account.
+            if let current = composerAccountID, !ids.contains(current) { persistDraft(clearComposer: true) }
+            if usableComposerAccountID == nil { composerAccountID = defaultAccountID() }
+        }
         .onDisappear { persistDraft(clearComposer: true) }
         .onChange(of: scenePhase) { _, phase in
             // Keep the text safe if the app is suspended / killed while typing.
@@ -252,10 +260,10 @@ struct CommentThreadView: View {
                         .font(.body.weight(.semibold))
                         .padding(9)
                         .foregroundStyle(.white)
-                        .background(trimmed.isEmpty || composerAccountID == nil ? Color.gray : Color.accentColor, in: Circle())
+                        .background(trimmed.isEmpty || usableComposerAccountID == nil ? Color.gray : Color.accentColor, in: Circle())
                 }
                 .buttonStyle(.plain)
-                .disabled(trimmed.isEmpty || composerAccountID == nil)
+                .disabled(trimmed.isEmpty || usableComposerAccountID == nil)
                 .accessibilityLabel(offline ? "送信待ちに保存" : "送信")
                 .accessibilityIdentifier("commentSendButton")
             }
@@ -291,7 +299,7 @@ struct CommentThreadView: View {
 
     private func send(target: Comment?) {
         let body = draftText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !body.isEmpty, let accountID = composerAccountID else { return }
+        guard !body.isEmpty, let accountID = usableComposerAccountID else { return }
         let parentID = target?.commentID
         let rootID = target.map { $0.rootCommentID ?? $0.commentID }
         // SPEC §3.3: the reply must feel instant — clear the composer first; the queue persists and sends (interactiveWrite).
@@ -308,10 +316,12 @@ struct CommentThreadView: View {
     /// Loads a queued draft into the composer. The draft row stays in the queue (hidden while edited) until it is sent,
     /// replaced or cleared, so an app kill never loses the text.
     private func editDraft(_ item: OutgoingComment) {
+        // A turned-off account's draft is never loaded: it would be saved or sent as the composer's account.
+        guard accounts.contains(where: { $0.id == item.accountID }) else { return }
         if editingDraftID != item.id { persistDraft(clearComposer: true) }
         draftText = item.body
         replyTargetID = item.parentCommentID
-        if accounts.contains(where: { $0.id == item.accountID }) { composerAccountID = item.accountID }
+        composerAccountID = item.accountID
         editingDraftID = item.id
         composerFocused = true
     }
@@ -320,15 +330,17 @@ struct CommentThreadView: View {
     private func persistDraft(clearComposer: Bool) {
         let body = draftText.trimmingCharacters(in: .whitespacesAndNewlines)
         let existing = editingDraftID.flatMap { id in outgoing.first { $0.id == id } }
+        // A draft of an account turned off meanwhile stays that account's draft: never moved to another account.
+        let owner = PostAccountLogic.draftAccountID(editingDraftAccountID: existing?.accountID, composerAccountID: composerAccountID,
+                                                    enabledAccountIDs: Set(accounts.map(\.id)))
         let target = replyTargetID.flatMap { id in comments.first { $0.commentID == id } }
-        let unchanged = existing.map { $0.body == body && $0.parentCommentID == target?.commentID && $0.accountID == composerAccountID }
-            ?? false
+        let unchanged = existing.map { $0.body == body && $0.parentCommentID == target?.commentID && $0.accountID == owner } ?? false
         if !unchanged {
             if let editing = editingDraftID {
                 env.replies.cancel(id: editing)
                 editingDraftID = nil
             }
-            if !body.isEmpty, let accountID = composerAccountID {
+            if !body.isEmpty, let accountID = owner {
                 let id = env.replies.saveDraft(postID: postID, body: body, parentCommentID: target?.commentID,
                                                rootCommentID: target.map { $0.rootCommentID ?? $0.commentID }, accountID: accountID)
                 editingDraftID = id.isEmpty ? nil : id
@@ -360,7 +372,8 @@ struct CommentThreadView: View {
     }
 
     private func start() async {
-        if composerAccountID == nil { composerAccountID = defaultAccountID() }
+        // An account chosen here and turned off meanwhile (Settings, from another tab) is replaced by the default.
+        if usableComposerAccountID == nil { composerAccountID = defaultAccountID() }
         restoreDraftIfNeeded()
         preselectFocusedReplyTarget()
         guard !didStart else { return }
@@ -391,10 +404,13 @@ struct CommentThreadView: View {
         refreshError = error
     }
 
-    /// Restores the newest in-app draft into the empty composer.
+    /// Restores the newest in-app draft of an enabled account into the empty composer (a turned-off account's draft stays
+    /// hidden and stays its own).
     private func restoreDraftIfNeeded() {
+        let enabled = Set(accounts.map(\.id))
         guard draftText.isEmpty, editingDraftID == nil,
-              let draft = outgoing.filter({ $0.state == .draft && $0.origin == .inApp }).max(by: { $0.createdAt < $1.createdAt })
+              let draft = outgoing.filter({ $0.state == .draft && $0.origin == .inApp && enabled.contains($0.accountID) })
+                .max(by: { $0.createdAt < $1.createdAt })
         else { return }
         editDraft(draft)
         composerFocused = false
@@ -453,7 +469,18 @@ struct CommentThreadView: View {
         PostAccountLogic.deleteAccountID(commentIsOwn: comment.isOwn, authorUserID: comment.authorUserID,
                                          fetchedByAccountID: comment.fetchedByAccountID, postCreatorID: post?.creatorID,
                                          commentIsOnOwnPost: comment.isOnOwnPost || (post?.isOwnPost ?? false),
-                                         accounts: accountUserIDs)
+                                         accounts: accountUserIDs, disabledUserIDs: disabledUserIDs)
+    }
+
+    /// User ids of my turned-off accounts (their comments are still "mine", but nothing is sent as them).
+    private var disabledUserIDs: Set<String> {
+        Set(env.store.accounts(includeDisabled: true).filter { !$0.enabled }
+            .flatMap { [$0.pixivUserID, $0.fanboxUserID].compactMap { $0 } })
+    }
+
+    /// The composer's account while it is enabled (an account turned off meanwhile never sends).
+    private var usableComposerAccountID: String? {
+        composerAccountID.flatMap { id in accounts.contains { $0.id == id } ? id : nil }
     }
 }
 

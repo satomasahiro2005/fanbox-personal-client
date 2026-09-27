@@ -131,6 +131,10 @@ private struct HomeFeedList: View {
 
     private var hasAccounts: Bool { !enabledAccountIDs.isEmpty }
 
+    private func needsNextPage(visibleCount: Int) -> Bool {
+        HomeFeedPaging.needsNextPage(visibleCount: visibleCount, fetchedCount: posts.count, limit: limit, pageSize: HomeRootView.pageSize)
+    }
+
     var body: some View {
         let visible = filter.apply(posts)
         let plansByCreator = Dictionary(grouping: plans, by: \.creatorID)
@@ -174,7 +178,18 @@ private struct HomeFeedList: View {
         .listStyle(.plain)
         .accessibilityIdentifier("homeFeedList")
         .overlay {
-            if visible.isEmpty { emptyState }
+            if visible.isEmpty {
+                if needsNextPage(visibleCount: 0) {
+                    ProgressView()
+                } else {
+                    emptyState
+                }
+            }
+        }
+        // The account filter is applied after the newest `limit` rows are read: when none of them matches, a few older
+        // pages are read before "該当する投稿がありません" (さらに表示 reads on from there).
+        .task(id: [limit, needsNextPage(visibleCount: visible.count) ? 1 : 0]) {
+            if needsNextPage(visibleCount: visible.count) { loadMore() }
         }
         .refreshable {
             await env.coordinator.refreshNow()

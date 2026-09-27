@@ -67,6 +67,9 @@ final class LocalStore {
     /// Ids of the enabled accounts. Data of a disabled account stays stored but is hidden everywhere (lists, totals, badge).
     func enabledAccountIDs() -> Set<String> { Set(accounts().map(\.id)) }
 
+    /// Ids of the disabled accounts (they send no requests, media included).
+    func disabledAccountIDs() -> Set<String> { Set(accounts(includeDisabled: true).filter { !$0.enabled }.map(\.id)) }
+
     func mainAccount() -> Account? { accounts().first(where: \.isMain) ?? accounts().first }
 
     // MARK: - Lookups

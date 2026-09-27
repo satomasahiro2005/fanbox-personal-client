@@ -49,6 +49,8 @@ final class SyncCoordinator {
         // The UI already renders from the local DB; the network refresh runs afterwards (SPEC §3.1).
         Task { [weak self] in
             guard let self else { return }
+            // Banners a previous run could not post before it was suspended / ended.
+            await self.notifications?.redeliverPending()
             await self.engine.syncAll(reason: .appLaunch)
             self.absorbEngineState()
             await self.replies.flush()
@@ -65,8 +67,11 @@ final class SyncCoordinator {
             startPolling()
             Task { [weak self] in
                 guard let self else { return }
+                await self.notifications?.redeliverPending()
                 await self.replies.flush()
-                await self.refreshNotifications(reason: .foregroundPolling)
+                let before = self.engine.lastSuccessAt
+                let outcomes = await self.refreshNotifications(reason: .foregroundPolling)
+                self.absorb(outcomes, successSince: before)
                 await self.notifications?.retryFailedPrefetches()
                 await self.notifications?.updateBadge()
             }
@@ -94,12 +99,14 @@ final class SyncCoordinator {
         pollTickCount += 1
         guard engine.canReachNetwork else { return }
         await replies.flush()
-        await refreshNotifications(reason: .foregroundPolling)
+        let before = engine.lastSuccessAt
+        var outcomes = await refreshNotifications(reason: .foregroundPolling)
         if pollTickCount % Self.timelineEveryNthTick == 0 {
-            await forEachAccount { engine, accountID in
+            outcomes += await syncEachAccount { engine, accountID in
                 await engine.sync(.timeline, accountID: accountID, reason: .foregroundPolling)
             }
         }
+        absorb(outcomes, successSince: before)
     }
 
     func stopPolling() {
@@ -121,25 +128,38 @@ final class SyncCoordinator {
         }
     }
 
-    private func refreshNotifications(reason: SyncReason) async {
-        await forEachAccount { engine, accountID in
+    @discardableResult
+    private func refreshNotifications(reason: SyncReason) async -> [SyncOutcome] {
+        await syncEachAccount { engine, accountID in
             await engine.sync(.notifications, accountID: accountID, reason: reason)
         }
     }
 
-    private func forEachAccount(_ body: @escaping @MainActor (SyncEngine, String) async -> Void) async {
+    private func syncEachAccount(_ body: @escaping @MainActor (SyncEngine, String) async -> SyncOutcome) async -> [SyncOutcome] {
         let ids = engine.store.accounts().map(\.id)
         let engine = self.engine
-        await withTaskGroup(of: Void.self) { group in
+        return await withTaskGroup(of: SyncOutcome.self) { group in
             for id in ids {
                 group.addTask { @MainActor in await body(engine, id) }
             }
+            var outcomes: [SyncOutcome] = []
+            for await outcome in group { outcomes.append(outcome) }
+            return outcomes
         }
     }
 
     private func absorbEngineState() {
         lastError = engine.lastError
         if let at = engine.lastSuccessAt { lastRefreshAt = at }
+    }
+
+    /// A refresh outside the full batch (polling, returning to the app) that worked clears the "同期できませんでした" banner
+    /// an earlier failure left (e.g. a launch without signal). `successSince`: the engine's last success before the
+    /// refresh (a skipped sync is no success).
+    private func absorb(_ outcomes: [SyncOutcome], successSince before: Date?) {
+        guard outcomes.allSatisfy({ $0.error == nil }), let at = engine.lastSuccessAt, at != before else { return }
+        lastError = nil
+        lastRefreshAt = at
     }
 
     /// Inbox housekeeping (read events past the retention window). Cheap; also run by the maintenance task.
@@ -207,8 +227,10 @@ enum BackgroundRefresh {
         }
         let completion = TaskCompletion(task)
         let work = Task { @MainActor in
-            // Replies first (SPEC §3.3), then the lightweight refresh, then a last flush for replies queued meanwhile.
+            // Replies first (SPEC §3.3), then banners an earlier run could not post, the lightweight refresh, then a last
+            // flush for replies queued meanwhile.
             await env.replies.flush()
+            await env.notifications.redeliverPending()
             let outcomes = await env.sync.syncLightweightOutcomes(reason: .backgroundRefresh)
             await env.replies.flush()
             await env.notifications.updateBadge()

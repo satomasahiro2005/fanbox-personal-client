@@ -60,6 +60,11 @@ final class AppRouter {
     var libraryPath = NavigationPath()
     var isSettingsPresented = false
     var isNotificationInboxPresented = false
+    /// 送信キュー sheet (SPEC §22), opened from the reply-attention banner.
+    var isReplyQueuePresented = false
+    /// Bumped by `dismissModals`: the sheets / full-screen covers of the tabs (image viewer, payment flow …) close so a
+    /// route opened from a notification is visible (`View.closesOnNotificationRoute`).
+    private(set) var modalDismissGeneration = 0
 
     init() {}
 
@@ -143,13 +148,43 @@ final class AppRouter {
         selectedTab = target
     }
 
-    /// Opens a route from a notification tap: dismiss sheets, reset the home stack and push immediately (local render).
-    func openFromNotification(_ route: AppRoute) {
+    /// Closes every sheet and full-screen cover (a notification opens a route under them otherwise). Sheets owned by
+    /// screens follow through `View.closesOnNotificationRoute`.
+    func dismissModals() {
         isSettingsPresented = false
         isNotificationInboxPresented = false
+        isReplyQueuePresented = false
+        modalDismissGeneration &+= 1
+    }
+
+    /// Opens a route from a notification tap: dismiss sheets, reset the home stack and push immediately (local render).
+    func openFromNotification(_ route: AppRoute) {
+        dismissModals()
         var p = NavigationPath()
         p.append(route)
         homePath = p
         selectedTab = .home
+    }
+}
+
+/// Closes a screen's sheet / full-screen cover when `AppRouter.dismissModals` runs (a notification opening a route).
+private struct CloseOnNotificationRouteModifier: ViewModifier {
+    let close: () -> Void
+    @Environment(AppEnvironment.self) private var env
+
+    func body(content: Content) -> some View {
+        content.onChange(of: env.router.modalDismissGeneration) { _, _ in close() }
+    }
+}
+
+extension View {
+    /// The sheet / cover presented through `item` closes when a notification opens a route.
+    func closesOnNotificationRoute<Item>(_ item: Binding<Item?>) -> some View {
+        modifier(CloseOnNotificationRouteModifier { item.wrappedValue = nil })
+    }
+
+    /// The sheet / cover presented through `isPresented` closes when a notification opens a route.
+    func closesOnNotificationRoute(_ isPresented: Binding<Bool>) -> some View {
+        modifier(CloseOnNotificationRouteModifier { isPresented.wrappedValue = false })
     }
 }

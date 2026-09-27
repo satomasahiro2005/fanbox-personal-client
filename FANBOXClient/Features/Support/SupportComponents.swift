@@ -197,6 +197,8 @@ struct SupportSyncStatus {
 @MainActor
 enum SupportSync {
     /// Syncs supports (and optionally paid-payment records) for the given accounts. Returns the first error.
+    /// An explicit refresh (`.userRefresh`) also reads the following list: a stop made on FANBOX keeps the plan in
+    /// plan.listSupporting until month end and shows only there (停止予定).
     static func refresh(env: AppEnvironment, accountIDs: [String], includePayments: Bool,
                         priority: RequestPriority = .interactiveRead, reason: SyncReason = .userRefresh) async -> RemoteError? {
         var firstError: RemoteError?
@@ -205,6 +207,12 @@ enum SupportSync {
                 await env.sync.sync(.supports, accountID: accountID, reason: reason)
             }
             if firstError == nil { firstError = outcome.error }
+            if reason == .userRefresh, outcome.error == nil {
+                // Best effort: a failing following list never fails the support refresh.
+                _ = await RequestContext.$priority.withValue(priority) {
+                    await env.sync.sync(.creators, accountID: accountID, reason: reason)
+                }
+            }
             if includePayments {
                 let payments = await RequestContext.$priority.withValue(priority) {
                     await env.sync.sync(.payments, accountID: accountID, reason: reason)
@@ -217,11 +225,22 @@ enum SupportSync {
 
     /// True when the supports of any account were never synced or not for `maxAge`.
     static func isStale(states: [SyncState], accountIDs: [String], now: Date = .now, maxAge: TimeInterval = 30 * 60) -> Bool {
-        for id in accountIDs {
+        !staleAccountIDs(states: states, accountIDs: accountIDs, now: now, maxAge: maxAge).isEmpty
+    }
+
+    /// The accounts of `accountIDs` whose supports were never synced or not for `maxAge`.
+    static func staleAccountIDs(states: [SyncState], accountIDs: [String], now: Date = .now,
+                                maxAge: TimeInterval = 30 * 60) -> [String] {
+        accountIDs.filter { id in
             guard let last = states.first(where: { $0.accountID == id })?.lastSuccessfulSync else { return true }
-            if now.timeIntervalSince(last) > maxAge { return true }
+            return now.timeIntervalSince(last) > maxAge
         }
-        return false
+    }
+
+    /// Accounts a screen refreshes on its own when their data is stale. An expired, logged-out or quarantined session
+    /// never gets a new successful sync, so counting it would make every visit "stale" and re-sync all accounts.
+    static func refreshesAutomatically(kind: AccountKind, state: SessionState) -> Bool {
+        kind == .demo || state == .valid || state == .unknown
     }
 }
 
@@ -275,6 +294,7 @@ struct PaymentFlowSheetModifier: ViewModifier {
                 self.request = nil
             }
         }
+        .closesOnNotificationRoute($request)
     }
 }
 

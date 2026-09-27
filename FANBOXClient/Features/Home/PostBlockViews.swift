@@ -169,6 +169,7 @@ struct PostDetailDownloadableBlockView: View {
     let mediaKind: MediaKind
 
     @Environment(AppEnvironment.self) private var env
+    /// A named link to the downloaded file (`MediaService.namedFileURL`), not the cache path itself.
     @State private var localURL: URL?
     @State private var isLoading = false
     @State private var errorText: String?
@@ -236,7 +237,7 @@ struct PostDetailDownloadableBlockView: View {
         .task(id: block.key) {
             if localURL == nil, let remote = Self.remoteURL(of: block),
                let cached = env.media.cachedFileURL(url: remote, variant: .original) {
-                setLocal(cached)
+                setLocal(env.media.namedFileURL(url: remote, variant: .original, fileName: fileName) ?? cached)
             }
         }
         .onDisappear { player?.pause() }
@@ -284,9 +285,12 @@ struct PostDetailDownloadableBlockView: View {
         errorText = nil
         defer { isLoading = false }
         do {
-            let url = try await env.media.load(MediaRequest(url: remote, variant: .original, kind: mediaKind, trigger: .manual,
-                                                            priority: .foregroundMedia, postID: context.postID,
-                                                            creatorID: context.creatorID, accountID: context.accountID))
+            let loaded = try await env.media.load(MediaRequest(url: remote, variant: .original, kind: mediaKind, trigger: .manual,
+                                                               priority: .foregroundMedia, postID: context.postID,
+                                                               creatorID: context.creatorID, accountID: context.accountID))
+            // Kept as a link under the file's real name: open / share / play show that name, and the link stays valid
+            // when saving (or releasing) the post moves the cached file.
+            let url = env.media.namedFileURL(url: remote, variant: .original, fileName: fileName) ?? loaded
             setLocal(url)
             if mediaKind == .file { previewURL = url }
         } catch let error as RemoteError {

@@ -221,6 +221,7 @@ private struct DraftEditorContent: View {
                                     complete: { completion in completeOnWeb(completion) })
             }
         }
+        .closesOnNotificationRoute($showHandoff)
         .onChange(of: env.web.presented == nil) { _, closed in
             guard closed, awaitingWebReturn else { return }
             awaitingWebReturn = false
@@ -542,6 +543,12 @@ private struct DraftEditorContent: View {
                 }
                 if draft.webHandoffAt != nil || !livePlan.webItems.isEmpty {
                     Button { showHandoff = true } label: { Label("Webで追加する項目", systemImage: "checklist") }
+                }
+                if env.drafts.isRemotePostMissing(draft) {
+                    Button { env.drafts.detachFromRemotePost(draftID: draft.id) } label: {
+                        Label("新しい投稿にする", systemImage: "doc.badge.plus")
+                    }
+                    .accessibilityIdentifier("draftDetachButton")
                 }
                 Divider()
                 openWebButton(reason: "Webエディタで編集")

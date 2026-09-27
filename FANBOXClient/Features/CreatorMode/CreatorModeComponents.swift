@@ -96,6 +96,7 @@ extension RemotePostStatus {
         case .published: return .green
         case .draft: return .teal
         case .scheduled: return .orange
+        case .archived: return .gray
         case .unknown: return .secondary
         }
     }

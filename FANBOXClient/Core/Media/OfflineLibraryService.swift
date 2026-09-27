@@ -122,14 +122,17 @@ final class OfflineLibraryService {
             return summary
         }
         post.offlineState = .saved
+        media.forgetRelease(postID: postID)
         store.save()
 
         // 2. Media (explicit user action ⇒ manual trigger; policy may still block, e.g. Offline).
         let requests = Self.mediaRequests(for: post, trigger: .manual, priority: .foregroundMedia, pin: true,
-                                          includeAttachments: true)
+                                          includeAttachments: true, disabledAccountIDs: store.disabledAccountIDs())
         var summary = OfflineSaveSummary(postID: postID, textAvailable: true, mediaRequested: requests.count,
                                          mediaSaved: 0, mediaBlocked: 0, mediaFailed: 0, finishedAt: .now)
         for (index, request) in requests.enumerated() {
+            // Offline解除 / キャッシュ削除 while saving: stop, nothing more is pinned for it.
+            guard !isReleased(postID) else { break }
             do {
                 _ = try await media.load(request)
                 summary.mediaSaved += 1
@@ -140,8 +143,8 @@ final class OfflineLibraryService {
             }
             saveProgress[postID] = Double(index + 1) / Double(max(requests.count, 1))
         }
-        // Anything already cached for this post (e.g. viewed earlier) is kept as well.
-        media.pin(postID: postID)
+        // Anything already cached for this post (e.g. viewed earlier) is kept as well — unless it was released meanwhile.
+        settlePins(postID: postID)
         summary.finishedAt = .now
         lastSummaries[postID] = summary
         return summary
@@ -274,7 +277,9 @@ final class OfflineLibraryService {
         store.save()
         let manual = trigger == .manual
         var mediaBlocked = false
-        for postID in window {
+        for (index, postID) in window.enumerated() {
+            // The rule may have been removed or narrowed while this pass waited for the network.
+            guard index < (store.creator(id: creatorID)?.offlineRecentCount ?? 0) else { break }
             // Text first; a body this rule already failed to fetch recently is not re-requested on every sync.
             if store.post(id: postID)?.hasCachedBody != true {
                 if !manual, let last = ruleBodyAttempts[postID], Date.now.timeIntervalSince(last) < ruleRetryInterval { continue }
@@ -287,6 +292,10 @@ final class OfflineLibraryService {
             guard let post = store.post(id: postID), post.hasCachedBody, post.isVisibleToReaders else { continue }
             let newlyCovered = post.offlineState == .none
             if newlyCovered {
+                // Saved media the user deleted, or that the capacity forced out, is not downloaded again by the rule (it
+                // would be re-downloaded and evicted on every sync); nor is more saved while saved media fills the capacity.
+                if !manual && (media.isReleased(postID: postID) || media.isSavedMediaAtCapacity) { continue }
+                if manual { media.forgetRelease(postID: postID) }
                 post.offlineState = .ruleSaved
                 store.save()
             }
@@ -294,8 +303,9 @@ final class OfflineLibraryService {
             // missing because the policy blocked them earlier (e.g. cellular with Wi-Fi-only prefetch) are filled in.
             guard !mediaBlocked, newlyCovered || refillMedia else { continue }
             let requests = Self.mediaRequests(for: post, trigger: trigger, priority: manual ? .foregroundMedia : .mediaPrefetch,
-                                              pin: true, includeAttachments: manual)
+                                              pin: true, includeAttachments: manual, disabledAccountIDs: store.disabledAccountIDs())
             for request in requests {
+                guard !isReleased(postID) else { break }
                 do {
                     _ = try await media.load(request)
                 } catch RemoteError.blockedByPolicy {
@@ -305,6 +315,21 @@ final class OfflineLibraryService {
                     continue
                 }
             }
+            settlePins(postID: postID)
+        }
+    }
+
+    /// The post is no longer saved (released while its media was being downloaded).
+    private func isReleased(_ postID: String) -> Bool {
+        (store.post(id: postID)?.offlineState ?? OfflineState.none) == .none
+    }
+
+    /// After a save pass: a saved post's cached media is pinned; one released meanwhile (Offline解除, キャッシュ削除, the
+    /// rule removed) gets what was just downloaded for it unpinned again instead of left pinned without a saved post.
+    private func settlePins(postID: String) {
+        if isReleased(postID) {
+            media.unpin(postID: postID)
+        } else {
             media.pin(postID: postID)
         }
     }
@@ -353,8 +378,9 @@ final class OfflineLibraryService {
 
         // Display images only; prefetch trigger so Low Data / Extreme / Wi-Fi-only rules apply (text-only if blocked).
         let requests = Self.mediaRequests(for: post, trigger: .prefetch, priority: .mediaPrefetch, pin: true,
-                                          includeAttachments: false, variants: [.display])
+                                          includeAttachments: false, variants: [.display], disabledAccountIDs: store.disabledAccountIDs())
         for request in requests {
+            guard !isReleased(postID) else { break }
             do {
                 _ = try await media.load(request)
             } catch RemoteError.blockedByPolicy {
@@ -363,7 +389,7 @@ final class OfflineLibraryService {
                 continue
             }
         }
-        media.pin(postID: postID)
+        settlePins(postID: postID)
     }
 
     func isSaving(postID: String) -> Bool { activeSaves.contains(postID) }
@@ -375,10 +401,18 @@ final class OfflineLibraryService {
         post.feeRequired > 0 && post.accessAccountIDs.isEmpty
     }
 
+    /// Account whose session fetches a post's media (downloads.fanbox.cc needs the cookie): the account whose body is shown,
+    /// else one that can view it, else one that listed it — never a disabled account (it sends nothing).
+    static func mediaAccount(for post: Post, excluding disabled: Set<String>) -> String? {
+        ([post.detailAccountID].compactMap { $0 } + post.accessAccountIDs + post.seenByAccountIDs).first(where: { !disabled.contains($0) })
+    }
+
     /// Media to save for a post: cover + image blocks (thumbnail/display), and optionally attachments (file/audio/video).
+    /// `disabledAccountIDs`: accounts that must not send the media requests.
     static func mediaRequests(for post: Post, trigger: MediaTrigger, priority: RequestPriority, pin: Bool,
-                              includeAttachments: Bool, variants: Set<MediaVariant> = [.thumbnail, .display]) -> [MediaRequest] {
-        let accountID = post.detailAccountID ?? post.accessAccountIDs.first
+                              includeAttachments: Bool, variants: Set<MediaVariant> = [.thumbnail, .display],
+                              disabledAccountIDs: Set<String> = []) -> [MediaRequest] {
+        let accountID = mediaAccount(for: post, excluding: disabledAccountIDs)
         var seen = Set<String>()
         var result: [MediaRequest] = []
 

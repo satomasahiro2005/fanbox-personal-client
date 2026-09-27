@@ -10,6 +10,11 @@ struct ImageViewerItem: Identifiable, Hashable {
     var height: Int?
     /// `originalURL` was derived from a resized pximg URL by the app (FANBOX may refuse it), not returned by the API.
     var originalIsDerived = false
+    /// Post, creator and account of this image when one viewer pages through images of several posts (Offline Library);
+    /// nil = the viewer's own.
+    var postID: String?
+    var creatorID: String?
+    var accountID: String?
 }
 
 extension ImageViewerItem {
@@ -68,6 +73,8 @@ struct ImageViewer: View {
     @State private var files: [Int: URL] = [:]
     /// 「写真に保存」 per page (absent = not saved yet).
     @State private var photoSaves: [Int: PhotoSaveState] = [:]
+    /// Variant each page put into Photos (a second save never adds the same file again).
+    @State private var photoSavedVariants: [Int: MediaVariant] = [:]
     @State private var photoSaveError: PhotoSaveError?
     @State private var photoSaveCount = 0
     /// Bumped when a save loaded a new file, so the page shows it.
@@ -91,10 +98,14 @@ struct ImageViewer: View {
             } else {
                 TabView(selection: $selection) {
                     ForEach(Array(items.enumerated()), id: \.offset) { index, item in
-                        ImageViewerPage(item: item, postID: postID, creatorID: creatorID, accountID: accountID,
-                                        reload: reloads[index] ?? 0,
+                        ImageViewerPage(item: item, postID: item.postID ?? postID, creatorID: item.creatorID ?? creatorID,
+                                        accountID: item.accountID ?? accountID,
+                                        reload: reloads[index] ?? 0, isNearSelection: abs(index - selection) <= 1,
                                         onToggleChrome: { withAnimation(.easeInOut(duration: 0.2)) { showsChrome.toggle() } },
-                                        onFileAvailable: { files[index] = $0 })
+                                        // A link, not the cache path: saving / releasing the post moves the cached file.
+                                        onFileAvailable: { file in
+                                            files[index] = MediaFileCache.namedLink(to: file, fileName: file.lastPathComponent) ?? file
+                                        })
                             .tag(index)
                     }
                 }
@@ -200,7 +211,9 @@ struct ImageViewer: View {
 
     private func saveSource(_ index: Int) -> ImageSaveSource {
         guard items.indices.contains(index) else { return ImageSaveSource(urls: [:]) }
-        return items[index].saveSource(postID: postID, creatorID: creatorID, accountID: accountID)
+        let item = items[index]
+        return item.saveSource(postID: item.postID ?? postID, creatorID: item.creatorID ?? creatorID,
+                               accountID: item.accountID ?? accountID)
     }
 
     /// Online, a manual load is always allowed (SPEC §30); offline only a cached file can be saved.
@@ -215,7 +228,8 @@ struct ImageViewer: View {
         guard previous?.isDone(online: env.networkMode.isOnline) != true, previous != .saving else { return }
         photoSaves[index] = .saving
         do {
-            let saved = try await PhotoLibrarySaver.save(saveSource(index), media: env.media)
+            let saved = try await PhotoLibrarySaver.save(saveSource(index), media: env.media, alreadySaved: photoSavedVariants[index])
+            photoSavedVariants[index] = saved.variant
             photoSaves[index] = saved.isBestAvailable ? .saved : .savedSmaller
             photoSaveCount += 1
             if saved.downloaded { reloads[index, default: 0] += 1 }
@@ -251,6 +265,9 @@ private struct ImageViewerPage: View {
     let accountID: String?
     /// Changes when 「写真に保存」 loaded a new file for this page.
     let reload: Int
+    /// The page is on screen or next to it. Pages further away drop their (up to full-resolution) bitmap: a paged
+    /// TabView keeps every visited page's state, so a long gallery would otherwise keep one bitmap per page.
+    let isNearSelection: Bool
     let onToggleChrome: () -> Void
     let onFileAvailable: (URL) -> Void
 
@@ -306,7 +323,12 @@ private struct ImageViewerPage: View {
         }
         .overlay(alignment: .bottom) { controls }
         // Re-runs when connectivity returns (a fixed network mode keeps its mode while the path is down).
-        .task(id: ImageViewerPageKey(itemID: item.id, online: env.networkMode.isOnline, reload: reload)) { await start() }
+        .task(id: ImageViewerPageKey(itemID: item.id, online: env.networkMode.isOnline, reload: reload, near: isNearSelection)) {
+            await start()
+        }
+        // A page that scrolled off screen gets no task run when it becomes far, so it drops its bitmap here; the task
+        // rebuilds it from the caches when the page appears again.
+        .onDisappear { release() }
     }
 
     @ViewBuilder
@@ -363,13 +385,32 @@ private struct ImageViewerPage: View {
     // MARK: - Loading
 
     private func start() async {
+        guard isNearSelection else {
+            // Far from the visible page: release the bitmap (reloaded from the caches when the page comes back).
+            release()
+            return
+        }
         let media = env.media
         if image == nil, let hit = media.bestCachedImageWithVariant(urls: urls, upTo: .original) {
             image = hit.image
             shown = hit.variant
         }
+        // A cached file can be shared right away, also when no load follows (Low Data / Extreme / Offline, or the
+        // original already decoded).
+        if let file = MediaVariant.allCases.reversed().lazy.compactMap({ variant in
+            self.urls[variant].flatMap { media.peekCachedFileURL(url: $0, variant: variant) }
+        }).first {
+            onFileAvailable(file)
+        }
         await loadDisplay(trigger: .automatic)
         await loadOriginal(trigger: .automatic)
+    }
+
+    private func release() {
+        image = nil
+        shown = nil
+        displayState = .idle
+        originalState = .idle
     }
 
     private func loadDisplay(trigger: MediaTrigger) async {
@@ -450,6 +491,7 @@ private struct ImageViewerPageKey: Hashable {
     var itemID: String
     var online: Bool
     var reload: Int
+    var near: Bool
 }
 
 // MARK: - Zoom

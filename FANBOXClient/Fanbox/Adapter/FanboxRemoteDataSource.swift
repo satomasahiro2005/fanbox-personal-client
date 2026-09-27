@@ -361,16 +361,28 @@ struct FanboxRemoteDataSource: RemoteDataSource {
 
     /// relationship.listFans?status=supporter (whole list, no paging) + plan titles from plan.listCreator.
     func fans(account: AccountContext, cursor: String?) async throws -> RemotePage<RemoteFan> {
-        guard cursor == nil else { return RemotePage(items: []) }
+        try await fanListing(account: account, cursor: cursor).page
+    }
+
+    /// `fans` with a completeness audit (like `supportingPlanListing`): the listing ends supporters that are missing from
+    /// it, so a `null` / non-array list, an element that is not an object or an item without `user.userId` marks it
+    /// incomplete. The readable fans are still returned.
+    func fanListing(account: AccountContext, cursor: String?) async throws -> RemoteFanListing {
+        guard cursor == nil else { return RemoteFanListing(page: RemotePage(items: [])) }
         let creatorID = try requireCreator(account)
-        let body = try await api.send(.listFans(status: "supporter"), as: FanboxFanListBody.self, accountID: account.accountID)
+        let body = try await api.send(.listFans(status: "supporter"), as: FanboxFanListAudit.self, accountID: account.accountID)
         var plansByID: [String: RemotePlan] = [:]
         if let plans = try? await creatorPlans(creatorID: creatorID, account: account) {
             for plan in plans { plansByID[plan.planID] = plan }
         }
         let fans = body.items.compactMap { FanboxAdapter.fan($0, plans: plansByID) }
             .sorted { ($0.supportStartedAt ?? .distantPast, $0.userID) > ($1.supportStartedAt ?? .distantPast, $1.userID) }
-        return RemotePage(items: fans)
+        var problems: [String] = []
+        if let shape = body.shapeProblem { problems.append(shape) }
+        if body.undecodableCount > 0 { problems.append("解釈できない項目\(body.undecodableCount)件") }
+        let unmapped = body.items.count - fans.count
+        if unmapped > 0 { problems.append("user.userIdのない項目\(unmapped)件") }
+        return RemoteFanListing(page: RemotePage(items: fans), problem: problems.isEmpty ? nil : problems.joined(separator: " / "))
     }
 
     /// Only values FANBOX provides (SPEC §17): supporters (relationship.listFilterOptions), support received this month
@@ -389,6 +401,7 @@ struct FanboxRemoteDataSource: RemoteDataSource {
             succeeded += 1
         } catch {
             firstError = firstError ?? error
+            dashboard.failedMetrics.insert(.supporterCount)
         }
         do {
             let pledges = try await api.send(.pledgeMonthly(month: month), as: FanboxPledgeMonthlyBody.self, accountID: account.accountID)
@@ -396,6 +409,7 @@ struct FanboxRemoteDataSource: RemoteDataSource {
             succeeded += 1
         } catch {
             firstError = firstError ?? error
+            dashboard.failedMetrics.insert(.earnings)
         }
         do {
             let posts = try await api.send(.listManaged(), as: FanboxManagedPostListBody.self, accountID: account.accountID)
@@ -403,8 +417,10 @@ struct FanboxRemoteDataSource: RemoteDataSource {
             succeeded += 1
         } catch {
             firstError = firstError ?? error
+            dashboard.failedMetrics.insert(.postCount)
         }
         if succeeded == 0, let firstError { throw FanboxAPIClient.normalize(firstError) }
+        if let firstError { dashboard.partialError = FanboxAPIClient.normalize(firstError) }
         return dashboard
     }
 
@@ -461,6 +477,10 @@ struct FanboxRemoteDataSource: RemoteDataSource {
         var summary = detail.summary
         // post.get never carries the content, so "no body" does not mean restricted here.
         summary.isRestricted = body.post.isRestricted ?? false
+        // Fields post.get may leave out (docs/API.md §6.2) keep what is stored: a missing isLiked is not "not liked", and a
+        // missing revision is not "never edited" (that would stop an edited post's body from being fetched again).
+        if body.post.isLiked == nil { summary.unreported.insert(.isLiked) }
+        if body.post.updatedDatetime == nil { summary.unreported.insert(.updatedAt) }
         return summary
     }
 

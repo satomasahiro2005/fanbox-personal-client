@@ -123,11 +123,12 @@ enum SupportMutations {
     }
 
     /// Payment flow hand-off (SPEC §14): remember the intended plan and, if chosen, the profile as `.manual`.
-    /// Without a chosen profile the existing profile / state are kept (only the plan is updated).
+    /// Without a chosen profile the existing profile / state are kept (only the plan is updated). The support's own
+    /// profile left as it was preselected is not a new choice either: its verification is kept.
     @discardableResult
     static func recordPaymentIntent(store: LocalStore, accountID: String, creatorID: String, planID: String?,
                                     profileID: String?, now: Date = .now) -> SupportPaymentAssignment {
-        if let profileID {
+        if let profileID, assignment(store: store, accountID: accountID, creatorID: creatorID)?.paymentProfileID != profileID {
             return setAssignment(store: store, accountID: accountID, creatorID: creatorID, planID: planID,
                                  profileID: profileID, state: .manual, now: now)
         }

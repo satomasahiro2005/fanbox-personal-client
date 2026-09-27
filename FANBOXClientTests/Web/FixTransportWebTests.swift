@@ -83,6 +83,50 @@ final class FixTransportWebTests: XCTestCase {
         XCTAssertEqual(pool.liveHostCount, 0)
     }
 
+    /// A rejected in-page fetch is an edge block only when the page's own origin is still reachable; otherwise it is a
+    /// network failure (a read then goes through the native transport, and no breaker / cooldown starts).
+    func testFailedPageFetchIsAnEdgeBlockOnlyWhenThePageOriginIsReachable() {
+        let online = NetworkPolicySnapshot.default
+        XCTAssertEqual(WebFetchHost.mapScriptError("EdgeBlocked", policy: online), .edgeBlocked(retryAfter: nil))
+        guard case .network = WebFetchHost.mapScriptError("NetworkError", policy: online) else {
+            return XCTFail("a dropped connection is not an edge block")
+        }
+        var offline = online
+        offline.mode = .offline
+        XCTAssertEqual(WebFetchHost.mapScriptError("NetworkError", policy: offline), .offline)
+        XCTAssertTrue(WebFetchHost.fetchScript.contains("'NetworkError'"))
+        XCTAssertTrue(WebFetchHost.fetchScript.contains("'EdgeBlocked'"))
+    }
+
+    /// A page past its age is never reloaded while other fetches run in it (the navigation would take their document
+    /// away); a page being loaded (not verified yet) is joined rather than used or loaded a second time.
+    func testAgedPageIsNotReloadedUnderRunningFetches() {
+        XCTAssertTrue(WebFetchHost.pageUsableAsIs(isFresh: true, isVerified: true, fetchesInUse: 1))
+        XCTAssertTrue(WebFetchHost.pageUsableAsIs(isFresh: false, isVerified: true, fetchesInUse: 2), "another fetch runs in it")
+        XCTAssertFalse(WebFetchHost.pageUsableAsIs(isFresh: false, isVerified: true, fetchesInUse: 1), "idle: reloaded")
+        XCTAssertFalse(WebFetchHost.pageUsableAsIs(isFresh: false, isVerified: false, fetchesInUse: 3), "loading: joined")
+    }
+
+    /// The pool was shut down (background, Offline, memory warning, logout) while the account's session was being
+    /// prepared: the fetch gives up instead of loading a page into a host nothing can tear down any more.
+    func testHostShutDownWhileItsSessionIsPreparedLoadsNoPage() async {
+        let policy = NetworkPolicyStore()
+        let pool = WebFetchHostPool(webSessions: WebSessionStore(ephemeral: true), credentials: InMemoryCredentialStore(),
+                                    scheduler: NetworkScheduler(policy: policy), recorder: ResearchRecorder(), policy: policy)
+        pool.accountResolver = { id in WebFetchAccount(accountID: id, webProfileID: UUID().uuidString, pixivUserID: "1") }
+        pool.prepareSession = { _ in pool.shutdownAll() }
+        let request = HTTPRequest(url: URL(string: "https://api.fanbox.cc/post.info?postId=1")!, priority: .interactiveRead,
+                                  endpointKey: "post.info")
+        do {
+            _ = try await pool.fetch(request, accountID: "A")
+            XCTFail("expected unavailable")
+        } catch {
+            XCTAssertEqual(error as? WebFetchError, .unavailable("web transport shut down"))
+        }
+        XCTAssertEqual(pool.liveHostCount, 0)
+        pool.prepareSession = nil
+    }
+
     func testIdentityStatesInTheSessionBanner() {
         XCTAssertNotEqual(WebSessionIdentity.verified, .mismatch(pageUserID: "9"))
         XCTAssertTrue(SessionEdgeBlockNotice.applies(to: .edgeBlocked(retryAfter: nil)))

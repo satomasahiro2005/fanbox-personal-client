@@ -78,6 +78,27 @@ final class HomeAccountLogicTests: XCTestCase {
         // Someone else's comment on someone else's post → not deletable.
         XCTAssertNil(PostAccountLogic.deleteAccountID(commentIsOwn: false, authorUserID: "fan", fetchedByAccountID: "A",
                                                       postCreatorID: "other", commentIsOnOwnPost: false, accounts: accounts))
+        // Written by my turned-off account B, fetched by A: never deleted as A (FANBOX would refuse a non-author).
+        XCTAssertNil(PostAccountLogic.deleteAccountID(commentIsOwn: true, authorUserID: "uB", fetchedByAccountID: "A",
+                                                      postCreatorID: "other", commentIsOnOwnPost: false, accounts: accounts,
+                                                      disabledUserIDs: ["uB"]))
+        // …while the owner of the post may still delete it on their own post.
+        XCTAssertEqual(PostAccountLogic.deleteAccountID(commentIsOwn: true, authorUserID: "uB", fetchedByAccountID: "A",
+                                                        postCreatorID: "me", commentIsOnOwnPost: true, accounts: accounts,
+                                                        disabledUserIDs: ["uB"]), "C")
+    }
+
+    /// The comment composer never moves text to an account nobody picked for it: a draft of an account turned off meanwhile
+    /// stays that account's draft (hidden with it) instead of becoming A's, or being dropped when no account is left.
+    func testCommentDraftStaysWithItsAccountWhenTheAccountIsTurnedOff() {
+        let enabled: Set<String> = ["A"]
+        XCTAssertEqual(PostAccountLogic.draftAccountID(editingDraftAccountID: "B", composerAccountID: "B", enabledAccountIDs: enabled), "B")
+        XCTAssertEqual(PostAccountLogic.draftAccountID(editingDraftAccountID: "B", composerAccountID: nil, enabledAccountIDs: []), "B")
+        XCTAssertEqual(PostAccountLogic.draftAccountID(editingDraftAccountID: nil, composerAccountID: "B", enabledAccountIDs: enabled), "B",
+                       "text typed for B before it was turned off")
+        // An enabled account chosen in the composer takes the text.
+        XCTAssertEqual(PostAccountLogic.draftAccountID(editingDraftAccountID: "B", composerAccountID: "A", enabledAccountIDs: enabled), "A")
+        XCTAssertEqual(PostAccountLogic.draftAccountID(editingDraftAccountID: "A", composerAccountID: "A", enabledAccountIDs: enabled), "A")
     }
 
     func testBestAccountFromStoreThenOverride() throws {

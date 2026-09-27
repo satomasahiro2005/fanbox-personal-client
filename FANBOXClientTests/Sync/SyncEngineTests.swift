@@ -124,6 +124,21 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertEqual(post.bodyText, "B で読める本文", "restricted answer never wipes the cached body")
     }
 
+    /// A post screen whose 閲覧アカウント was turned off meanwhile still names it: nothing is fetched as that account.
+    func testRefreshPostNeverUsesATurnedOffExplicitAccount() async throws {
+        let h = try SyncHarness()
+        let a = h.addAccount("A", pixivUserID: "pA", isMain: true)
+        let b = h.addAccount("B", pixivUserID: "pB")
+        h.store.upsertPostSummaries([SyncFixtures.summary("p1")], account: a.context, source: .home)
+        h.mock.update { $0.details[b.id] = ["p1": SyncFixtures.detail("p1")] }
+        b.enabled = false
+        h.store.save()
+        let error = await h.engine.refreshPost(postID: "p1", accountID: b.id)
+        XCTAssertNotNil(error)
+        XCTAssertFalse(h.mock.calls.contains { $0.hasPrefix("post|\(b.id)|") })
+        XCTAssertNil(h.store.post(id: "p1")?.detailAccountID)
+    }
+
     func testUnauthorizedExpiresSessionAndKeepsCache() async throws {
         let h = try SyncHarness()
         let a = h.addAccount("A", pixivUserID: "pA", isMain: true)
@@ -216,6 +231,183 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertEqual(h.mock.count("notifications|"), 2)
         XCTAssertNil(h.engine.lastError)
         XCTAssertNotNil(h.engine.lastSuccessAt)
+    }
+
+    // MARK: Differential paging after gaps
+
+    /// A lightweight read of the newest page marks it seen; the next full sync must still list the posts below it.
+    func testFullSyncFillsTheGapLeftByALightweightRead() async throws {
+        let h = try SyncHarness()
+        let a = h.addAccount("A", pixivUserID: "pA", isMain: true)
+        h.mock.update { $0.homePages[a.id] = ["": SyncFixtures.page(["p1"])] }
+        await h.engine.sync(.timeline, accountID: a.id, reason: .appLaunch)
+
+        h.mock.update {
+            $0.homePages[a.id] = ["": SyncFixtures.page(["p5", "p4"], next: "c1"),
+                                  "c1": SyncFixtures.page(["p3", "p2"], next: "c2"),
+                                  "c2": SyncFixtures.page(["p1"], next: nil)]
+        }
+        await h.engine.sync(.timeline, accountID: a.id, reason: .backgroundRefresh)
+        XCTAssertNil(h.store.post(id: "p3"))
+
+        let full = await h.engine.sync(.timeline, accountID: a.id, reason: .userRefresh)
+        XCTAssertEqual(full.newItemIDs, ["p3", "p2"], "the gap below the lightweight page is listed")
+        XCTAssertNil(h.store.syncState(accountID: a.id, resource: .timeline).cursor, "gap filled")
+        let before = h.mock.count("home|")
+        await h.engine.sync(.timeline, accountID: a.id, reason: .userRefresh)
+        XCTAssertEqual(h.mock.count("home|") - before, 1, "nothing left to fill")
+    }
+
+    /// Two background reads overnight, each finding a full page of new posts: the older gap is not replaced by the newer
+    /// one, and full syncs list every post down to the ones known before.
+    func testTwoLightweightReadsLeaveNoPostUnlisted() async throws {
+        let h = try SyncHarness()
+        let a = h.addAccount("A", pixivUserID: "pA", isMain: true)
+        h.mock.update { $0.homePages[a.id] = ["": SyncFixtures.page(["p1"])] }
+        await h.engine.sync(.timeline, accountID: a.id, reason: .appLaunch)
+
+        h.mock.update {
+            $0.homePages[a.id] = ["": SyncFixtures.page(["p5", "p4"], next: "c1"),
+                                  "c1": SyncFixtures.page(["p3", "p2"], next: "c2"),
+                                  "c2": SyncFixtures.page(["p1"], next: nil)]
+        }
+        await h.engine.sync(.timeline, accountID: a.id, reason: .backgroundRefresh)
+        h.mock.update {
+            $0.homePages[a.id] = ["": SyncFixtures.page(["p7", "p6"], next: "d1"),
+                                  "d1": SyncFixtures.page(["p5", "p4"], next: "d2"),
+                                  "d2": SyncFixtures.page(["p3", "p2"], next: "d3"),
+                                  "d3": SyncFixtures.page(["p1"], next: nil)]
+        }
+        await h.engine.sync(.timeline, accountID: a.id, reason: .backgroundRefresh)
+        XCTAssertNil(h.store.post(id: "p3"))
+
+        let full = await h.engine.sync(.timeline, accountID: a.id, reason: .userRefresh)
+        XCTAssertEqual(full.newItemIDs, ["p3", "p2"])
+        await h.engine.sync(.timeline, accountID: a.id, reason: .userRefresh)
+        XCTAssertTrue(h.mock.calls.contains("home|\(a.id)|d3"), "the rest below the page cap is read by the next full sync")
+        XCTAssertNil(h.store.syncState(accountID: a.id, resource: .timeline).cursor)
+    }
+
+    /// A creator page lists posts that are also on the Home timeline: that is not a Home listing, so Home paging does not
+    /// stop there.
+    func testCreatorPageListingDoesNotStopTheHomeFeed() async throws {
+        let h = try SyncHarness()
+        let a = h.addAccount("A", pixivUserID: "pA", isMain: true)
+        h.mock.update { $0.homePages[a.id] = ["": SyncFixtures.page(["p1"])] }
+        await h.engine.sync(.timeline, accountID: a.id, reason: .appLaunch)
+
+        h.mock.update {
+            $0.creatorPostPages["c9"] = ["": SyncFixtures.page(["p9"], creator: "c9")]
+            $0.homePages[a.id] = ["": SyncFixtures.page(["p10", "p9"], next: "k1"),
+                                  "k1": SyncFixtures.page(["p8"], next: "k2"),
+                                  "k2": SyncFixtures.page(["p1"], next: nil)]
+        }
+        await h.engine.sync(.creatorPosts, accountID: a.id, scope: "c9", reason: .onDemand)
+        let home = await h.engine.sync(.timeline, accountID: a.id, reason: .userRefresh)
+        XCTAssertTrue(home.newItemIDs.contains("p8"), "paging did not stop at the creator page's post")
+        XCTAssertNotNil(h.store.post(id: "p8"))
+    }
+
+    /// bell.list is paged after a gap until a bell this account already imported.
+    func testNotificationSyncReadsOlderPagesAfterAGap() async throws {
+        let h = try SyncHarness()
+        let a = h.addAccount("A", pixivUserID: "pA", isMain: true)
+        let old = SyncFixtures.notification("r0", type: .newPost, postID: "p0")
+        h.mock.update { $0.notificationPages[a.id] = ["": RemotePage(items: [old])] }
+        await h.engine.sync(.notifications, accountID: a.id, reason: .appLaunch)
+
+        let newer = (1...3).map { SyncFixtures.notification("r\($0)", type: .newPost, postID: "p\($0)") }
+        h.mock.update {
+            $0.notificationPages[a.id] = ["": RemotePage(items: [newer[2], newer[1]], nextCursor: "2"),
+                                          "2": RemotePage(items: [newer[0], old], nextCursor: "3"),
+                                          "3": RemotePage(items: [SyncFixtures.notification("rX", type: .newPost, postID: "pX")])]
+        }
+        let outcome = await h.engine.sync(.notifications, accountID: a.id, reason: .userRefresh)
+        XCTAssertEqual(Set(outcome.newItemIDs), ["newPost|p1", "newPost|p2", "newPost|p3"])
+        XCTAssertEqual(h.mock.count("notifications|"), 3, "stops at the page holding a known bell")
+    }
+
+    /// "<end>" from a first visit to a small creator page is not kept once the creator has more posts.
+    func testCreatorLoadMoreCursorFollowsNewPosts() async throws {
+        let h = try SyncHarness()
+        let a = h.addAccount("A", pixivUserID: "pA", isMain: true)
+        h.mock.update { $0.creatorPostPages["z"] = ["": SyncFixtures.page(["z1"], creator: "z")] }
+        _ = await h.engine.refreshCreator(creatorID: "z", accountID: a.id)
+        XCTAssertFalse(h.engine.hasMoreCreatorPosts(creatorID: "z", accountID: a.id))
+
+        h.mock.update {
+            $0.creatorPostPages["z"] = ["": SyncFixtures.page(["z4", "z3"], next: "n1", creator: "z"),
+                                        "n1": SyncFixtures.page(["z2", "z1"], creator: "z")]
+        }
+        _ = await h.engine.refreshCreator(creatorID: "z", accountID: a.id)
+        XCTAssertTrue(h.engine.hasMoreCreatorPosts(creatorID: "z", accountID: a.id))
+        let more = await h.engine.loadMoreCreatorPosts(creatorID: "z", accountID: a.id)
+        XCTAssertNil(more)
+        XCTAssertNotNil(h.store.post(id: "z2"))
+    }
+
+    /// Account removal: running syncs of the account finish (cancelled) before its rows are deleted, and nothing new
+    /// starts for it.
+    func testRemovalWaitsForTheAccountsSyncsAndBlocksNewOnes() async throws {
+        let h = try SyncHarness()
+        let a = h.addAccount("A", pixivUserID: "pA", isMain: true)
+        h.mock.update {
+            $0.homePages[a.id] = ["": SyncFixtures.page(["p1"])]
+            $0.homeDelayNanoseconds = 300_000_000
+        }
+        let running = Task { await h.engine.sync(.timeline, accountID: a.id, reason: .userRefresh) }
+        var spins = 0
+        while h.mock.count("home|") == 0 && spins < 100_000 { spins += 1; await Task.yield() }
+        await h.engine.prepareForRemoval(accountID: a.id)
+        let outcome = await running.value
+        XCTAssertEqual(outcome.error, .cancelled)
+        XCTAssertNil(h.store.post(id: "p1"), "no late result for the removed account")
+        _ = await h.engine.sync(.notifications, accountID: a.id, reason: .userRefresh)
+        XCTAssertEqual(h.mock.count("notifications|"), 0)
+    }
+
+    /// Removing an account cancels only the automatic post fetches sending as it: an open post screen reading through
+    /// another account keeps its fetch, and one reading through the removed account stores nothing for it.
+    func testRemovalCancelsOnlyPostFetchesSendingAsThatAccount() async throws {
+        let h = try SyncHarness()
+        let a = h.addAccount("A", pixivUserID: "pA", isMain: true)
+        let b = h.addAccount("B", pixivUserID: "pB")
+        h.store.upsertPostSummaries([SyncFixtures.summary("p1")], account: a.context, source: .home)
+        h.mock.update {
+            $0.details[a.id] = ["p1": SyncFixtures.detail("p1")]
+            $0.postDelayNanoseconds = 200_000_000
+        }
+        let screen = Task { await h.engine.refreshPost(postID: "p1") }
+        var spins = 0
+        while h.mock.count("post|") == 0 && spins < 100_000 { spins += 1; await Task.yield() }
+        await h.engine.prepareForRemoval(accountID: b.id)
+        let shown = await screen.value
+        XCTAssertNil(shown, "not cancelled by another account's removal")
+        XCTAssertEqual(h.mock.calls.filter { $0.hasPrefix("post|") }, ["post|\(a.id)|p1"])
+        XCTAssertEqual(h.store.post(id: "p1")?.hasCachedBody, true)
+
+        h.store.upsertPostSummaries([SyncFixtures.summary("p2")], account: a.context, source: .home)
+        h.mock.update { $0.details[a.id]?["p2"] = SyncFixtures.detail("p2") }
+        let automatic = Task { await h.engine.refreshPost(postID: "p2", priority: .notificationPrefetch) }
+        spins = 0
+        while h.mock.count("post|\(a.id)|p2") == 0 && spins < 100_000 { spins += 1; await Task.yield() }
+        await h.engine.prepareForRemoval(accountID: a.id)
+        let removed = await automatic.value
+        XCTAssertEqual(removed, .cancelled)
+        XCTAssertNotEqual(h.store.post(id: "p2")?.hasCachedBody, true, "nothing stored for the removed account")
+    }
+
+    /// A launch without signal leaves "同期できませんでした"; the next successful poll clears it (no pull-to-refresh needed).
+    func testSuccessfulPollClearsTheSyncFailureBanner() async throws {
+        let h = try SyncHarness()
+        _ = h.addAccount("A", pixivUserID: "pA", isMain: true)
+        h.setOffline(true)
+        await h.coordinator.refreshNow()
+        XCTAssertEqual(h.coordinator.lastError, .offline)
+        h.setOffline(false)
+        await h.coordinator.pollOnce()
+        XCTAssertNil(h.coordinator.lastError)
+        XCTAssertNotNil(h.coordinator.lastRefreshAt)
     }
 
     func testRemoteRelayFetchResult() {

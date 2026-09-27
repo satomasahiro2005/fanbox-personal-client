@@ -131,6 +131,33 @@ final class AccountServiceTests: XCTestCase {
         XCTAssertFalse(onlyB.isSupported, "only the disabled B is left")
     }
 
+    /// B's Home timeline listed a creator B followed on the web after the last following sync (no relation stored yet).
+    /// Turning B off takes the post out of the timeline, and a listing of B that was still running raises nothing.
+    /// Turning B on again brings both back (disabled data is kept).
+    func testDisablingAnAccountRemovesPostsOnlyItsFeedsListed() throws {
+        _ = service.addDemoAccount(name: "A")
+        let b = service.addDemoAccount(name: "B")
+        store.upsertPostSummaries([SyncFixtures.summary("x1", creator: "newlyFollowed")], account: b.context, source: .home)
+        XCTAssertEqual(store.post(id: "x1")?.isFromFollowedCreator, true)
+        XCTAssertEqual(store.creator(id: "newlyFollowed")?.isFollowed, false, "the relation is not stored yet")
+
+        service.setEnabled(accountID: b.id, false)
+        XCTAssertEqual(store.post(id: "x1")?.isFromFollowedCreator, false)
+        let all = HomeFeedFilter(kind: .all)
+        XCTAssertFalse(all.apply(store.fetch(all.descriptor(limit: nil))).contains { $0.postID == "x1" })
+
+        store.upsertPostSummaries([SyncFixtures.summary("x2", creator: "newlyFollowed")], account: b.context, source: .home)
+        XCTAssertEqual(store.post(id: "x2")?.isFromFollowedCreator, false, "a late listing of the disabled account")
+
+        service.setEnabled(accountID: b.id, true)
+        XCTAssertEqual(Set(all.apply(store.fetch(all.descriptor(limit: nil))).map(\.postID)), ["x1", "x2"])
+
+        // B unfollows the creator (now stored, then gone): its Home no longer lists the posts.
+        store.applyFollowing([RemoteCreator(creatorID: "newlyFollowed", name: "N")], account: b.context)
+        store.applyFollowing([], account: b.context)
+        XCTAssertTrue(all.apply(store.fetch(all.descriptor(limit: nil))).isEmpty)
+    }
+
     /// The app badge counts unread events of enabled accounts only (an event left without accounts counts nowhere).
     func testUnreadBadgeCountsEnabledAccountsOnly() {
         let a = service.addDemoAccount(name: "A")
@@ -424,6 +451,31 @@ final class AccountServiceTests: XCTestCase {
         XCTAssertFalse(hasSession)
     }
 
+    /// A logged-out account has no credential: checking it would only send a guest request and report "expired".
+    func testSessionChecksLeaveALoggedOutAccountLoggedOut() async throws {
+        let a = makeRealAccount(pixivUserID: "1001", name: "A", main: true)
+        await service.logout(accountID: a.id)
+        remote.userResult = .failure(.unauthorized)       // what a guest request answers
+
+        let result = await service.checkSession(accountID: a.id)
+        XCTAssertEqual(result, .updated(.loggedOut))
+        await service.validateAllSessions()
+        XCTAssertEqual(a.sessionState, .loggedOut, "a logout is not an expiry")
+        XCTAssertEqual(remote.currentUserCalls, 0, "no guest request")
+    }
+
+    /// A quarantine (identity mismatch) lasts until a verified login: a check cannot turn it into "expired".
+    func testSessionChecksKeepAQuarantine() async throws {
+        let a = makeRealAccount(pixivUserID: "1001", name: "A", main: true)
+        a.sessionState = .error
+        store.save()
+        remote.userResult = .failure(.unauthorized)
+        await service.validateAllSessions()
+        _ = await service.checkSession(accountID: a.id)
+        XCTAssertEqual(a.sessionState, .error)
+        XCTAssertEqual(remote.currentUserCalls, 0)
+    }
+
     // MARK: Session
 
     func testValidateSessionStateMapping() async {
@@ -490,6 +542,21 @@ final class AccountServiceTests: XCTestCase {
         await service.prepareWebSession(accountID: a.id)
         let cookies = await sessions.cookies(webProfileID: a.webProfileID)
         XCTAssertEqual(cookies.first { $0.name == "FANBOXSESSID" }?.value, "from-keychain")
+    }
+
+    /// A hidden-page fetch that read the credential while the account was logged out (or quarantined) never installs it:
+    /// the web store the logout cleared stays logged out.
+    func testPrepareWebSessionNeverLogsInALoggedOutWebStore() async throws {
+        let a = makeRealAccount(pixivUserID: "1001", name: "A", main: true)
+        try await credentials.save(SessionCredential(cookies: [StoredCookie(name: "FANBOXSESSID", value: "stale", domain: ".fanbox.cc",
+                                                                            expiresAt: Date().addingTimeInterval(3600))]), for: a.id)
+        for state in [SessionState.loggedOut, .error] {
+            a.sessionState = state
+            store.save()
+            await service.prepareWebSession(accountID: a.id)
+            let installed = await sessions.hasSessionCookie(webProfileID: a.webProfileID)
+            XCTAssertFalse(installed, "\(state)")
+        }
     }
 
     /// Updated for the transport fix (docs/API.md §4.2): only a 401 changes the state; a challenge / edge block / FANBOX

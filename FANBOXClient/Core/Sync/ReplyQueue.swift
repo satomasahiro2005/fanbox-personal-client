@@ -43,6 +43,11 @@ final class ReplyQueue {
     @ObservationIgnored private var rerunRequested = false
     @ObservationIgnored private var nextAttemptAt: [String: Date] = [:]
     @ObservationIgnored private var retryTimer: Task<Void, Never>?
+    /// Accounts being removed (`prepareForRemoval`).
+    @ObservationIgnored private var removingAccountIDs: Set<String> = []
+    /// Sends running outside `flush` (a user retry / confirmation) per account, and removals waiting for them to end.
+    @ObservationIgnored private var directSends: [String: Int] = [:]
+    @ObservationIgnored private var directSendWaiters: [CheckedContinuation<Void, Never>] = []
 
     init(store: LocalStore, remote: RemoteDataSourceProvider, settings: AppSettings, network: NetworkModeController) {
         self.store = store
@@ -85,6 +90,20 @@ final class ReplyQueue {
         guard let item = item(id: id), item.state == .draft else { return }
         item.body = body
         store.save()
+    }
+
+    /// Moves a draft into the queue as a reply to `parentCommentID` without sending it yet (a notification reply saved
+    /// before its target comment was resolved). The caller flushes.
+    func queueDraft(id: String, parentCommentID: String?, rootCommentID: String?, origin: ReplyOrigin) {
+        guard let item = item(id: id), item.state == .draft else { return }
+        item.parentCommentID = parentCommentID
+        item.rootCommentID = rootCommentID
+        item.origin = origin
+        item.body = item.body.trimmingCharacters(in: .whitespacesAndNewlines)
+        item.state = .queued
+        item.queuedAt = .now
+        store.save()
+        refreshCounts()
     }
 
     /// Moves a draft into the queue and tries to send it.
@@ -132,7 +151,7 @@ final class ReplyQueue {
             store.save()
             refreshCounts()
             guard canSend else { return }
-            await send(item, userConfirmed: true)
+            await sendDirectly(item)
         default:
             return
         }
@@ -147,7 +166,7 @@ final class ReplyQueue {
         store.save()
         refreshCounts()
         guard canSend else { return }
-        await send(item, userConfirmed: true)
+        await sendDirectly(item)
     }
 
     /// Deletes a draft / queued / failed / needsConfirmation item. Sending or sent items are kept.
@@ -162,6 +181,21 @@ final class ReplyQueue {
         case .sending, .sent:
             return
         }
+    }
+
+    /// Account removal: nothing is sent for the account any more, and a running flush or user retry is awaited so no
+    /// send writes to queue rows that are about to be deleted.
+    func prepareForRemoval(accountID: String) async {
+        removingAccountIDs.insert(accountID)
+        await flushTask?.value
+        while directSends[accountID] != nil {
+            await withCheckedContinuation { directSendWaiters.append($0) }
+        }
+    }
+
+    /// Queue rows were changed outside the queue (account removal): refresh `pendingCount` / `attentionCount`.
+    func countsChanged() {
+        refreshCounts()
     }
 
     /// Connectivity came back.
@@ -200,11 +234,16 @@ final class ReplyQueue {
     private func flushOnce() async {
         guard canSend else { return }       // offline: everything stays queued locally
         let queued = ReplyState.queued.rawValue
-        let items = store.fetch(FetchDescriptor<OutgoingComment>(predicate: #Predicate { $0.stateRaw == queued }))
+        let ids = store.fetch(FetchDescriptor<OutgoingComment>(predicate: #Predicate { $0.stateRaw == queued }))
             .sorted { ($0.queuedAt ?? $0.createdAt) < ($1.queuedAt ?? $1.createdAt) }
+            .map(\.id)
         let now = Date.now
-        for item in items {
-            guard item.state == .queued else { continue }        // cancelled / confirmed meanwhile
+        for id in ids {
+            // Re-read by id: an item cancelled (deleted) while an earlier one was sending must not be touched.
+            guard let item = item(id: id), item.state == .queued else { continue }        // cancelled / confirmed meanwhile
+            if removingAccountIDs.contains(item.accountID) { continue }
+            // A turned-off account sends nothing: its replies wait until it is turned on again.
+            if store.account(id: item.accountID)?.enabled == false { continue }
             if let next = nextAttemptAt[item.id], next > now { continue }
             let age = now.timeIntervalSince(item.queuedAt ?? item.createdAt)
             if age > settings.staleReplyThreshold && !settings.autoSendStaleReplies {
@@ -230,7 +269,22 @@ final class ReplyQueue {
         case inconclusive(RemoteError?)
     }
 
+    /// A user-confirmed `send` outside `flush`, counted per account so `prepareForRemoval` waits for it too.
+    private func sendDirectly(_ item: OutgoingComment) async {
+        let accountID = item.accountID
+        directSends[accountID, default: 0] += 1
+        await send(item, userConfirmed: true)
+        let remaining = (directSends[accountID] ?? 1) - 1
+        directSends[accountID] = remaining > 0 ? remaining : nil
+        let waiters = directSendWaiters
+        directSendWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
+    }
+
     private func send(_ item: OutgoingComment, userConfirmed: Bool = false) async {
+        if removingAccountIDs.contains(item.accountID) { return }
+        // A turned-off account never posts (a public comment as a hidden identity); the item waits, queued.
+        if store.account(id: item.accountID)?.enabled == false { return }
         guard let account = store.account(id: item.accountID) else {
             item.state = .failed
             item.lastError = "アカウントが見つかりません"
@@ -253,6 +307,8 @@ final class ReplyQueue {
         let dataSource = remote.dataSource(for: context)
 
         // Duplicate guard (docs/API.md §9.2): a previous attempt may have reached FANBOX although its response was lost.
+        // `earlierAttemptsSettled`: no earlier attempt can be on FANBOX (none was made, or the lookup did not find it).
+        var earlierAttemptsSettled = item.lastAttemptAt == nil
         if item.lastAttemptAt != nil {
             item.state = .sending
             store.save()
@@ -264,10 +320,18 @@ final class ReplyQueue {
                 refreshCounts()
                 return
             case .notFound:
-                break
+                earlierAttemptsSettled = true
             case .inconclusive(let error):
                 if error == .offline {
                     item.state = .queued        // checked again once connectivity is back
+                    store.save()
+                    refreshCounts()
+                    return
+                }
+                if case .rateLimited(let retryAfter)? = error {
+                    // The lookup was refused (cooldown): nothing is known yet, look again once it is over.
+                    item.state = .queued
+                    scheduleRetry(for: item, notBefore: retryAfter)
                     store.save()
                     refreshCounts()
                     return
@@ -298,7 +362,13 @@ final class ReplyQueue {
         } catch {
             let mapped = SyncEngine.map(error)
             item.lastError = mapped.userMessage
-            if mapped == .unauthorized {
+            if earlierAttemptsSettled && !Self.mayHaveReachedServer(mapped) {
+                // Refused (rate limit, edge block, no CSRF token …): this POST provably did not land, so the next attempt
+                // needs no lookup — a refused lookup would otherwise turn it into "maybe sent, please confirm".
+                item.lastAttemptAt = nil
+            }
+            if mapped == .unauthorized, account.sessionState != .error, account.sessionState != .loggedOut {
+                // A quarantine / logout ends only with a verified login, never by turning into "expired".
                 account.sessionState = .expired
                 account.sessionCheckedAt = .now
             }
@@ -309,7 +379,11 @@ final class ReplyQueue {
                 item.attemptCount = max(0, item.attemptCount - 1)
             } else if mapped.isTransient && item.attemptCount < Self.maxAttempts {
                 item.state = .queued
-                scheduleRetry(for: item)
+                if case .rateLimited(let retryAfter) = mapped {
+                    scheduleRetry(for: item, notBefore: retryAfter)
+                } else {
+                    scheduleRetry(for: item)
+                }
             } else if Self.mayHaveReachedServer(mapped) {
                 // Out of automatic attempts after errors that do not prove the comment was rejected.
                 item.state = .needsConfirmation
@@ -445,9 +519,11 @@ final class ReplyQueue {
         await hook(item.id)
     }
 
-    private func scheduleRetry(for item: OutgoingComment) {
+    /// `notBefore`: a wait the service asked for (Retry-After / the rate gate's cooldown); it overrides the backoff.
+    private func scheduleRetry(for item: OutgoingComment, notBefore: TimeInterval? = nil) {
         let exponent = Double(max(0, item.attemptCount - 1))
-        let delay = min(Self.retryMaxDelay, Self.retryBaseDelay * pow(2, exponent))
+        let backoff = min(Self.retryMaxDelay, Self.retryBaseDelay * pow(2, exponent))
+        let delay = max(backoff, notBefore ?? 0)
         nextAttemptAt[item.id] = Date(timeIntervalSinceNow: delay)
         retryTimer?.cancel()
         let wait = nextAttemptAt.values.min().map { max(0.1, $0.timeIntervalSinceNow) } ?? delay

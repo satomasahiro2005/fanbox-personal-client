@@ -131,6 +131,9 @@ actor NetworkScheduler {
     private struct Transfer {
         let transfer: PausableTransfer
         let priority: RequestPriority
+        /// Sends a request body with side effects (an upload, e.g. post.addImage): never cancelled or suspended midway,
+        /// since its outcome would become ambiguous (the asset may have been stored).
+        let isWrite: Bool
         var suspended: Bool
     }
 
@@ -180,15 +183,16 @@ actor NetworkScheduler {
 
     /// Registers a media transfer so it can be paused while interactive requests run.
     func register(task: URLSessionTask, priority: RequestPriority) -> TransferToken {
-        register(transfer: task, priority: priority)
+        let method = task.originalRequest?.httpMethod?.uppercased() ?? "GET"
+        return register(transfer: task, priority: priority, isWrite: method != "GET" && method != "HEAD")
     }
 
     /// Registers any pausable transfer. Transfers with priority ≤ foregroundMedia are suspended immediately when
-    /// text-first work is in flight.
-    func register(transfer: PausableTransfer, priority: RequestPriority) -> TransferToken {
+    /// text-first work is in flight, except writes (`isWrite`: uploads), which run to their end.
+    func register(transfer: PausableTransfer, priority: RequestPriority, isWrite: Bool = false) -> TransferToken {
         let token = TransferToken(id: UUID())
-        var entry = Transfer(transfer: transfer, priority: priority, suspended: false)
-        if priority.isPausableTransferClass && textFirstInFlight {
+        var entry = Transfer(transfer: transfer, priority: priority, isWrite: isWrite, suspended: false)
+        if priority.isPausableTransferClass && textFirstInFlight && !isWrite {
             transfer.suspend()
             entry.suspended = true
         }
@@ -230,10 +234,11 @@ actor NetworkScheduler {
 
     /// SPEC §30 Offline ("ネットワーク通信を完全停止する"): cancels every registered long-running transfer (downloads /
     /// uploads) when the policy no longer allows network access. The transport reports them as `.offline`.
-    /// Admitted writes (`interactiveWrite`) are never cancelled: the server outcome would become ambiguous.
+    /// Admitted writes (`interactiveWrite`, and uploads of any priority) are never cancelled: the server outcome would
+    /// become ambiguous (an upload whose body already reached FANBOX would be sent again as a duplicate asset).
     func cancelTransfersIfOffline() {
         guard !policy.current.allowsNetwork else { return }
-        for (token, entry) in transfers where entry.priority != .interactiveWrite {
+        for (token, entry) in transfers where entry.priority != .interactiveWrite && !entry.isWrite {
             transfers.removeValue(forKey: token)
             entry.transfer.cancel()
             if entry.suspended { entry.transfer.resume() }
@@ -357,7 +362,7 @@ actor NetworkScheduler {
     func activeLargeMediaCount() -> Int { activeLarge }
 
     private func suspendMediaTransfers() {
-        for (token, entry) in transfers where entry.priority.isPausableTransferClass && !entry.suspended {
+        for (token, entry) in transfers where entry.priority.isPausableTransferClass && !entry.suspended && !entry.isWrite {
             entry.transfer.suspend()
             transfers[token]?.suspended = true
         }

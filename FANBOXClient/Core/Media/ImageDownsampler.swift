@@ -5,7 +5,8 @@ import UIKit
 /// ImageIO-based decoding with downsampling. Never decodes a full-size bitmap just to show a thumbnail.
 /// All functions are thread-safe and intended to run off the main actor.
 enum ImageDownsampler {
-    /// Longest side in pixels for each staged variant (SPEC §6). `nil` = full resolution.
+    /// Size limit in pixels for each staged variant (SPEC §6): the longest side of a thumbnail, the shorter side of a
+    /// display image (see `longestSideLimit(pixelSize:variant:)`). `nil` = full resolution.
     static func maxPixelSize(for variant: MediaVariant) -> CGFloat? {
         switch variant {
         case .thumbnail: return 400
@@ -17,8 +18,50 @@ enum ImageDownsampler {
     /// Hard cap for "original" decoding to keep memory bounded on huge images.
     static let originalPixelCap: CGFloat = 8192
 
+    /// Display images are shown at the full width of the screen, so their limit applies to the SHORTER side (a tall
+    /// strip keeps its full width instead of being squeezed to 1600 px of height), within this many pixels.
+    static let displayPixelBudget: CGFloat = 3 * 1600 * 1600
+
+    /// A thumbnail keeps at least this many pixels on its shorter side (a square tile of a 1:5 strip would otherwise get
+    /// 80 px of width), within `thumbnailPixelBudget`. Ordinary shapes (up to 2:1) keep the 400 px longest side.
+    static let thumbnailMinShortSide: CGFloat = 200
+    static let thumbnailPixelBudget: CGFloat = 3 * 400 * 400
+
     static func decode(fileURL: URL, variant: MediaVariant) -> UIImage? {
-        decode(fileURL: fileURL, maxPixelSize: maxPixelSize(for: variant))
+        let size = pixelSize(fileURL: fileURL) ?? .zero
+        return decode(fileURL: fileURL, maxPixelSize: longestSideLimit(pixelSize: size, variant: variant))
+    }
+
+    /// The longest-side limit (what ImageIO takes) for decoding an image of `pixelSize` as `variant`. nil = full
+    /// resolution up to `originalPixelCap`. An unknown size gets `maxPixelSize(for:)`.
+    /// - Original: full size up to `originalPixelCap`, never smaller than the display decode of the same file (the viewer
+    ///   replaces the display image with it).
+    static func longestSideLimit(pixelSize: CGSize, variant: MediaVariant) -> CGFloat? {
+        let width = pixelSize.width, height = pixelSize.height
+        guard width > 0, height > 0 else { return maxPixelSize(for: variant) }
+        let longest = max(width, height), shortest = min(width, height)
+        let display = shortSideLimitedLongestSide(pixelSize: pixelSize, shortSide: maxPixelSize(for: .display) ?? 1600,
+                                                  budget: displayPixelBudget) ?? longest
+        switch variant {
+        case .thumbnail:
+            let thumbnailSide = maxPixelSize(for: .thumbnail) ?? 400
+            let scale = min(1, max(thumbnailSide / longest, thumbnailMinShortSide / shortest),
+                            (thumbnailPixelBudget / (width * height)).squareRoot())
+            return max(1, (longest * scale).rounded(.down))
+        case .display:
+            return display
+        case .original:
+            return max(min(longest, originalPixelCap), display)
+        }
+    }
+
+    /// The longest-side limit (what ImageIO takes) that caps the shorter side at `shortSide` and the area at `budget`,
+    /// never enlarging. nil for an unknown size.
+    static func shortSideLimitedLongestSide(pixelSize: CGSize, shortSide: CGFloat, budget: CGFloat) -> CGFloat? {
+        let width = pixelSize.width, height = pixelSize.height
+        guard width > 0, height > 0 else { return nil }
+        let scale = min(1, shortSide / min(width, height), (budget / (width * height)).squareRoot())
+        return max(1, (max(width, height) * scale).rounded(.down))
     }
 
     static func decode(fileURL: URL, maxPixelSize: CGFloat?) -> UIImage? {

@@ -60,6 +60,9 @@ final class AppSettings {
     var remoteRelayURL: String { didSet { defaults.set(remoteRelayURL, forKey: Keys.relayURL) } }
     /// Show adult content thumbnails (local preference only).
     var showAdultContent: Bool { didSet { defaults.set(showAdultContent, forKey: Keys.adult) } }
+    /// Bookkeeping, not a setting: the enabled accounts every post's feed flags were last re-derived for at launch
+    /// (`AppEnvironment.refreshStoredFlagsAtLaunch`).
+    @ObservationIgnored var feedFlagsSignature: String? { didSet { defaults.set(feedFlagsSignature, forKey: Keys.feedFlagsSignature) } }
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -77,6 +80,7 @@ final class AppSettings {
         remoteRelayEnabled = defaults.object(forKey: Keys.relayEnabled) as? Bool ?? false
         remoteRelayURL = defaults.string(forKey: Keys.relayURL) ?? ""
         showAdultContent = defaults.object(forKey: Keys.adult) as? Bool ?? true
+        feedFlagsSignature = defaults.string(forKey: Keys.feedFlagsSignature)
     }
 
     private enum Keys {
@@ -94,5 +98,6 @@ final class AppSettings {
         static let relayEnabled = "settings.remoteRelayEnabled"
         static let relayURL = "settings.remoteRelayURL"
         static let adult = "settings.showAdultContent"
+        static let feedFlagsSignature = "store.feedFlagsSignature"
     }
 }

@@ -20,6 +20,8 @@ final class SyncMockRemote: RemoteDataSource, @unchecked Sendable {
         var supports: [String: [RemoteSupport]] = [:]
         var payments: [String: [RemotePayment]] = [:]
         var notifications: [String: [RemoteNotification]] = [:]
+        /// accountID → cursor ("" = first page) → bell.list page; used instead of `notifications` when set.
+        var notificationPages: [String: [String: RemotePage<RemoteNotification>]] = [:]
         var newsletters: [String: [RemoteNewsletter]] = [:]
         /// postID → comments
         var comments: [String: [RemoteComment]] = [:]
@@ -30,6 +32,7 @@ final class SyncMockRemote: RemoteDataSource, @unchecked Sendable {
         /// Errors thrown by comments(postID:) (consumed in order; empty = success).
         var commentErrors: [RemoteError] = []
         var homeDelayNanoseconds: UInt64 = 0
+        var addCommentDelayNanoseconds: UInt64 = 0
         var commentsDelayNanoseconds: UInt64 = 0
         var postDelayNanoseconds: UInt64 = 0
         /// accountID → postID → error thrown by post(id:)
@@ -46,6 +49,8 @@ final class SyncMockRemote: RemoteDataSource, @unchecked Sendable {
         var notificationPosts: [String: [RemotePostSummary]] = [:]
         /// accountID → fans
         var fans: [String: [RemoteFan]] = [:]
+        /// accountID → completeness problem of the fan listing
+        var fanProblems: [String: String] = [:]
     }
 
     private let lock = NSLock()
@@ -176,14 +181,15 @@ final class SyncMockRemote: RemoteDataSource, @unchecked Sendable {
     func addComment(postID: String, body: String, parentCommentID: String?, rootCommentID: String?,
                     account: AccountContext) async throws -> RemoteComment {
         let priority = RequestContext.priority
-        let (error, n): (RemoteError?, Int) = {
+        let (error, n, delay): (RemoteError?, Int, UInt64) = {
             lock.lock(); defer { lock.unlock() }
             log.append("addComment|\(account.accountID)|\(postID)")
             priorityLog.append(("addComment|\(account.accountID)|\(postID)", priority))
             sentCounter += 1
             let next = script.addCommentResults.isEmpty ? nil : script.addCommentResults.removeFirst()
-            return (next, sentCounter)
+            return (next, sentCounter, script.addCommentDelayNanoseconds)
         }()
+        if delay > 0 { try await Task.sleep(nanoseconds: delay) }
         let comment = RemoteComment(id: "sent-\(n)", postID: postID, parentCommentID: parentCommentID, rootCommentID: rootCommentID,
                                     authorUserID: account.pixivUserID ?? "", authorName: "me", body: body, createdAt: .now, isOwn: true)
         // A successful POST (or one that reached FANBOX before its response was lost) is visible in the thread.
@@ -204,6 +210,9 @@ final class SyncMockRemote: RemoteDataSource, @unchecked Sendable {
 
     func notificationBatch(account: AccountContext, cursor: String?) async throws -> RemoteNotificationBatch {
         let s = try record("notifications|\(account.accountID)", account: account)
+        if let pages = s.notificationPages[account.accountID] {
+            return RemoteNotificationBatch(page: pages[cursor ?? ""] ?? RemotePage(items: []), posts: [])
+        }
         return RemoteNotificationBatch(page: RemotePage(items: s.notifications[account.accountID] ?? []),
                                        posts: s.notificationPosts[account.accountID] ?? [])
     }
@@ -240,6 +249,11 @@ final class SyncMockRemote: RemoteDataSource, @unchecked Sendable {
     func fans(account: AccountContext, cursor: String?) async throws -> RemotePage<RemoteFan> {
         let s = try record("fans|\(account.accountID)", account: account)
         return RemotePage(items: s.fans[account.accountID] ?? [])
+    }
+
+    func fanListing(account: AccountContext, cursor: String?) async throws -> RemoteFanListing {
+        let s = try record("fans|\(account.accountID)", account: account)
+        return RemoteFanListing(page: RemotePage(items: s.fans[account.accountID] ?? []), problem: s.fanProblems[account.accountID])
     }
 
     func creatorDashboard(account: AccountContext) async throws -> RemoteCreatorDashboard {
@@ -280,9 +294,13 @@ final class SyncHarness {
     let engine: SyncEngine
     let replies: ReplyQueue
     let router = AppRouter()
+    /// Per-harness UserDefaults suites (settings, Creator Mode's selected account), removed with the harness.
+    private let settingsSuite = "sync-tests-\(UUID().uuidString)"
+    private let creatorModeSuite = "sync-creator-mode-\(UUID().uuidString)"
     lazy var notifications: NotificationService = {
         let service = NotificationService(store: store, engine: engine, replies: replies, router: router, settings: settings)
         service.poster = poster
+        service.creatorModeDefaults = UserDefaults(suiteName: creatorModeSuite)!
         return service
     }()
     lazy var coordinator: SyncCoordinator = {
@@ -295,7 +313,7 @@ final class SyncHarness {
     init() throws {
         container = try PersistenceController.makeContainer(inMemory: true)
         store = LocalStore(container: container)
-        settings = AppSettings(defaults: UserDefaults(suiteName: "sync-tests-\(UUID().uuidString)")!)
+        settings = AppSettings(defaults: UserDefaults(suiteName: settingsSuite)!)
         policy = NetworkPolicyStore()
         network = NetworkModeController(settings: settings, policyStore: policy)
         let provider = SyncMockProvider(mock: mock)
@@ -305,6 +323,11 @@ final class SyncHarness {
         replies.onAttentionNeeded = { [weak self] itemID in
             await self?.notifications.handleReplyAttention(itemID: itemID)
         }
+    }
+
+    deinit {
+        UserDefaults().removePersistentDomain(forName: settingsSuite)
+        UserDefaults().removePersistentDomain(forName: creatorModeSuite)
     }
 
     @discardableResult

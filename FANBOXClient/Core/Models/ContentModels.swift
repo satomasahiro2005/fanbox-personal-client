@@ -112,6 +112,11 @@ final class Post {
     /// Denormalized feed filter flags (updated by sync).
     var isFromSupportedCreator: Bool
     var isFromFollowedCreator: Bool
+    /// Accounts whose Home / supporting timeline listed this post: such a listing raises the feed flags before the creator
+    /// relation is stored. The flags count enabled accounts only, so a post only a disabled account's feed listed leaves
+    /// the timeline and comes back with the account. nil = written before these fields existed (`backfillFeedListings`).
+    var homeListedByAccountIDs: [String]?
+    var supportingListedByAccountIDs: [String]?
     /// True if my own creator account published it.
     var isOwnPost: Bool
     /// FANBOX-side status for my own managed posts: "published" / "draft" / "scheduled". nil = a normal reader post
@@ -129,6 +134,9 @@ final class Post {
     var isReadLater: Bool
     var memo: String
     var offlineStateRaw: String
+    /// Its saved media was deleted (by the user, or forced out by the capacity) at this time: "recent N" rules do not save
+    /// it again until the user saves it explicitly (`MediaService.forgetRelease`).
+    var mediaReleasedAt: Date?
     var lastViewedAt: Date?
     var fetchedAt: Date
 
@@ -158,6 +166,8 @@ final class Post {
         self.seenByAccountIDs = []
         self.isFromSupportedCreator = false
         self.isFromFollowedCreator = false
+        self.homeListedByAccountIDs = []
+        self.supportingListedByAccountIDs = []
         self.isOwnPost = false
         self.isRead = false
         self.isFavorite = false
@@ -183,6 +193,13 @@ final class Post {
     var isVisibleToReaders: Bool { remoteStatusRaw == nil || remoteStatusRaw == RemotePostStatus.published.rawValue }
 
     var orderedBlocks: [PostBlock] { blocks.sorted { $0.index < $1.index } }
+
+    /// A row written before the feed listings were recorded takes them from the feeds that listed it
+    /// (`seenByAccountIDs`), for the flags those listings raised.
+    func backfillFeedListings() {
+        if homeListedByAccountIDs == nil { homeListedByAccountIDs = isFromFollowedCreator ? seenByAccountIDs : [] }
+        if supportingListedByAccountIDs == nil { supportingListedByAccountIDs = isFromSupportedCreator ? seenByAccountIDs : [] }
+    }
 }
 
 @Model

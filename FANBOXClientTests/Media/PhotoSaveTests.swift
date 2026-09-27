@@ -187,6 +187,22 @@ final class PhotoSaveTests: XCTestCase {
         }
     }
 
+    /// Saved offline (smaller image), saved again online, FANBOX refuses the derived original: the fallback is the file
+    /// already in Photos, so it is not added a second time.
+    func testSecondSaveDoesNotAddTheSameSmallerImageAgain() async throws {
+        let display = "https://pixiv.pximg.net/c/160x160_90_a2_g5/fanbox/public/images/user/1/icon/again.jpeg"
+        _ = try await h.media.load(MediaRequest(url: display, variant: .display, creatorID: "c1"))
+        let source = ImageViewerItem(id: "icon", resizedURL: display).saveSource(creatorID: "c1")
+        h.http.statusCode = 404
+        let file = try await h.media.fileForSaving(source)
+        XCTAssertEqual(file.variant, .display)
+        XCTAssertTrue(PhotoLibrarySaver.isAlreadyInPhotos(file, source: source, savedVariant: .display), "the offline save put it there")
+        XCTAssertTrue(PhotoLibrarySaver.isAlreadyInPhotos(file, source: source, savedVariant: .thumbnail), "same URL, same file")
+        XCTAssertFalse(PhotoLibrarySaver.isAlreadyInPhotos(file, source: source, savedVariant: nil), "a first save adds it")
+        let original = ImageSaveFile(fileURL: file.fileURL, variant: .original, downloaded: true, isBestAvailable: true)
+        XCTAssertFalse(PhotoLibrarySaver.isAlreadyInPhotos(original, source: source, savedVariant: .display), "a larger file is new")
+    }
+
     /// A timeout, 5xx or dropped connection is not a refusal: the save fails so it can be retried for the original.
     func testTransientFailureOfADerivedOriginalIsReported() async throws {
         let display = "https://pixiv.pximg.net/c/160x160_90_a2_g5/fanbox/public/images/user/1/icon/i.jpeg"

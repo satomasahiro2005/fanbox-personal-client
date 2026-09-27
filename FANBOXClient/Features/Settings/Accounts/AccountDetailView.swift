@@ -183,8 +183,10 @@ struct AccountDetailView: View {
             Text("別のpixivアカウント\(observed.map { "（pixiv ID: \($0)）" } ?? "")のセッションを検出したため、このアカウントのセッションを削除し、"
                  + "同期を止めています。「Webで再ログイン」からpixiv ID \(account.pixivUserID ?? "—")のアカウントでログインしてください。")
                 .foregroundStyle(.red)
-        } else if account.sessionState == .expired || account.sessionState == .loggedOut {
+        } else if account.sessionState == .expired {
             Text("ログインの有効期限が切れています。「Webで再ログイン」から同じpixivアカウントでログインしてください。")
+        } else if account.sessionState == .loggedOut {
+            Text("ログアウトしています。「Webで再ログイン」から同じpixivアカウントでログインしてください。")
         } else if let observed {
             Text("Web画面で別のpixivアカウント（pixiv ID: \(observed)）のログインを検出したため、Webセッションをこのアカウントのものに戻しました。")
                 .foregroundStyle(.orange)

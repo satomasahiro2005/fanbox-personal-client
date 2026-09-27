@@ -35,6 +35,42 @@ final class FixTransportSchedulerTests: XCTestCase {
         XCTAssertEqual(counts.registered, 1)
     }
 
+    /// An upload (a body with side effects, e.g. post.addImage at foregroundMedia) is neither cancelled by Offline nor
+    /// suspended by text-first work: a body that already reached FANBOX would otherwise be uploaded again.
+    func testUploadsAreNeverCancelledOrSuspendedMidway() async throws {
+        let policy = NetworkPolicyStore()
+        let scheduler = NetworkScheduler(policy: policy)
+        let download = FixTransportCancellableTransfer()
+        let upload = FixTransportCancellableTransfer()
+        try await scheduler.run(.interactiveRead, label: "post.info") {
+            _ = await scheduler.register(transfer: download, priority: .foregroundMedia)
+            _ = await scheduler.register(transfer: upload, priority: .foregroundMedia, isWrite: true)
+        }
+        policy.update { $0.mode = .offline }
+        await netModWaitUntil { download.isCancelled }
+        XCTAssertFalse(upload.isCancelled)
+
+        let task = URLSession.shared.uploadTask(with: {
+            var request = URLRequest(url: URL(string: "https://api.fanbox.cc/post.addImage")!)
+            request.httpMethod = "POST"
+            return request
+        }(), from: Data())
+        let token = await scheduler.register(task: task, priority: .foregroundMedia)
+        policy.update { $0.mode = .normal }
+        let paused = NetModFakeTransfer()
+        let gate = NetModGate()
+        let read = Task { try await scheduler.run(.interactiveRead, label: "post.info") { await gate.wait() } }
+        await netModWaitUntil { await scheduler.snapshot()[.interactiveRead] == 1 }
+        _ = await scheduler.register(transfer: paused, priority: .foregroundMedia)
+        XCTAssertTrue(paused.isSuspended, "a download waits for the text-first request")
+        let counts = await scheduler.transferCounts()
+        XCTAssertEqual(counts.suspended, 1, "the uploads keep running")
+        await gate.open()
+        _ = try await read.value
+        await scheduler.unregister(token)
+        task.cancel()
+    }
+
     func testOfflineCancelledDownloadSurfacesAsOffline() async throws {
         let policy = NetworkPolicyStore()
         let scheduler = NetworkScheduler(policy: policy)

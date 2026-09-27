@@ -83,12 +83,14 @@ extension LocalStore {
         applyProfile(creator, to: row)
         if let account, let followed = creator.isFollowed {
             var set = row.followedByAccountIDs
+            let unfollowed = !followed && set.contains(account.accountID)
             if followed { if !set.contains(account.accountID) { set.append(account.accountID) } } else { set.removeAll { $0 == account.accountID } }
             if set != row.followedByAccountIDs { row.followedByAccountIDs = set }
             let wasFollowed = row.isFollowed
             let enabled = enabledAccountIDs()
             row.isFollowed = set.contains(where: enabled.contains)
-            if wasFollowed != row.isFollowed { refreshPostFeedFlags(creatorIDs: [row.creatorID]) }
+            if unfollowed { clearFeedListings(accountID: account.accountID, creatorIDs: [row.creatorID], home: true) }
+            if wasFollowed != row.isFollowed || unfollowed { refreshPostFeedFlags(creatorIDs: [row.creatorID]) }
         }
         save()
     }
@@ -111,12 +113,16 @@ extension LocalStore {
         }
         // `isSupported && isStopped` → 停止予定 on this account's Support rows (SPEC §10.3 来月予定).
         applyStopObservations(creators, account: account)
-        // Creators this account no longer follows (array property → filter in memory).
+        // Creators this account no longer follows (array property → filter in memory). Its Home no longer lists their posts.
+        var unfollowed: Set<String> = []
         for row in fetch(FetchDescriptor<Creator>()) where !followedIDs.contains(row.creatorID) && row.followedByAccountIDs.contains(accountID) {
             row.followedByAccountIDs.removeAll { $0 == accountID }
+            unfollowed.insert(row.creatorID)
             let now = row.followedByAccountIDs.contains(where: enabled.contains)
             if now != row.isFollowed { row.isFollowed = now; changedFollow.insert(row.creatorID) }
         }
+        if !unfollowed.isEmpty { clearFeedListings(accountID: accountID, creatorIDs: unfollowed, home: true) }
+        changedFollow.formUnion(unfollowed)
         if !changedFollow.isEmpty { refreshPostFeedFlags(creatorIDs: changedFollow) }
         save()
     }
@@ -124,16 +130,26 @@ extension LocalStore {
     /// Re-derives `Creator.isSupported` / `isFollowed` from the account id arrays, counting enabled accounts only, and the
     /// feed flags of the posts of every creator whose flags changed. Called at launch and when an account is enabled or
     /// disabled: the disabled account's relations stay stored (re-enabling shows them again) but no longer count anywhere.
-    func refreshRelationFlags() {
+    /// `recomputeAllPosts` (the set of enabled accounts changed): every post is re-derived, because a feed listing raises
+    /// a post's flags before the creator relation is stored (a creator followed on the web since the last `.creators`
+    /// sync); such a flag counts while an enabled account's feed listed the post (`Post.homeListedByAccountIDs`).
+    func refreshRelationFlags(recomputeAllPosts: Bool = false) {
         let enabled = enabledAccountIDs()
         var changed: Set<String> = []
+        var byID: [String: Creator] = [:]
         for creator in fetch(FetchDescriptor<Creator>()) {
+            byID[creator.creatorID] = creator
             let supported = creator.supportedByAccountIDs.contains(where: enabled.contains)
             let followed = creator.followedByAccountIDs.contains(where: enabled.contains)
             if creator.isSupported != supported { creator.isSupported = supported; changed.insert(creator.creatorID) }
             if creator.isFollowed != followed { creator.isFollowed = followed; changed.insert(creator.creatorID) }
         }
         if !changed.isEmpty { refreshPostFeedFlags(creatorIDs: changed) }
+        if recomputeAllPosts {
+            for p in fetch(FetchDescriptor<Post>()) where !changed.contains(p.creatorID) {
+                deriveFeedFlags(of: p, creator: byID[p.creatorID], enabled: enabled)
+            }
+        }
         save()
     }
 
@@ -291,8 +307,11 @@ extension LocalStore {
         let disappearing = previouslyActive.filter { remoteByCreator[$0] == nil }.sorted()
         // Only a complete listing can show that something is gone. Stops that FANBOX reported (isStopped) or that the
         // user recorded end the support (支援終了) instead of raising an anomaly (SPEC §10.3 / §15).
+        // The two-strike rule applies to the whole disappearing set, stopped supports included: a single suspicious
+        // listing that wipes every support ends nothing and flags nothing.
         var unexplained: [String] = []
-        if listingIsComplete {
+        if listingIsComplete, !disappearing.isEmpty,
+           confirmDisappearance(disappearing, previouslyActive: previouslyActive, accountID: accountID, now: now) {
             for creatorID in disappearing {
                 guard let s = existing[creatorID] else { continue }
                 if Self.explainedStop(s, now: now) != nil {
@@ -304,9 +323,6 @@ extension LocalStore {
                     unexplained.append(creatorID)
                 }
             }
-        }
-        if listingIsComplete, !unexplained.isEmpty, confirmDisappearance(unexplained, previouslyActive: previouslyActive,
-                                                                           accountID: accountID, now: now) {
             for creatorID in unexplained {
                 guard let s = existing[creatorID] else { continue }
                 s.status = .missing
@@ -321,7 +337,7 @@ extension LocalStore {
                 let assignmentKey = Support.key(accountID: accountID, creatorID: creatorID)
                 if let a = first(#Predicate<SupportPaymentAssignment> { $0.key == assignmentKey }) { downgradeVerification(a, now: now) }
             }
-        } else if listingIsComplete, unexplained.isEmpty {
+        } else if listingIsComplete, disappearing.isEmpty {
             clearMassDisappearanceStrike(accountID: accountID)
         }
 
@@ -330,11 +346,15 @@ extension LocalStore {
         let affected = Set(existing.keys).union(remoteByCreator.keys)
         let enabled = enabledAccountIDs()
         var supportFlagChanged: Set<String> = []
+        var supportEnded: Set<String> = []
         for creatorID in affected {
             let isActive = existing[creatorID]?.status == .active || remoteByCreator[creatorID] != nil
-            let name = remoteByCreator[creatorID]?.creatorName ?? existing[creatorID]?.creatorName ?? creatorID
-            let creator = ensureCreator(id: creatorID, name: name, iconURL: nil, pixivUserID: nil)
+            // Listed creators were refreshed above with the listed name. An ended / missing support keeps the name it
+            // had when it was last listed, which must never overwrite a newer one (creators rename).
+            let creator = self.creator(id: creatorID)
+                ?? ensureCreator(id: creatorID, name: existing[creatorID]?.creatorName ?? creatorID, iconURL: nil, pixivUserID: nil)
             var set = creator.supportedByAccountIDs
+            if !isActive && set.contains(accountID) { supportEnded.insert(creatorID) }
             if isActive { if !set.contains(accountID) { set.append(accountID) } } else { set.removeAll { $0 == accountID } }
             if set != creator.supportedByAccountIDs { creator.supportedByAccountIDs = set }
             let supported = set.contains(where: enabled.contains)
@@ -345,6 +365,9 @@ extension LocalStore {
             refreshAccountPlanFees(accountID: accountID, creatorIDs: feeChanged,
                                    fee: { cid in existing[cid].flatMap { $0.isActive ? $0.amount : nil } })
         }
+        // An ended support: this account's supporting timeline no longer lists the creator's posts.
+        if !supportEnded.isEmpty { clearFeedListings(accountID: accountID, creatorIDs: supportEnded, home: false) }
+        supportFlagChanged.formUnion(supportEnded)
         if !supportFlagChanged.isEmpty { refreshPostFeedFlags(creatorIDs: supportFlagChanged) }
         save()
         return (diff, history)
@@ -472,10 +495,12 @@ extension LocalStore {
     /// Upserts and returns the ids of comments that were not known before.
     /// `readCutoff`: comments by others on my own posts created at or before this date are imported as read (history
     /// discovered late is not "未読"), unless an unread notification points at them. nil = every new one is unread.
+    /// `ownPostCreatorID`: the post is known to be on this (own) creator page although it may have no local row yet.
     @discardableResult
     func upsertCommentsReturningNew(_ comments: [RemoteComment], postID: String, account: AccountContext,
-                                    readCutoff: Date? = nil) -> [String] {
-        upsertCommentsCore(comments, postID: postID, account: account, forceOwnPostCreatorID: nil, forceOwn: false, readCutoff: readCutoff)
+                                    readCutoff: Date? = nil, ownPostCreatorID: String? = nil) -> [String] {
+        upsertCommentsCore(comments, postID: postID, account: account, forceOwnPostCreatorID: ownPostCreatorID, forceOwn: false,
+                           readCutoff: readCutoff)
     }
 
     /// Comments on my own creator posts (Creator Mode listing). Groups by post. See `upsertCommentsReturningNew` for `readCutoff`.
@@ -526,6 +551,26 @@ extension LocalStore {
     /// Returns ids of NotificationEvents that are new (not previously known).
     @discardableResult
     func upsertNotifications(_ items: [RemoteNotification], account: AccountContext, now: Date = .now) -> [String] {
+        upsertNotificationsDetailed(items, account: account, now: now).created
+    }
+
+    /// True when one of `items` was already imported for this account (differential bell.list paging stops there).
+    func hasImportedNotification(_ items: [RemoteNotification], accountID: String) -> Bool {
+        guard !items.isEmpty else { return false }
+        let refs = Set(items.map { "\(accountID):\($0.remoteID)" })
+        let keys = items.map { n in
+            NotificationEvent.dedupeKey(type: n.type, creatorID: n.creatorID, postID: n.postID, commentID: n.commentID,
+                                        newsletterID: n.newsletterID, fallbackRemoteID: n.remoteID)
+        }
+        return fetch(FetchDescriptor<NotificationEvent>(predicate: #Predicate { keys.contains($0.id) }))
+            .contains { $0.remoteIDs.contains(where: refs.contains) }
+    }
+
+    /// Same as `upsertNotifications`, plus the ids of existing post events whose prefetch another account's unrestricted
+    /// copy re-armed (`.notNeeded` → `.pending`): nothing else would ever prefetch them.
+    func upsertNotificationsDetailed(_ items: [RemoteNotification], account: AccountContext,
+                                     now: Date = .now) -> (created: [String], rearmed: [String]) {
+        var rearmed: [String] = []
         let accountID = account.accountID
         let keyed: [(String, RemoteNotification)] = items.map { n in
             (NotificationEvent.dedupeKey(type: n.type, creatorID: n.creatorID, postID: n.postID, commentID: n.commentID,
@@ -552,7 +597,10 @@ extension LocalStore {
                 if e.actorIconURL == nil { e.actorIconURL = n.actorIconURL }
                 if e.message.isEmpty && !n.message.isEmpty { e.message = n.message }
                 if e.title.isEmpty && !n.title.isEmpty { e.title = n.title }
-                if n.isRestricted == false, n.type == .newPost, e.prefetchState == .notNeeded { e.prefetchState = .pending }
+                if n.isRestricted == false, n.type == .newPost, e.prefetchState == .notNeeded {
+                    e.prefetchState = .pending
+                    if !rearmed.contains(e.id) { rearmed.append(e.id) }
+                }
                 continue
             }
             // Older than the inbox retention: pruned locally on purpose, never re-imported as new.
@@ -577,7 +625,7 @@ extension LocalStore {
             }
         }
         save()
-        return newIDs
+        return (newIDs, rearmed.filter { !newIDs.contains($0) })
     }
 
     /// FANBOX comment bells carry no comment id (docs/API.md §2.11), so their keys contain the per-account bell id.
@@ -588,10 +636,13 @@ extension LocalStore {
         // A bell merged into another account's event earlier is recognized by its remote reference.
         let remoteRef = "\(accountID):\(n.remoteID)"
         if let merged = candidates.first(where: { $0.remoteIDs.contains(remoteRef) }) { return merged }
+        // A reply is addressed to the author of one comment: a creator answering two of my accounts with the same short
+        // text ("ありがとうございます！") wrote two replies, never one. Only comments on a post are merged by text.
+        guard n.type == .comment else { return nil }
         let body = n.message.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !body.isEmpty else { return nil }
         return candidates.first { e in
-            (e.type == .comment || e.type == .commentReply)
+            e.type == n.type
                 && !e.accountIDs.contains(accountID)
                 && e.message.trimmingCharacters(in: .whitespacesAndNewlines) == body
                 && e.actorName == n.actorName
@@ -613,6 +664,11 @@ extension LocalStore {
         for item in items {
             if let n = known[item.id] {
                 if !n.accountIDs.contains(accountID) { n.accountIDs.append(accountID) }
+                // Another account received it too: its inbox event lists this account as well (filters, badge, a
+                // disabled first receiver).
+                let key = NotificationEvent.dedupeKey(type: .newsletter, creatorID: n.creatorID, postID: nil, commentID: nil,
+                                                      newsletterID: n.newsletterID, fallbackRemoteID: n.newsletterID)
+                if let e = notificationEvent(id: key), !e.accountIDs.contains(accountID) { e.accountIDs.append(accountID) }
                 if !item.creatorName.isEmpty { n.creatorName = item.creatorName }
                 n.creatorIconURL = item.creatorIconURL ?? n.creatorIconURL
                 if let title = item.title, !title.isEmpty { n.title = title }
@@ -842,7 +898,10 @@ extension LocalStore {
             let f: Fan
             if let existing = known[key] {
                 f = existing
-                if r.state == .supporting && existing.state != .supporting { newSupporters.append(r.userID) }
+                // Listed again with the same start date: the same support period (e.g. after a listing that missed it),
+                // not a new supporter.
+                let samePeriod = r.supportStartedAt != nil && r.supportStartedAt == existing.supportStartedAt
+                if r.state == .supporting && existing.state != .supporting && !samePeriod { newSupporters.append(r.userID) }
             } else {
                 f = Fan(accountID: accountID, userID: r.userID, name: r.name, state: r.state, updatedAt: now)
                 context.insert(f)
@@ -851,9 +910,15 @@ extension LocalStore {
             }
             if !r.name.isEmpty { f.name = r.name }
             f.iconURL = r.iconURL ?? f.iconURL
-            f.planID = r.planID ?? f.planID
-            f.planTitle = r.planTitle ?? f.planTitle
-            f.fee = r.fee ?? f.fee
+            if let planID = r.planID, planID != f.planID {
+                // Another plan: the old plan's title / fee must not stay next to it (the plan lookup may have failed).
+                f.planID = planID
+                f.planTitle = r.planTitle
+                f.fee = r.fee
+            } else {
+                f.planTitle = r.planTitle ?? f.planTitle
+                f.fee = r.fee ?? f.fee
+            }
             f.supportStartedAt = r.supportStartedAt ?? f.supportStartedAt
             f.supportMonths = r.supportMonths ?? f.supportMonths
             f.state = r.state
@@ -864,12 +929,37 @@ extension LocalStore {
         return newSupporters
     }
 
-    /// After a COMPLETE fan listing: supporters that are no longer listed are marked `.ended` (observed fact).
-    func markMissingFansEnded(presentUserIDs: Set<String>, account: AccountContext) {
+    /// Sub-scope of the fans SyncState that remembers a pending "every supporter left at once" observation.
+    static let massFanEndScope = "massFanEnd"
+
+    /// After a COMPLETE fan listing: supporters that are no longer listed are marked `.ended` (observed fact). A listing
+    /// without any of the current supporters (an empty answer may be a service-side glitch, and the next good listing would
+    /// announce everyone again) ends them only when the next listing shows the same within
+    /// `massDisappearanceConfirmWindow` (two-strike rule, as for supports): the last supporter leaving is still recorded.
+    func markMissingFansEnded(presentUserIDs: Set<String>, account: AccountContext, now: Date = .now) {
         let accountID = account.accountID
         let rows = fetch(FetchDescriptor<Fan>(predicate: #Predicate { $0.accountID == accountID }))
-        let now = Date.now
-        for f in rows where !presentUserIDs.contains(f.userID) && f.state == .supporting {
+        let supporting = rows.filter { $0.state == .supporting }
+        let missing = supporting.filter { !presentUserIDs.contains($0.userID) }
+        if !missing.isEmpty, missing.count == supporting.count {
+            let strike = syncState(accountID: accountID, resource: .fans, scope: Self.massFanEndScope)
+            let marker = missing.map(\.userID).sorted().joined(separator: ",")
+            let seenBefore = strike.lastKnownItemID == marker
+                && strike.lastAttemptAt.map { now.timeIntervalSince($0) <= Self.massDisappearanceConfirmWindow } == true
+            if !seenBefore {
+                strike.lastKnownItemID = marker
+                strike.lastAttemptAt = now
+                AppLog.sync.notice("fans: every supporter missing in one listing; waiting for a second observation")
+                save()
+                return
+            }
+        }
+        let strikeKey = SyncState.key(accountID: accountID, resource: .fans, scope: Self.massFanEndScope)
+        if let strike = first(#Predicate<SyncState> { $0.key == strikeKey }), strike.lastKnownItemID != nil {
+            strike.lastKnownItemID = nil
+            strike.lastAttemptAt = nil
+        }
+        for f in missing {
             f.state = .ended
             f.updatedAt = now
         }
@@ -885,15 +975,38 @@ extension LocalStore {
             snap = CreatorDashboardSnapshot(accountID: account.accountID, month: dashboard.month)
             context.insert(snap)
         }
-        // Each metric is actual when FANBOX provided it, otherwise unavailable — never guessed (SPEC §17).
-        snap.supporterCount = dashboard.supporterCount
-        snap.supporterCountSourceRaw = (dashboard.supporterCount == nil ? MetricSource.unavailable : .actual).rawValue
-        snap.earnings = dashboard.earnings
-        snap.earningsSourceRaw = (dashboard.earnings == nil ? MetricSource.unavailable : .actual).rawValue
-        snap.postCount = dashboard.postCount
-        snap.postCountSourceRaw = (dashboard.postCount == nil ? MetricSource.unavailable : .actual).rawValue
-        snap.commentCount = dashboard.commentCount
-        snap.commentCountSourceRaw = (dashboard.commentCount == nil ? MetricSource.unavailable : .actual).rawValue
+        // Each metric is actual when FANBOX provided it, otherwise unavailable — never guessed (SPEC §17). Only a metric
+        // whose source failed in this refresh keeps the value FANBOX provided earlier this month (a network error never
+        // wipes cached data); a source that answered without a value makes the metric unavailable.
+        let failed = dashboard.failedMetrics
+        if let value = dashboard.supporterCount {
+            snap.supporterCount = value
+            snap.supporterCountSourceRaw = MetricSource.actual.rawValue
+        } else if !failed.contains(.supporterCount) || snap.supporterCount == nil {
+            snap.supporterCount = nil
+            snap.supporterCountSourceRaw = MetricSource.unavailable.rawValue
+        }
+        if let value = dashboard.earnings {
+            snap.earnings = value
+            snap.earningsSourceRaw = MetricSource.actual.rawValue
+        } else if !failed.contains(.earnings) || snap.earnings == nil {
+            snap.earnings = nil
+            snap.earningsSourceRaw = MetricSource.unavailable.rawValue
+        }
+        if let value = dashboard.postCount {
+            snap.postCount = value
+            snap.postCountSourceRaw = MetricSource.actual.rawValue
+        } else if !failed.contains(.postCount) || snap.postCount == nil {
+            snap.postCount = nil
+            snap.postCountSourceRaw = MetricSource.unavailable.rawValue
+        }
+        if let value = dashboard.commentCount {
+            snap.commentCount = value
+            snap.commentCountSourceRaw = MetricSource.actual.rawValue
+        } else if !failed.contains(.commentCount) || snap.commentCount == nil {
+            snap.commentCount = nil
+            snap.commentCountSourceRaw = MetricSource.unavailable.rawValue
+        }
         snap.fetchedAt = .now
         save()
     }
@@ -935,13 +1048,14 @@ extension LocalStore {
         var activeFee: [String: Int] = [:]
         for s in supports(accountID: accountID) where s.isActive { activeFee[s.creatorID] = s.amount }
         let owned = ownedCreatorAccountMap()
+        let listingAccountEnabled = self.account(id: accountID)?.enabled ?? true
 
         for item in items {
             // Creator row from the summary.
             let creator: Creator
             if let c = creators[item.creatorID] {
                 creator = c
-                if !item.creatorName.isEmpty && c.name != item.creatorName { c.name = item.creatorName }
+                if !item.unreported.contains(.creatorName), !item.creatorName.isEmpty, c.name != item.creatorName { c.name = item.creatorName }
                 if let icon = item.creatorIconURL, c.iconURL != icon { c.iconURL = icon }
                 if let pid = item.pixivUserID, c.pixivUserID != pid { c.pixivUserID = pid }
             } else {
@@ -989,15 +1103,27 @@ extension LocalStore {
             let viewers = list.filter(\.canView).map(\.accountID).sorted()
             if post.accessAccountIDs.sorted() != viewers { post.accessAccountIDs = viewers }
 
-            // Seen = listed in a feed of this account. Posts embedded in notifications are not a listing (differential feed
-            // paging stops at known ids, so marking them seen would skip the feed pages around them).
-            if let source, source != .notification, !post.seenByAccountIDs.contains(accountID) { post.seenByAccountIDs.append(accountID) }
+            // Seen = listed in a feed (Home / supporting timeline) of this account. Differential feed paging stops at seen
+            // ids, so posts listed elsewhere — embedded in notifications, on a creator page, in Creator Mode — are not
+            // marked: that would skip the unseen feed pages around them.
+            if source == .home || source == .supporting, !post.seenByAccountIDs.contains(accountID) {
+                post.seenByAccountIDs.append(accountID)
+            }
+            // The feed that listed it, per account (kept while the account is disabled: re-enabling brings the post back).
+            if source == .home || source == .supporting { post.backfillFeedListings() }
+            if source == .home, let listed = post.homeListedByAccountIDs, !listed.contains(accountID) {
+                post.homeListedByAccountIDs = listed + [accountID]
+            }
+            if source == .supporting, let listed = post.supportingListedByAccountIDs, !listed.contains(accountID) {
+                post.supportingListedByAccountIDs = listed + [accountID]
+            }
 
             // Feed-origin flags. Upserts only raise them; applySupports / applyFollowing lower them when the relation ends.
-            if source == .supporting || creator.isSupported || activeFee[item.creatorID] != nil {
+            // A listing of an account that was turned off meanwhile (a sync still running) raises nothing by itself.
+            if (listingAccountEnabled && (source == .supporting || activeFee[item.creatorID] != nil)) || creator.isSupported {
                 if !post.isFromSupportedCreator { post.isFromSupportedCreator = true }
             }
-            if source == .home || creator.isFollowed {
+            if (listingAccountEnabled && source == .home) || creator.isFollowed {
                 if !post.isFromFollowedCreator { post.isFromFollowedCreator = true }
             }
             // Own post: listed in Creator Mode, or its creator page belongs to one of my accounts. Only raised here.
@@ -1009,9 +1135,11 @@ extension LocalStore {
     }
 
     /// Remote-owned fields only. isRead / isFavorite / isReadLater / memo / offlineState / lastViewedAt are NEVER touched.
+    /// Fields the source did not report (`RemotePostSummary.unreported`) keep their stored values.
     fileprivate func applySummary(_ item: RemotePostSummary, to post: Post, accountID: String) {
+        let unreported = item.unreported
         if post.creatorID != item.creatorID { post.creatorID = item.creatorID }
-        if !item.creatorName.isEmpty { post.creatorName = item.creatorName }
+        if !item.creatorName.isEmpty, !unreported.contains(.creatorName) { post.creatorName = item.creatorName }
         if let icon = item.creatorIconURL { post.creatorIconURL = icon }
         if !item.title.isEmpty || post.title.isEmpty { post.title = item.title }
         // A restricted listing may carry a shorter excerpt; keep the richer one.
@@ -1020,15 +1148,19 @@ extension LocalStore {
         post.feeRequired = item.feeRequired
         if let cover = item.coverImageURL { post.coverImageURL = cover }
         post.publishedAt = item.publishedAt
-        post.updatedAt = item.updatedAt
-        if post.fanboxTags != item.tags { post.fanboxTags = item.tags }
-        let tagsText = SearchService.tagsSearchText(item.tags)
-        if post.fanboxTagsText != tagsText { post.fanboxTagsText = tagsText }
-        post.likeCount = item.likeCount
-        post.commentCount = max(item.commentCount, 0)
+        if !unreported.contains(.updatedAt) { post.updatedAt = item.updatedAt }
+        if !unreported.contains(.tags) {
+            if post.fanboxTags != item.tags { post.fanboxTags = item.tags }
+            let tagsText = SearchService.tagsSearchText(item.tags)
+            if post.fanboxTagsText != tagsText { post.fanboxTagsText = tagsText }
+        }
+        if !unreported.contains(.counts) {
+            post.likeCount = item.likeCount
+            post.commentCount = max(item.commentCount, 0)
+        }
         // isLiked is per account on FANBOX; follow the account whose body we show (or the first one seen).
-        if post.detailAccountID == nil || post.detailAccountID == accountID { post.isLiked = item.isLiked }
-        post.hasAdultContent = item.hasAdultContent
+        if !unreported.contains(.isLiked), post.detailAccountID == nil || post.detailAccountID == accountID { post.isLiked = item.isLiked }
+        if !unreported.contains(.adultContent) { post.hasAdultContent = item.hasAdultContent }
     }
 
     /// Replaces PostBlocks in place: rows keyed "postID#index" are reused, extra rows deleted.
@@ -1178,7 +1310,9 @@ extension LocalStore {
             c.likeCount = r.likeCount
             c.isLiked = r.isLiked
             c.isOwn = isOwn
-            c.isOnOwnPost = onOwnPost
+            // Only raised: a listing that cannot tell (the post is not stored locally) never hides a comment from Creator
+            // Mode.
+            if onOwnPost && !c.isOnOwnPost { c.isOnOwnPost = true }
             c.fetchedAt = now
             if forceOwn { c.isRead = true }
         }
@@ -1260,11 +1394,36 @@ extension LocalStore {
 
     /// Re-derives feed flags of all posts of the given creators from the Creator relation flags.
     fileprivate func refreshPostFeedFlags(creatorIDs: Set<String>) {
+        let enabled = enabledAccountIDs()
         for creatorID in creatorIDs {
             guard let c = creator(id: creatorID) else { continue }
             for p in fetch(FetchDescriptor<Post>(predicate: #Predicate { $0.creatorID == creatorID })) {
-                if p.isFromSupportedCreator != c.isSupported { p.isFromSupportedCreator = c.isSupported }
-                if p.isFromFollowedCreator != c.isFollowed { p.isFromFollowedCreator = c.isFollowed }
+                deriveFeedFlags(of: p, creator: c, enabled: enabled)
+            }
+        }
+    }
+
+    /// A post's feed flags: its creator's relations (enabled accounts only), or a listing in the Home / supporting
+    /// timeline of an enabled account.
+    fileprivate func deriveFeedFlags(of p: Post, creator: Creator?, enabled: Set<String>) {
+        p.backfillFeedListings()
+        let supported = (creator?.isSupported ?? false) || (p.supportingListedByAccountIDs ?? []).contains(where: enabled.contains)
+        let followed = (creator?.isFollowed ?? false) || (p.homeListedByAccountIDs ?? []).contains(where: enabled.contains)
+        if p.isFromSupportedCreator != supported { p.isFromSupportedCreator = supported }
+        if p.isFromFollowedCreator != followed { p.isFromFollowedCreator = followed }
+    }
+
+    /// The account's follow (`home`) or support of these creators ended: its feed no longer lists their posts.
+    fileprivate func clearFeedListings(accountID: String, creatorIDs: Set<String>, home: Bool) {
+        for creatorID in creatorIDs {
+            for p in fetch(FetchDescriptor<Post>(predicate: #Predicate { $0.creatorID == creatorID })) {
+                p.backfillFeedListings()
+                if home, let listed = p.homeListedByAccountIDs, listed.contains(accountID) {
+                    p.homeListedByAccountIDs = listed.filter { $0 != accountID }
+                }
+                if !home, let listed = p.supportingListedByAccountIDs, listed.contains(accountID) {
+                    p.supportingListedByAccountIDs = listed.filter { $0 != accountID }
+                }
             }
         }
     }

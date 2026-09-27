@@ -4,8 +4,6 @@ import SwiftUI
 struct RootView: View {
     @Environment(AppEnvironment.self) private var env
     @Environment(AppRouter.self) private var router
-    /// 送信キュー sheet, opened from the reply-attention banner (SPEC §22).
-    @State private var isReplyQueuePresented = false
 
     var body: some View {
         @Bindable var router = router
@@ -32,17 +30,17 @@ struct RootView: View {
         .sheet(isPresented: $router.isNotificationInboxPresented) {
             NavigationStack { NotificationInboxView() }
         }
-        .sheet(isPresented: $isReplyQueuePresented) {
+        .sheet(isPresented: $router.isReplyQueuePresented) {
             NavigationStack {
                 ReplyQueueView()
                     .toolbar {
                         ToolbarItem(placement: .cancellationAction) {
-                            Button("閉じる") { isReplyQueuePresented = false }
+                            Button("閉じる") { router.isReplyQueuePresented = false }
                         }
                     }
             }
         }
-        .environment(\.openReplyQueue, OpenReplyQueueAction { isReplyQueuePresented = true })
+        .environment(\.openReplyQueue, OpenReplyQueueAction { router.isReplyQueuePresented = true })
         .modifier(WebBridgePresenter())
     }
 }

@@ -498,6 +498,7 @@ enum FanboxAdapter {
         case "draft": return .draft
         case "published": return .published
         case "scheduled", "reserved": return .scheduled
+        case "archived": return .archived
         default: return .unknown
         }
     }
@@ -511,9 +512,15 @@ enum FanboxAdapter {
             excerpt: String(plainText(blocks).prefix(120)), type: postType(dto.type ?? (dto.body?.blocks != nil ? "article" : nil)),
             feeRequired: max(0, dto.feeRequired ?? 0), coverImageURL: dto.coverImageUrl, publishedAt: published, updatedAt: dto.updatedAt ?? published,
             tags: dto.tags ?? [], isRestricted: false, hasAdultContent: dto.hasAdultContent ?? false)
-        // Drafts / scheduled posts must not look published (Creator Mode pill, hidden from reader views). Unknown = nil.
+        // Drafts / scheduled / taken-down posts must not look published (Creator Mode pill, hidden from reader views).
+        // Unknown = nil.
         let status = postStatus(dto.status)
         summary.remoteStatus = status == .unknown ? nil : status
+        // The managed listing carries no counts or like state; tags / the R-18 flag / the page name only when reported.
+        summary.unreported = [.counts, .isLiked]
+        if dto.tags == nil { summary.unreported.insert(.tags) }
+        if dto.hasAdultContent == nil { summary.unreported.insert(.adultContent) }
+        if nonEmpty(creatorName) == nil { summary.unreported.insert(.creatorName) }
         return summary
     }
 

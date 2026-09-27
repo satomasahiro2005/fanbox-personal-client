@@ -106,14 +106,28 @@ enum PostAccountLogic {
         return accounts.first?.id
     }
 
+    /// Account whose draft keeps the comment composer's text. A draft being edited keeps its own account unless an enabled
+    /// account is chosen in the composer; any other text belongs to the composer's account. A draft is never moved to an
+    /// account nobody picked for it (a turned-off account's draft stays its own, hidden with it).
+    static func draftAccountID(editingDraftAccountID: String?, composerAccountID: String?, enabledAccountIDs: Set<String>) -> String? {
+        let composerEnabled = composerAccountID.map(enabledAccountIDs.contains) ?? false
+        if let owner = editingDraftAccountID, !composerEnabled { return owner }
+        return composerAccountID
+    }
+
     /// Account that may delete a comment, or nil when none of my accounts may:
     /// - my own comment → the account that wrote it (matched by pixiv / fanbox user id, else the account that fetched it);
     /// - any comment on my creator's post → the creator account that owns the post.
+    /// `disabledUserIDs`: pixiv / fanbox user ids of my turned-off accounts. A comment one of them wrote could only be
+    /// deleted as that account (which sends nothing), never as the account that happened to fetch it.
     static func deleteAccountID(commentIsOwn: Bool, authorUserID: String, fetchedByAccountID: String,
                                 postCreatorID: String?, commentIsOnOwnPost: Bool,
-                                accounts: [(id: String, userIDs: [String], creatorID: String?)]) -> String? {
+                                accounts: [(id: String, userIDs: [String], creatorID: String?)],
+                                disabledUserIDs: Set<String> = []) -> String? {
         if let author = accounts.first(where: { $0.userIDs.contains(authorUserID) }) { return author.id }
-        if commentIsOwn, accounts.contains(where: { $0.id == fetchedByAccountID }) { return fetchedByAccountID }
+        if commentIsOwn, !disabledUserIDs.contains(authorUserID), accounts.contains(where: { $0.id == fetchedByAccountID }) {
+            return fetchedByAccountID
+        }
         if let postCreatorID, let owner = accounts.first(where: { $0.creatorID == postCreatorID }) { return owner.id }
         if commentIsOnOwnPost, let owner = accounts.first(where: { $0.creatorID != nil }) { return owner.id }
         return nil

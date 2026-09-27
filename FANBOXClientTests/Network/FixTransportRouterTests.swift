@@ -114,6 +114,22 @@ final class FixTransportRouterTests: XCTestCase {
         XCTAssertEqual(web.calls.count, 2)
     }
 
+    /// A write that neither transport sent (no CSRF token for the URLSession, the page unusable) is a refusal, never a
+    /// network error with an unknown outcome.
+    func testWriteSentByNeitherTransportIsReportedAsNotSent() async throws {
+        try await credentials.save(SessionCredential(cookies: [StoredCookie(name: "FANBOXSESSID", value: "1_c", domain: ".fanbox.cc")]),
+                                   for: "C")
+        web.respond { _, _ in throw WebFetchError.unavailable("page challenged") }
+        do {
+            _ = try await router.send(request("post.addComment", method: "POST", priority: .interactiveWrite, csrf: true), accountID: "C")
+            XCTFail("expected a refusal")
+        } catch {
+            XCTAssertEqual(error as? RemoteError, .csrfUnavailable)
+        }
+        XCTAssertEqual(web.calls, ["post.addComment|C"])
+        XCTAssertTrue(NetModStubProtocol.requests.isEmpty, "nothing was sent")
+    }
+
     func testPostInfoGoesThroughWebAndFallsBackToNativeWhenWebIsUnavailable() async throws {
         _ = try await router.send(request("post.info"), accountID: "A")
         XCTAssertEqual(web.calls, ["post.info|A"])

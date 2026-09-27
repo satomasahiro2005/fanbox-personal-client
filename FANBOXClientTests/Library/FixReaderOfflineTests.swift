@@ -188,6 +188,50 @@ final class FixReaderOfflineTests: XCTestCase {
         XCTAssertTrue(h.entries(postID: "m1").allSatisfy(\.isPinned))
     }
 
+    /// Saved media forced out by the capacity is not re-downloaded by the rule on every sync (it would be evicted again).
+    func testRuleDoesNotResaveWhatCapacityEvictionReleased() async throws {
+        let creator = Creator(creatorID: "r1", name: "Rule creator")
+        creator.offlineRecentCount = 2
+        h.env.store.context.insert(creator)
+        rulePost("e1", hour: 1)
+        rulePost("e2", hour: 2)
+        h.env.store.save()
+        await offline.applyRule(creatorID: "r1", count: 2, trigger: .prefetch)
+        XCTAssertEqual(state("e2"), .ruleSaved)
+
+        h.media.enforceCapacity(limit: 0)
+        XCTAssertEqual(state("e2"), OfflineState.none)
+        await offline.applyRules(creatorIDs: nil, refillMedia: false)
+        XCTAssertEqual(state("e2"), OfflineState.none, "not saved (and evicted) again by the next sync")
+        XCTAssertTrue(h.entries.isEmpty)
+
+        // After a relaunch (new services over the same store) too.
+        let media = MediaService(store: h.env.store, http: h.http, network: h.env.networkMode, settings: h.env.settings, cacheRoot: h.root)
+        media.maintenanceDelay = .seconds(3600)
+        let relaunched = OfflineLibraryService(store: h.env.store, engine: h.env.sync, media: media, settings: h.env.settings)
+        relaunched.isAppInBackground = { false }
+        await relaunched.applyRules(creatorIDs: nil, refillMedia: false)
+        XCTAssertEqual(state("e2"), OfflineState.none, "remembered across launches")
+        XCTAssertTrue(h.entries.isEmpty)
+
+        await offline.applyRule(creatorID: "r1", count: 2, trigger: .manual)
+        XCTAssertEqual(state("e2"), .ruleSaved, "an explicit 今すぐ保存 still saves it")
+    }
+
+    /// Removing the rule while its pass is running: the rest of the window is not marked saved.
+    func testRuleRemovedDuringItsPassStopsIt() async throws {
+        let creator = Creator(creatorID: "r1", name: "Rule creator")
+        creator.offlineRecentCount = 2
+        h.env.store.context.insert(creator)
+        rulePost("s1", hour: 1)
+        rulePost("s2", hour: 2)
+        h.env.store.save()
+        creator.offlineRecentCount = 0       // what 「ルールを解除」 stores while an earlier pass computed its window
+        await offline.applyRule(creatorID: "r1", count: 2, trigger: .prefetch)
+        XCTAssertEqual(state("s1"), OfflineState.none)
+        XCTAssertEqual(state("s2"), OfflineState.none)
+    }
+
     func testLoweringNReleasesImmediately() async throws {
         let creator = Creator(creatorID: "r1", name: "Rule creator")
         h.env.store.context.insert(creator)
@@ -224,6 +268,31 @@ final class FixReaderOfflineTests: XCTestCase {
         let rows = OfflineImageItem.rows(Array(repeating: item("x", "u", .display, "p"), count: 7), columns: 3)
         XCTAssertEqual(rows.map(\.count), [3, 3, 1])
         XCTAssertTrue(OfflineImageItem.rows([], columns: 3).isEmpty)
+    }
+
+    /// A picture opened full screen has its display and original files cached: one tile, and the viewer gets both URLs
+    /// and the post's account (「写真に保存」 saves the original, not the 1200 px sample).
+    func testGalleryShowsAPictureOnceWithItsOriginal() async throws {
+        let post = h.insertPost(id: "g1")
+        post.accessAccountIDs = ["A"]
+        let display = "demo://image/g1?w=800&h=600&v=display"
+        let original = "demo://image/g1?w=800&h=600&v=original"
+        h.addImageBlock(to: post, index: 0, thumbnail: nil, display: display, original: original)
+        _ = try await h.media.load(MediaRequest(url: display, variant: .display, postID: "g1"))
+        _ = try await h.media.load(MediaRequest(url: original, variant: .original, trigger: .manual, postID: "g1"))
+        let files = h.entries.map {
+            OfflineImageItem(key: $0.key, url: $0.url, variant: $0.variant, postID: $0.postID, isPinned: $0.isPinned)
+        }
+        XCTAssertEqual(files.count, 2)
+
+        let items = OfflineImageItem.gallery(files, pictures: OfflineLibraryIndex.pictures(for: files, store: h.env.store))
+        XCTAssertEqual(items.count, 1, "one tile per picture")
+        let viewer = try XCTUnwrap(items.first?.viewerItem)
+        XCTAssertEqual(viewer.displayURL, display)
+        XCTAssertEqual(viewer.originalURL, original)
+        XCTAssertEqual(viewer.postID, "g1")
+        XCTAssertEqual(viewer.accountID, "A")
+        XCTAssertEqual(Set([items[0].key] + items[0].otherKeys), Set(files.map(\.key)), "deleting the tile deletes both files")
     }
 
     func testBytesIndexUsesOneFetch() async throws {

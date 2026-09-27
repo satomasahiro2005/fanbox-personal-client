@@ -124,6 +124,9 @@ enum DraftSendPlanner {
         if isExisting, let old = draft.remoteFeeRequired, old != draft.feeRequired {
             plan.notes.append("公開範囲が変わります: \(feeLabel(old)) → \(feeLabel(draft.feeRequired))")
         }
+        if isExisting && status == .archived && sendsPublished {
+            plan.notes.append("非公開にした投稿を再び公開します。読者から見えるようになります。")
+        }
         if plan.unpublishes {
             plan.notes.append(status == .unknown
                 ? "FANBOXで公開中の場合、非公開（下書き）に戻ります。読者からは見えなくなります。"
@@ -219,6 +222,7 @@ extension RemotePostStatus {
         case .published: return "公開中"
         case .draft: return "下書き"
         case .scheduled: return "予約投稿"
+        case .archived: return "非公開"
         case .unknown: return "状態不明"
         }
     }

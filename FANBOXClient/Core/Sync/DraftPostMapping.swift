@@ -70,6 +70,11 @@ enum DraftPostMapping {
     /// bad URL never fails after a FANBOX draft was created for it.
     static let maxLinkCardURLLength = 2048
 
+    /// Image / file blocks with neither a FANBOX id nor a local copy (media of a deleted FANBOX post).
+    static func missingCopiesMessage(count: Int) -> String {
+        "端末内にない画像・ファイルがあります（\(count)件）。ブロックを削除して追加し直してください。"
+    }
+
     /// Normalized FANBOX tags: trimmed, leading "#" removed, empty and duplicate entries dropped (order kept).
     static func normalizedTags(_ tags: [String]) -> [String] {
         var seen = Set<String>()
@@ -117,7 +122,8 @@ enum DraftPostMapping {
     /// - New blocks the capabilities cannot send (uploads, new link cards / embeds) are left out and reported in
     ///   `webItemBlockIDs`; with upload capability an image / file block without `remoteMediaID` throws (upload first)
     ///   unless `allowPendingUploads` (planning before the upload queue ran), which reports it in `pendingUploadBlockIDs`
-    ///   after checking it against `DraftCapabilities.mediaLimits`.
+    ///   after checking it against `DraftCapabilities.mediaLimits`. One without a local copy either (media of a deleted
+    ///   FANBOX post) always throws: nothing could be sent for it.
     /// - With `uploadsNeedPost` a new link card is registered in the post first (its id is then sent): unregistered cards
     ///   throw, or are reported in `pendingLinkCardBlockIDs` when planning.
     /// - Blocks that already reference FANBOX content (`remoteMediaID`) are sent back by id, with the upload / registration
@@ -137,6 +143,7 @@ enum DraftPostMapping {
         var pendingUploads: [String] = []
         var pendingLinks: [String] = []
         var missingMedia = 0
+        var missingCopies = 0
         var missingLinks = 0
         var disallowed = 0
         var problems: [String] = []
@@ -187,6 +194,9 @@ enum DraftPostMapping {
                         problems.append(problem)
                     }
                     pendingUploads.append(block.id)
+                } else if block.localFileName == nil {
+                    // Neither on FANBOX nor on this device (media of a deleted FANBOX post, `detachFromRemotePost`).
+                    missingCopies += 1
                 } else {
                     missingMedia += 1
                 }
@@ -246,6 +256,7 @@ enum DraftPostMapping {
         if let first = problems.first {
             throw RemoteError.invalidRequest(problems.count > 1 ? "\(first)ほか\(problems.count - 1)件" : first)
         }
+        if missingCopies > 0 { throw RemoteError.invalidRequest(missingCopiesMessage(count: missingCopies)) }
         if missingMedia > 0 { throw RemoteError.invalidRequest("未アップロードの画像・ファイルがあります（\(missingMedia)件）") }
         if missingLinks > 0 { throw RemoteError.invalidRequest("FANBOXに未登録のリンクカードがあります（\(missingLinks)件）") }
         let hasContent = blocks.contains { !($0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0.mediaID == nil && $0.url == nil

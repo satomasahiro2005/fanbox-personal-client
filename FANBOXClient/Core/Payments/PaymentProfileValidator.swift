@@ -82,21 +82,58 @@ enum PaymentProfileValidator {
         s.count == 4 && s.unicodeScalars.allSatisfy { $0.value >= 48 && $0.value <= 57 }
     }
 
-    /// True when the text contains a run of `cardNumberMinDigits`+ digits once spaces and hyphens are ignored
-    /// (full-width digits / separators are normalized first).
+    /// True when the text contains a run of `cardNumberMinDigits`+ digits once spaces and dashes are ignored (full-width
+    /// digits / separators are normalized first). Digits split by line breaks, dots or underscores count only as a
+    /// card number that passes the Luhn check: per-line amounts or dotted dates in a memo are not one.
     static func containsCardNumber(_ text: String) -> Bool {
-        var run = 0
+        var chain: [String] = []
+        var segment = ""
         for scalar in normalize(text).unicodeScalars {
             if scalar.value >= 48 && scalar.value <= 57 {
-                run += 1
-                if run >= cardNumberMinDigits { return true }
-            } else if isIgnorableSeparator(scalar) {
+                segment.unicodeScalars.append(scalar)
+                if segment.count >= cardNumberMinDigits { return true }
+            } else if isDash(scalar) || spaceSeparators.contains(scalar) {
                 continue
+            } else if groupSeparators.contains(scalar) {
+                if !segment.isEmpty { chain.append(segment) }
+                segment = ""
             } else {
-                run = 0
+                if !segment.isEmpty { chain.append(segment) }
+                if containsLuhnNumber(chain) { return true }
+                chain = []
+                segment = ""
+            }
+        }
+        if !segment.isEmpty { chain.append(segment) }
+        return containsLuhnNumber(chain)
+    }
+
+    /// Consecutive digit groups of card-group size (3+ digits) that add up to a card number's length and pass the Luhn
+    /// check.
+    private static func containsLuhnNumber(_ groups: [String]) -> Bool {
+        for start in groups.indices {
+            var digits = ""
+            for group in groups[start...] {
+                guard group.count >= 3 else { break }
+                digits += group
+                if digits.count > 19 { break }
+                if digits.count >= cardNumberMinDigits && passesLuhn(digits) { return true }
             }
         }
         return false
+    }
+
+    static func passesLuhn(_ digits: String) -> Bool {
+        var sum = 0
+        for (index, character) in digits.reversed().enumerated() {
+            guard var digit = character.wholeNumberValue else { return false }
+            if index % 2 == 1 {
+                digit *= 2
+                if digit > 9 { digit -= 9 }
+            }
+            sum += digit
+        }
+        return sum % 10 == 0
     }
 
     /// True when the text mentions a security code / PIN / expiry together with digits,
@@ -105,7 +142,7 @@ enum PaymentProfileValidator {
         let s = normalize(text)
         let hasDigit = s.unicodeScalars.contains { $0.value >= 48 && $0.value <= 57 }
         if hasDigit && matches(s, keywordPattern) { return true }
-        return matches(s, expiryPattern)
+        return matches(unifyingDashes(s), expiryPattern)
     }
 
     /// True when the text looks like it carries a password, 3-D Secure credential or one-time code (SPEC §12 MUST NOT):
@@ -174,12 +211,24 @@ enum PaymentProfileValidator {
         return String(scalars)
     }
 
-    private static func isIgnorableSeparator(_ scalar: Unicode.Scalar) -> Bool {
-        switch scalar {
-        case " ", "\u{3000}", "\t", "\u{00A0}", "-", "\u{2010}", "\u{2011}", "\u{2012}", "\u{2013}", "\u{2014}", "\u{2212}", "\u{FF0D}":
-            return true
-        default:
-            return false
+    /// Separators people type inside a card number: spaces and every dash (`isDash`), including the "ー" / "ｰ" a Japanese
+    /// keyboard produces for "-".
+    private static let spaceSeparators: Set<Unicode.Scalar> = [" ", "\u{3000}", "\t", "\u{00A0}"]
+
+    /// Separators that also split ordinary numbers in a memo (dates, one amount per line): see `containsCardNumber`.
+    private static let groupSeparators: Set<Unicode.Scalar> = ["\n", "\r", "\u{2028}", ".", "_"]
+
+    private static func isDash(_ scalar: Unicode.Scalar) -> Bool {
+        switch scalar.value {
+        case 0x2D, 0x2010...0x2015, 0x2212, 0x30FC, 0xFE58, 0xFE63, 0xFF0D, 0xFF70: return true
+        default: return false
         }
+    }
+
+    /// Every dash → "-" (for the expiry pattern only: "ー" stays in katakana keywords such as パスワード elsewhere).
+    private static func unifyingDashes(_ s: String) -> String {
+        var scalars = String.UnicodeScalarView()
+        for scalar in s.unicodeScalars { scalars.append(isDash(scalar) ? "-" : scalar) }
+        return String(scalars)
     }
 }

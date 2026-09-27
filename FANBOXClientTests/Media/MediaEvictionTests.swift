@@ -42,6 +42,17 @@ final class MediaEvictionTests: XCTestCase {
         XCTAssertEqual(MediaEvictionPlanner.victims(candidates, limit: 50, now: now), ["B", "C", "F", "A", "E", "D"])
     }
 
+    /// A file the user just downloaded (and may be playing / previewing / sharing) is not the first victim.
+    func testFreshDownloadIsEvictedAfterOlderCache() {
+        let candidates = [
+            candidate("video", .original, daysAgo: 0),
+            candidate("A", .display, daysAgo: 1),
+            candidate("B", .thumbnail, daysAgo: 2),
+        ]
+        XCTAssertEqual(MediaEvictionPlanner.victims(candidates, limit: 150, now: now), ["A", "B"])
+        XCTAssertEqual(MediaEvictionPlanner.victims(candidates, limit: 50, now: now), ["A", "B", "video"])
+    }
+
     func testEnforceCapacityDeletesInSpecOrderAndKeepsText() async throws {
         let h = MediaTestHarness()
         defer { h.cleanup() }

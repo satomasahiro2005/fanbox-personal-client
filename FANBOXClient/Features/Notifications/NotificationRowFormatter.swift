@@ -188,6 +188,14 @@ struct NotificationInboxFilter: Equatable, Sendable {
     /// A filter the user chose (the enabled-account restriction is not a user choice).
     var isActive: Bool { type != nil || accountID != nil || unreadOnly }
 
+    /// The filter of the おたより segment: the type chips belong to the 通知 segment (the おたより segment shows none), so
+    /// a type chosen there never applies here.
+    var forNewsletters: NotificationInboxFilter {
+        var filter = self
+        filter.type = nil
+        return filter
+    }
+
     func matches(type eventType: NotificationEventType, accountIDs: [String], isRead: Bool) -> Bool {
         if let enabledAccountIDs, !accountIDs.contains(where: enabledAccountIDs.contains) { return false }
         if let type, type != eventType { return false }
@@ -292,8 +300,7 @@ enum NotificationReadActions {
     /// "すべて既読" for newsletters matching `filter` (type filter is ignored for newsletters); their events follow.
     @discardableResult
     static func markAllRead(_ newsletters: [Newsletter], filter: NotificationInboxFilter, store: LocalStore) -> Int {
-        var newsletterFilter = filter
-        newsletterFilter.type = nil
+        let newsletterFilter = filter.forNewsletters
         var ids: [String] = []
         for newsletter in newsletters where !newsletter.isRead
             && newsletterFilter.matches(type: .newsletter, accountIDs: newsletter.accountIDs, isRead: newsletter.isRead) {

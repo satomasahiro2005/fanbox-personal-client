@@ -31,8 +31,14 @@ final class CreatorMockRemote: RemoteDataSource, @unchecked Sendable {
         var bumpEditableOnUpdate = true
         var managed: [RemotePostSummary] = []
         var managedCalls = 0
+        /// editablePost calls (1-based, counted like `editableCalls`) that fail with a timeout.
+        var failEditableCalls: Set<Int> = []
+        var editableDelayNanoseconds: UInt64 = 0
+        /// Becomes `editable` once an upload succeeded (an edit made elsewhere while the upload ran).
+        var editableAfterUpload: RemoteEditablePost?
         var fansCalls = 0
         var dashboardCalls = 0
+        var dashboard = RemoteCreatorDashboard(month: "2026-09")
     }
 
     private let lock = NSLock()
@@ -65,6 +71,12 @@ final class CreatorMockRemote: RemoteDataSource, @unchecked Sendable {
         progress(0.42)
         if let outcome { throw outcome }
         progress(1)
+        with { s in
+            if let edited = s.editableAfterUpload {
+                s.editable = edited
+                s.editableAfterUpload = nil
+            }
+        }
         return RemoteUploadResult(mediaID: "m-\(name)", url: "https://example.invalid/\(name)")
     }
 
@@ -77,10 +89,12 @@ final class CreatorMockRemote: RemoteDataSource, @unchecked Sendable {
     }
 
     func editablePost(id: String, account: AccountContext) async throws -> RemoteEditablePost {
-        let post = with { s -> RemoteEditablePost? in
+        let (post, fails, delay) = with { s -> (RemoteEditablePost?, Bool, UInt64) in
             s.editableCalls += 1
-            return s.editable
+            return (s.editable, s.failEditableCalls.contains(s.editableCalls), s.editableDelayNanoseconds)
         }
+        if delay > 0 { try await Task.sleep(nanoseconds: delay) }
+        if fails { throw RemoteError.network(code: -1001, detail: "timed out") }
         guard let post else { throw RemoteError.notFound }
         return post
     }
@@ -147,8 +161,10 @@ final class CreatorMockRemote: RemoteDataSource, @unchecked Sendable {
         return RemotePage(items: [])
     }
     func creatorDashboard(account: AccountContext) async throws -> RemoteCreatorDashboard {
-        with { $0.dashboardCalls += 1 }
-        return RemoteCreatorDashboard(month: "2026-09")
+        with { s in
+            s.dashboardCalls += 1
+            return s.dashboard
+        }
     }
     func creatorComments(account: AccountContext, cursor: String?) async throws -> RemotePage<RemoteComment> { RemotePage(items: []) }
 }

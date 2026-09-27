@@ -105,8 +105,10 @@ final class AccountHTTPClient: CredentialBackedHTTPClient, SessionRevoking, @unc
     func invalidateSession(accountID: String?) {
         let key = accountID ?? Self.anonymousKey
         epochs.withLockUnchecked { $0[key, default: 0] &+= 1 }
-        let entry = sessions.withLockUnchecked { $0.removeValue(forKey: key) }
-        entry?.session.invalidateAndCancel()
+        // Invalidated under the lock tasks are created under (`makeTask`): no task is ever created on this session after.
+        sessions.withLockUnchecked { map in
+            map.removeValue(forKey: key)?.session.invalidateAndCancel()
+        }
     }
 
     func revokeSession(accountID: String) async {
@@ -125,15 +127,28 @@ final class AccountHTTPClient: CredentialBackedHTTPClient, SessionRevoking, @unc
 
     private func sessionEntry(for accountID: String?) -> SessionEntry {
         let key = accountID ?? Self.anonymousKey
+        return sessions.withLockUnchecked { map in existingOrNewEntry(in: &map, key: key) }
+    }
+
+    /// Creates a task on the account's session under the same lock `invalidateSession` takes: a task is never created on
+    /// a session invalidated a moment earlier by a logout / re-login / removal on another thread (CFNetwork raises
+    /// "Task created in a session that has been invalidated").
+    private func makeTask(accountID: String?, _ build: (URLSession) -> URLSessionTask) -> (SessionEntry, URLSessionTask) {
+        let key = accountID ?? Self.anonymousKey
         return sessions.withLockUnchecked { map in
-            if let existing = map[key] { return existing }
-            let delegate = HTTPTransferDelegate()
-            let session = URLSession(configuration: makeConfiguration(), delegate: delegate, delegateQueue: nil)
-            session.sessionDescription = "account-session"
-            let entry = SessionEntry(session: session, delegate: delegate)
-            map[key] = entry
-            return entry
+            let entry = existingOrNewEntry(in: &map, key: key)
+            return (entry, build(entry.session))
         }
+    }
+
+    private func existingOrNewEntry(in map: inout [String: SessionEntry], key: String) -> SessionEntry {
+        if let existing = map[key] { return existing }
+        let delegate = HTTPTransferDelegate()
+        let session = URLSession(configuration: makeConfiguration(), delegate: delegate, delegateQueue: nil)
+        session.sessionDescription = "account-session"
+        let entry = SessionEntry(session: session, delegate: delegate)
+        map[key] = entry
+        return entry
     }
 
     private func makeConfiguration() -> URLSessionConfiguration {
@@ -242,13 +257,14 @@ final class AccountHTTPClient: CredentialBackedHTTPClient, SessionRevoking, @unc
             urlRequest.setValue(String(body.length), forHTTPHeaderField: "Content-Length")
         }
 
-        let entry = sessionEntry(for: accountID)
-        let task: URLSessionTask
-        switch mode {
-        case .data: task = entry.session.dataTask(with: urlRequest)
-        case .download: task = entry.session.downloadTask(with: urlRequest)
-        case .upload(let file): task = entry.session.uploadTask(with: urlRequest, fromFile: file)
-        case .stream: task = entry.session.uploadTask(withStreamedRequest: urlRequest)
+        let builtRequest = urlRequest
+        let (entry, task) = makeTask(accountID: accountID) { session in
+            switch mode {
+            case .data: return session.dataTask(with: builtRequest)
+            case .download: return session.downloadTask(with: builtRequest)
+            case .upload(let file): return session.uploadTask(with: builtRequest, fromFile: file)
+            case .stream: return session.uploadTask(withStreamedRequest: builtRequest)
+            }
         }
         task.priority = Self.taskPriority(for: request)
 

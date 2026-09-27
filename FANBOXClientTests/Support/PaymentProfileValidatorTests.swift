@@ -39,6 +39,25 @@ final class PaymentProfileValidatorTests: XCTestCase {
         XCTAssertEqual(issues(nickname: "Visa 411111111111"), [.looksLikeCardNumber(field: F.nickname)], "12 digits already counts")
     }
 
+    /// The Japanese keyboard types "-" as "ー" (and full-width digits); a memo may also split the number over lines.
+    func testCardNumberTypedWithJapaneseDashesOrLineBreaksIsRejected() {
+        XCTAssertEqual(issues(memo: "４１１１ー１１１１ー１１１１ー１１１１"), [.looksLikeCardNumber(field: F.memo)])
+        XCTAssertEqual(issues(memo: "4111ｰ1111ｰ1111ｰ1111"), [.looksLikeCardNumber(field: F.memo)], "half-width ｰ")
+        XCTAssertEqual(issues(memo: "4111 1111\n1111 1111"), [.looksLikeCardNumber(field: F.memo)])
+        XCTAssertEqual(issues(memo: "4111.1111.1111.1111"), [.looksLikeCardNumber(field: F.memo)])
+        XCTAssertEqual(issues(memo: "有効期限 12ー28"), [.looksLikeSecurityCode(field: F.memo)])
+        XCTAssertEqual(issues(memo: "カード 07ー27"), [.looksLikeSecurityCode(field: F.memo)], "MM-YY typed with ー")
+        XCTAssertEqual(issues(memo: "パスワードマネージャーで管理"), [], "ー inside katakana is not a separator for keywords")
+        XCTAssertEqual(issues(memo: "メモ\n1.\n4111\n1111\n1111\n1111"), [.looksLikeCardNumber(field: F.memo)], "after a short line")
+
+        // Line breaks / dots also split ordinary numbers: only a Luhn-valid card number counts across them.
+        XCTAssertEqual(issues(memo: "2026.09.27\n2026.10.27"), [], "dotted dates on separate lines")
+        XCTAssertEqual(issues(memo: "500\n1000\n1500\n2000\n3000"), [], "one amount per line")
+        XCTAssertEqual(issues(memo: "v1.2.3_20260927.1200"), [])
+        XCTAssertTrue(PaymentProfileValidator.passesLuhn("4111111111111111"))
+        XCTAssertFalse(PaymentProfileValidator.passesLuhn("4111111111111112"))
+    }
+
     func testPANInLast4IsRejected() {
         let result = issues(last4: "4111111111111111")
         XCTAssertTrue(result.contains(.last4MustBeFourDigits))

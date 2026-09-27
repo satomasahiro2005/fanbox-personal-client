@@ -12,15 +12,25 @@ struct AccountCandidate: Sendable, Equatable {
     var planFee: Int
     var isMain: Bool
     var enabled: Bool
+    /// False for a logged-out or quarantined (`.error`) FANBOX account: it has no credential, so a request would go out as
+    /// a guest and the guest answer would be stored as this account's (see `AccountSelector.hasSession`).
+    var hasSession: Bool = true
 }
 
 /// Automatic account choice when opening a post (SPEC §8):
 /// 1. cached  2. can view  3. session OK  4. higher viewing permission  5. main account.
-/// The user can always override manually.
+/// Accounts without a session are never chosen automatically. The user can always override manually.
 enum AccountSelector {
     static func select(_ candidates: [AccountCandidate]) -> String? {
-        let usable = candidates.filter(\.enabled)
+        let usable = candidates.filter { $0.enabled && $0.hasSession }
         return usable.sorted(by: isPreferred).first?.accountID
+    }
+
+    /// Whether an account has a session its requests can carry. Logged out (credential deleted) and quarantined
+    /// (identity mismatch, credential deleted) FANBOX accounts do not: FANBOX answers them as a guest (isFollowed false,
+    /// every paid post restricted), which must never be recorded as that account's follows or viewing rights.
+    static func hasSession(kind: AccountKind, state: SessionState) -> Bool {
+        kind == .demo || (state != .loggedOut && state != .error)
     }
 
     /// Strict ordering used by `select` (and by the engine's cross-account fallback order).
@@ -61,7 +71,8 @@ enum AccountSelector {
                 sessionValid: account.kind == .demo || account.sessionState == .valid,
                 planFee: access?.accountPlanFee ?? supportFee,
                 isMain: account.isMain,
-                enabled: account.enabled
+                enabled: account.enabled,
+                hasSession: hasSession(kind: account.kind, state: account.sessionState)
             )
         }
     }

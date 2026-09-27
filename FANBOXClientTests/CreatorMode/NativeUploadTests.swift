@@ -205,6 +205,8 @@ final class NativeUploadTests: XCTestCase {
         XCTAssertNil(draft.remotePostID)
         XCTAssertEqual(keys, ["post.create"])
 
+        // A 5xx create may still have stored a post: the next send looks for it first (none was created here).
+        h.http.stub("post.listManaged", json: FanboxFixtures.envelope("[]"))
         // Create works; the second card fails once.
         h.http.stub("post.create", json: #"{"body":{"postId":"9200"}}"#)
         h.http.stub("post.addUrlEmbed", json: Self.urlEmbed("ue1", url: "https://example.com/one"))
@@ -215,6 +217,7 @@ final class NativeUploadTests: XCTestCase {
         let partial = await h.drafts.send(draftID: draft.id, publish: false)
         guard case .failure(.invalidRequest(let message)) = partial else { return XCTFail("\(partial)") }
         XCTAssertTrue(message.contains("リンクカード"))
+        XCTAssertEqual(h.http.requests(for: "post.listManaged").count, 1)
         XCTAssertEqual(draft.remotePostID, "9200")
         XCTAssertEqual(first.remoteMediaID, "ue1")
         XCTAssertNil(second.remoteMediaID)

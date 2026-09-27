@@ -304,7 +304,7 @@ struct PaymentRecordRow: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(record.creatorName ?? "不明なクリエイター").lineLimit(1)
                 HStack(spacing: 6) {
-                    Text(Formatters.shortDate(record.paidAt))
+                    Text(SupportText.paymentDate(record.paidAt))
                     if let method = SupportText.paymentMethodLabel(record.reportedPaymentMethod) {
                         Text(method)
                     }

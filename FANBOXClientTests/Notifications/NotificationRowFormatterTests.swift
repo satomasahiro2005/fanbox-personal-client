@@ -111,6 +111,18 @@ final class NotificationRowFormatterTests: XCTestCase {
         XCTAssertTrue(filter.isActive)
     }
 
+    /// A type chip chosen in the 通知 segment never empties the おたより segment (which shows no type chips).
+    func testTypeChipDoesNotApplyToNewsletters() {
+        var filter = NotificationInboxFilter()
+        filter.type = .comment
+        filter.accountID = "A"
+        let newsletters = filter.forNewsletters
+        XCTAssertNil(newsletters.type)
+        XCTAssertEqual(newsletters.accountID, "A", "the account and unread filters still apply")
+        XCTAssertTrue(newsletters.matches(type: .newsletter, accountIDs: ["A"], isRead: false))
+        XCTAssertFalse(filter.matches(type: .newsletter, accountIDs: ["A"], isRead: false))
+    }
+
     /// Items show only when one of their receiving accounts is enabled: a disabled account's items and items left without
     /// any account (after a removal) are hidden, and "すべて既読" does not touch them.
     func testEnabledAccountsRestriction() throws {

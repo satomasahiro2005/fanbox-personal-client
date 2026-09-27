@@ -126,6 +126,7 @@ struct CreatorPlanRow: View {
                         .fullScreenCover(isPresented: $showsCover) {
                             ImageViewer(items: [ImageViewerItem(id: "plan.\(plan.planID)", resizedURL: cover)], creatorID: plan.creatorID)
                         }
+                        .closesOnNotificationRoute($showsCover)
                 }
                 VStack(alignment: .leading, spacing: 2) {
                     Text(plan.title)
@@ -275,7 +276,13 @@ struct CreatorAboutSection: View {
             Section("リンク") {
                 ForEach(links) { link in
                     Button {
-                        openURL(link.url)
+                        // FANBOX / pixiv pages open in the account-aware WebView of the account that relates to this
+                        // creator, never plain Safari (SPEC §40); other sites open normally.
+                        if PostDetailEmbedLink.isFanboxHost(link.url), let account = webAccounts.first?.id {
+                            env.web.openWeb(account: account, destination: .url(link.url))
+                        } else {
+                            openURL(link.url)
+                        }
                     } label: {
                         HStack {
                             Label(link.title, systemImage: link.systemImage)

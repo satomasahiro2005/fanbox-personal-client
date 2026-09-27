@@ -115,6 +115,9 @@ final class SearchService {
         return results
     }
 
+    /// Accounts turned off: their data stays stored but is hidden everywhere, search included.
+    private var disabledAccountIDs: Set<String> { store.disabledAccountIDs() }
+
     func searchPosts(_ query: LibrarySearchQuery) -> [Post] {
         let published = ReaderPostQueries.publishedStatus
         let candidates: [Post]
@@ -168,8 +171,10 @@ final class SearchService {
         descriptor.fetchLimit = candidateLimit
         let candidates = store.fetch(descriptor)
         let rest = terms.dropFirst()
+        let enabled = store.enabledAccountIDs()
         return Array(candidates.filter { creator in
-            rest.allSatisfy {
+            // A creator related to turned-off accounts only is hidden (like the Creators tab).
+            !CreatorFilterFacts.isOnlyRelatedToDisabledAccounts(creator, enabledAccountIDs: enabled) && rest.allSatisfy {
                 creator.name.localizedStandardContains($0) || creator.profileText.localizedStandardContains($0)
                     || creator.memo.localizedStandardContains($0)
             }
@@ -184,7 +189,10 @@ final class SearchService {
         descriptor.fetchLimit = candidateLimit
         let candidates = store.fetch(descriptor)
         let rest = terms.dropFirst()
-        return Array(candidates.filter { comment in rest.allSatisfy { comment.body.localizedStandardContains($0) } }.prefix(limit))
+        let disabled = disabledAccountIDs
+        return Array(candidates.filter { comment in
+            !disabled.contains(comment.fetchedByAccountID) && rest.allSatisfy { comment.body.localizedStandardContains($0) }
+        }.prefix(limit))
     }
 
     func searchDrafts(_ terms: [String]) -> [Draft] {
@@ -197,7 +205,8 @@ final class SearchService {
             blockDraftIDs.contains($0.id)
         }))
         var seen = Set<String>()
-        let candidates = (byTitle + byBlock).filter { seen.insert($0.id).inserted }
+        let disabled = disabledAccountIDs
+        let candidates = (byTitle + byBlock).filter { !disabled.contains($0.accountID) && seen.insert($0.id).inserted }
         let rest = terms.dropFirst()
         return Array(candidates.filter { draft in
             rest.allSatisfy { term in

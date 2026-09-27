@@ -79,7 +79,8 @@ final class FixSyncNotifyEngineTests: XCTestCase {
 
     // MARK: Coalescing between the notification prefetch and the post screen (SPEC §34)
 
-    func testPostScreenJoinsTheRunningPrefetchOfTheSamePost() async throws {
+    /// A prefetch that finds the post screen already fetching the post shares that request.
+    func testPrefetchJoinsTheRunningPostScreenFetch() async throws {
         let h = try SyncHarness()
         let a = h.addAccount("A", pixivUserID: "pA", isMain: true)
         h.store.upsertPostSummaries([SyncFixtures.summary("p1")], account: a.context, source: .home)
@@ -87,11 +88,39 @@ final class FixSyncNotifyEngineTests: XCTestCase {
             $0.details[a.id] = ["p1": SyncFixtures.detail("p1")]
             $0.postDelayNanoseconds = 200_000_000
         }
-        async let prefetch = h.engine.refreshPost(postID: "p1", priority: .notificationPrefetch)
-        async let screen = h.engine.refreshPost(postID: "p1", accountID: a.id)
-        let results = await [prefetch, screen]
-        XCTAssertEqual(results, [nil, nil])
-        XCTAssertEqual(h.mock.count("post|"), 1, "one GET for the post")
+        let screen = Task { await h.engine.refreshPost(postID: "p1", accountID: a.id) }
+        var spins = 0
+        while h.mock.count("post|") == 0 && spins < 100_000 { spins += 1; await Task.yield() }
+        let prefetch = await h.engine.refreshPost(postID: "p1", priority: .notificationPrefetch)
+        let shown = await screen.value
+        XCTAssertNil(shown)
+        XCTAssertNil(prefetch)
+        XCTAssertEqual(h.mock.priorities(of: "post|"), [.interactiveRead], "one GET for the post")
+    }
+
+    /// Opening the post never waits on a background fetch of it (notification prefetch / offline rule), which may sit in
+    /// the background budget for up to 30 s or fail fast with "rate limited": that fetch is cancelled, the screen fetches
+    /// at its own priority, and the prefetch gets the screen's result.
+    func testPostScreenDoesNotWaitOnABackgroundPrefetchOfTheSamePost() async throws {
+        let h = try SyncHarness()
+        let a = h.addAccount("A", pixivUserID: "pA", isMain: true)
+        h.store.upsertPostSummaries([SyncFixtures.summary("p1")], account: a.context, source: .home)
+        h.mock.update {
+            $0.details[a.id] = ["p1": SyncFixtures.detail("p1")]
+            $0.postDelayNanoseconds = 5_000_000_000         // still waiting for the background budget
+        }
+        let prefetch = Task { await h.engine.refreshPost(postID: "p1", priority: .notificationPrefetch) }
+        var spins = 0
+        while h.mock.count("post|") == 0 && spins < 100_000 { spins += 1; await Task.yield() }
+        h.mock.update { $0.postDelayNanoseconds = 0 }
+
+        let shown = await h.engine.refreshPost(postID: "p1")
+        XCTAssertNil(shown)
+        // The screen sent its own request instead of joining the background one, and has the body before that ends.
+        XCTAssertEqual(h.mock.priorities(of: "post|"), [.notificationPrefetch, .interactiveRead])
+        XCTAssertEqual(h.store.post(id: "p1")?.hasCachedBody, true)
+        let prefetched = await prefetch.value
+        XCTAssertNil(prefetched, "the prefetch gets the screen's result")
     }
 
     func testCommentFetchesForTheSamePostShareOneRequest() async throws {
@@ -153,7 +182,76 @@ final class FixSyncNotifyEngineTests: XCTestCase {
         XCTAssertEqual(h.mock.count("post|"), 2)
     }
 
+    /// post.get carries no like state or revision: the fallback keeps what listings stored (an empty heart would send a
+    /// second like, and a revision rolled back to publishedAt would stop an edited post's body from being fetched again).
+    func testPostGetFallbackKeepsTheLikeStateAndRevision() async throws {
+        let h = try SyncHarness()
+        let a = h.addAccount("A", pixivUserID: "pA", isMain: true)
+        var listed = SyncFixtures.summary("p1")
+        listed.isLiked = true
+        listed.updatedAt = listed.publishedAt.addingTimeInterval(3_600)
+        h.store.upsertPostSummaries([listed], account: a.context, source: .home)
+        var metadata = SyncFixtures.summary("p1", title: "新しいタイトル")
+        metadata.unreported = [.isLiked, .updatedAt]
+        h.mock.update {
+            $0.postErrors[a.id] = ["p1": .forbidden]
+            $0.postMetadata["p1"] = metadata
+        }
+        _ = await h.engine.refreshPost(postID: "p1", priority: .interactiveRead)
+        let post = try XCTUnwrap(h.store.post(id: "p1"))
+        XCTAssertEqual(post.title, "新しいタイトル")
+        XCTAssertTrue(post.isLiked)
+        XCTAssertEqual(post.updatedAt, listed.updatedAt)
+    }
+
     // MARK: 新規支援 (newSupporter)
+
+    /// Tapping a 新規支援 of creator account B opens B's fan list, not the account selected in Creator Mode last.
+    func testNewSupporterNotificationOpensThatAccountsFans() throws {
+        let h = try SyncHarness()
+        let a = h.addAccount("A", pixivUserID: "pA", creatorID: "ca", isMain: true)
+        let b = h.addAccount("B", pixivUserID: "pB", creatorID: "cb")
+        let defaults = h.notifications.creatorModeDefaults      // the harness's own suite (removed with it)
+        defaults.set(a.id, forKey: CreatorModeKeys.selectedAccountID)
+        h.store.upsertFans([RemoteFan(userID: "u1", name: "Fan", iconURL: nil, planID: nil, planTitle: nil, fee: nil,
+                                      supportStartedAt: nil, supportMonths: 1, state: .supporting)], account: b.context)
+        let ids = h.store.recordNewSupporterEvents(userIDs: ["u1"], account: b.context, accountName: "B")
+        h.notifications.open(eventID: try XCTUnwrap(ids.first))
+        XCTAssertEqual(defaults.string(forKey: CreatorModeKeys.selectedAccountID), b.id)
+        XCTAssertEqual(h.router.selectedTab, .creatorMode)
+    }
+
+    /// A notification opening a route closes the 送信キュー sheet and the screens' sheets / covers above it (the route
+    /// would otherwise open unseen underneath).
+    func testNotificationRouteClosesTheSheetsAboveIt() {
+        let router = AppRouter()
+        router.isReplyQueuePresented = true
+        let before = router.modalDismissGeneration
+        router.openFromNotification(.post(postID: "p1"))
+        XCTAssertFalse(router.isReplyQueuePresented)
+        XCTAssertEqual(router.modalDismissGeneration, before + 1)
+        XCTAssertEqual(router.selectedTab, .home)
+    }
+
+    /// A notification that opens the inbox (an unknown event, a reply item that is gone) closes the 送信キュー sheet and the
+    /// screens' sheets first: the inbox cannot show above them.
+    func testInboxFromANotificationClosesTheSheetsAboveIt() throws {
+        let h = try SyncHarness()
+        h.router.isReplyQueuePresented = true
+        h.router.isSettingsPresented = true
+        let before = h.router.modalDismissGeneration
+        h.notifications.open(eventID: "missing")
+        XCTAssertFalse(h.router.isReplyQueuePresented)
+        XCTAssertFalse(h.router.isSettingsPresented)
+        XCTAssertTrue(h.router.isNotificationInboxPresented)
+        XCTAssertEqual(h.router.modalDismissGeneration, before + 1)
+
+        h.router.isNotificationInboxPresented = false
+        h.router.isReplyQueuePresented = true
+        h.notifications.openReplyItem(id: "missing")
+        XCTAssertFalse(h.router.isReplyQueuePresented)
+        XCTAssertTrue(h.router.isNotificationInboxPresented)
+    }
 
     func testNewSupportersAfterTheFirstFanSyncCreateEvents() async throws {
         let h = try SyncHarness()
@@ -183,6 +281,196 @@ final class FixSyncNotifyEngineTests: XCTestCase {
         h.advanceClock(by: SyncEngine.fansAutomaticInterval + 1)
         await h.engine.syncLightweight(reason: .backgroundRefresh)
         XCTAssertEqual(h.mock.count("fans|"), 3)
+        XCTAssertEqual(SyncEngine.fansAutomaticInterval, 24 * 60 * 60, "about daily at most (docs/API.md §1.8)")
+    }
+
+    /// One empty fan listing (a service glitch) ends nobody, and a supporter listed again with the same start date is
+    /// not announced as new.
+    func testEmptyFanListingEndsNobodyAndNothingIsReannounced() async throws {
+        let h = try SyncHarness()
+        let me = h.addAccount("Creator", pixivUserID: "pMe", creatorID: "mine", isMain: true)
+        var delivered: [String] = []
+        h.engine.onNewNotificationEvents = { delivered += $0 }
+        let started = Date(timeIntervalSince1970: 1_780_000_000)
+        func fan(_ id: String) -> RemoteFan {
+            RemoteFan(userID: id, name: "Fan \(id)", iconURL: nil, planID: "pl1", planTitle: "スタンダード", fee: 500,
+                      supportStartedAt: started, supportMonths: 3, state: .supporting)
+        }
+        h.mock.update { $0.fans[me.id] = [fan("u1"), fan("u2")] }
+        await h.engine.sync(.fans, accountID: me.id, reason: .userRefresh)
+
+        h.mock.update { $0.fans[me.id] = [] }
+        await h.engine.sync(.fans, accountID: me.id, reason: .userRefresh)
+        let rows = h.store.fetch(FetchDescriptor<Fan>())
+        XCTAssertTrue(rows.allSatisfy { $0.state == .supporting }, "an empty listing judges nothing")
+
+        // u1 is missing from one listing (ended), then listed again with the same support period.
+        h.mock.update { $0.fans[me.id] = [fan("u2")] }
+        await h.engine.sync(.fans, accountID: me.id, reason: .userRefresh)
+        XCTAssertEqual(h.store.fetch(FetchDescriptor<Fan>()).first { $0.userID == "u1" }?.state, .ended)
+        h.mock.update { $0.fans[me.id] = [fan("u1"), fan("u2")] }
+        await h.engine.sync(.fans, accountID: me.id, reason: .userRefresh)
+        XCTAssertTrue(delivered.isEmpty, "not a new supporter")
+    }
+
+    /// The last supporter leaving is still recorded: a second listing without any supporter confirms the first.
+    func testTwoEmptyFanListingsEndTheLastSupporter() async throws {
+        let h = try SyncHarness()
+        let me = h.addAccount("Creator", pixivUserID: "pMe", creatorID: "mine", isMain: true)
+        h.mock.update {
+            $0.fans[me.id] = [RemoteFan(userID: "u1", name: "Fan", iconURL: nil, planID: "pl1", planTitle: nil, fee: 500,
+                                        supportStartedAt: nil, supportMonths: 1, state: .supporting)]
+        }
+        await h.engine.sync(.fans, accountID: me.id, reason: .userRefresh)
+        h.mock.update { $0.fans[me.id] = [] }
+        await h.engine.sync(.fans, accountID: me.id, reason: .userRefresh)
+        XCTAssertEqual(h.store.fetch(FetchDescriptor<Fan>()).first?.state, .supporting, "one empty listing judges nothing")
+        await h.engine.sync(.fans, accountID: me.id, reason: .userRefresh)
+        XCTAssertEqual(h.store.fetch(FetchDescriptor<Fan>()).first?.state, .ended)
+    }
+
+    /// A fan listing with items that could not be read ends nobody: the dropped item may be any of the supporters.
+    func testIncompleteFanListingEndsNobody() async throws {
+        let h = try SyncHarness()
+        let me = h.addAccount("Creator", pixivUserID: "pMe", creatorID: "mine", isMain: true)
+        func fan(_ id: String) -> RemoteFan {
+            RemoteFan(userID: id, name: "Fan \(id)", iconURL: nil, planID: "pl1", planTitle: nil, fee: 500,
+                      supportStartedAt: nil, supportMonths: 1, state: .supporting)
+        }
+        h.mock.update { $0.fans[me.id] = [fan("u1"), fan("u2")] }
+        await h.engine.sync(.fans, accountID: me.id, reason: .userRefresh)
+        h.mock.update {
+            $0.fans[me.id] = [fan("u2")]
+            $0.fanProblems[me.id] = "user.userIdのない項目1件"
+        }
+        await h.engine.sync(.fans, accountID: me.id, reason: .userRefresh)
+        XCTAssertEqual(h.store.fetch(FetchDescriptor<Fan>()).first { $0.userID == "u1" }?.state, .supporting)
+
+        h.mock.update { $0.fanProblems[me.id] = nil }
+        await h.engine.sync(.fans, accountID: me.id, reason: .userRefresh)
+        XCTAssertEqual(h.store.fetch(FetchDescriptor<Fan>()).first { $0.userID == "u1" }?.state, .ended)
+    }
+
+    func testFanboxFanListingReportsDroppedItems() async throws {
+        let h = FanboxTestHarness()
+        h.http.stub("plan.listCreator", json: FanboxFixtures.envelope(#"{"plans":[]}"#))
+        h.http.stub("relationship.listFans", json: FanboxFixtures.envelope(FanboxFixtures.fans))
+        let listing = try await h.source.fanListing(account: FanboxTestHarness.creator, cursor: nil)
+        XCTAssertEqual(listing.page.items.map(\.userID), ["51", "50", "52"])
+        XCTAssertFalse(listing.isComplete, "an item without user.userId")
+
+        h.http.stub("relationship.listFans", json: FanboxFixtures.envelope(#"{"fans":null}"#))
+        let null = try await h.source.fanListing(account: FanboxTestHarness.creator, cursor: nil)
+        XCTAssertFalse(null.isComplete)
+
+        h.http.stub("relationship.listFans", json: FanboxFixtures.envelope(#"[{"status":"supporter","user":{"userId":"50","name":"Fan"}}]"#))
+        let clean = try await h.source.fanListing(account: FanboxTestHarness.creator, cursor: nil)
+        XCTAssertTrue(clean.isComplete)
+        XCTAssertEqual(clean.page.items.map(\.userID), ["50"])
+    }
+
+    /// A plan change whose plan lookup failed never keeps the old plan's title and fee next to the new plan id.
+    func testFanPlanChangeDropsTheOldPlansTitleAndFee() throws {
+        let h = try SyncHarness()
+        let me = h.addAccount("Creator", pixivUserID: "pMe", creatorID: "mine", isMain: true)
+        h.store.upsertFans([RemoteFan(userID: "u1", name: "Fan", iconURL: nil, planID: "a", planTitle: "プランA", fee: 500,
+                                      supportStartedAt: nil, supportMonths: 1, state: .supporting)], account: me.context)
+        h.store.upsertFans([RemoteFan(userID: "u1", name: "Fan", iconURL: nil, planID: "b", planTitle: nil, fee: nil,
+                                      supportStartedAt: nil, supportMonths: 2, state: .supporting)], account: me.context)
+        let fan = try XCTUnwrap(h.store.fetch(FetchDescriptor<Fan>()).first)
+        XCTAssertEqual(fan.planID, "b")
+        XCTAssertNil(fan.planTitle)
+        XCTAssertNil(fan.fee)
+
+        h.store.upsertFans([RemoteFan(userID: "u1", name: "Fan", iconURL: nil, planID: "b", planTitle: nil, fee: nil,
+                                      supportStartedAt: nil, supportMonths: 2, state: .supporting)], account: me.context)
+        h.store.upsertFans([RemoteFan(userID: "u1", name: "Fan", iconURL: nil, planID: "b", planTitle: "プランB", fee: 1_000,
+                                      supportStartedAt: nil, supportMonths: 2, state: .supporting)], account: me.context)
+        XCTAssertEqual(fan.planTitle, "プランB")
+        XCTAssertEqual(fan.fee, 1_000)
+    }
+
+    // MARK: Notification events of several accounts
+
+    /// The same おたより received by two accounts: its inbox event lists both (filters, badge with one of them off).
+    func testNewsletterEventListsEveryReceivingAccount() throws {
+        let h = try SyncHarness()
+        let a = h.addAccount("A", pixivUserID: "pA", isMain: true)
+        let b = h.addAccount("B", pixivUserID: "pB")
+        let letter = RemoteNewsletter(id: "nl1", creatorID: "c1", creatorName: "C1", creatorIconURL: nil, title: nil, body: "本文",
+                                      createdAt: .now, isRead: false)
+        let created = h.store.ensureNewsletterEvents(newsletterIDs: h.store.upsertNewsletters([letter], account: a.context),
+                                                     account: a.context)
+        XCTAssertTrue(h.store.upsertNewsletters([letter], account: b.context).isEmpty)
+        let event = try XCTUnwrap(h.store.notificationEvent(id: created[0]))
+        XCTAssertEqual(Set(event.accountIDs), [a.id, b.id])
+        a.enabled = false
+        h.store.save()
+        XCTAssertEqual(h.store.unreadNotificationEventCount(), 1, "B received it too")
+    }
+
+    /// Local notifications off: A's restricted copy went through the pipeline without a banner. B's readable copy re-arms
+    /// the prefetch, and the event is prefetched (not announced) instead of staying pending for good.
+    func testRearmedEventThatWasNeverAnnouncedIsStillPrefetched() async throws {
+        let h = try SyncHarness()
+        let a = h.addAccount("A", pixivUserID: "pA", isMain: true)
+        let b = h.addAccount("B", pixivUserID: "pB")
+        var delivered: [String] = []
+        var prefetchOnly: [String] = []
+        h.engine.onNewNotificationEvents = { delivered += $0 }
+        h.engine.onPrefetchOnlyEvents = { prefetchOnly += $0 }
+        await h.engine.sync(.notifications, accountID: a.id, reason: .appLaunch)
+        await h.engine.sync(.notifications, accountID: b.id, reason: .appLaunch)
+        var restricted = SyncFixtures.notification("ra", type: .newPost, postID: "p1")
+        restricted.isRestricted = true
+        var readable = SyncFixtures.notification("rb", type: .newPost, postID: "p1")
+        readable.isRestricted = false
+        h.mock.update {
+            $0.notifications[a.id] = [restricted]
+            $0.notifications[b.id] = [readable]
+        }
+        await h.engine.sync(.notifications, accountID: a.id, reason: .userRefresh)
+        XCTAssertEqual(delivered, ["newPost|p1"])
+        delivered.removeAll()            // no banner went out: deliveredLocally stays false, nothing is due
+
+        await h.engine.sync(.notifications, accountID: b.id, reason: .userRefresh)
+        XCTAssertEqual(h.store.notificationEvent(id: "newPost|p1")?.prefetchState, .pending)
+        XCTAssertTrue(delivered.isEmpty, "not announced")
+        XCTAssertEqual(prefetchOnly, ["newPost|p1"])
+
+        // Wired like AppEnvironment: the text is fetched as B.
+        h.mock.update { $0.details[b.id] = ["p1": SyncFixtures.detail("p1")] }
+        await h.notifications.prefetchWithoutDelivery(eventIDs: prefetchOnly)
+        XCTAssertEqual(h.store.notificationEvent(id: "newPost|p1")?.prefetchState, .textReady)
+        XCTAssertTrue(h.poster.requests.isEmpty)
+    }
+
+    /// A post event whose first copy was restricted (no prefetch) is prefetched once another account's copy is readable.
+    func testUnrestrictedCopyOfAnotherAccountRearmsThePrefetch() async throws {
+        let h = try SyncHarness()
+        let a = h.addAccount("A", pixivUserID: "pA", isMain: true)
+        let b = h.addAccount("B", pixivUserID: "pB")
+        var delivered: [String] = []
+        h.engine.onNewNotificationEvents = { delivered += $0 }
+        await h.engine.sync(.notifications, accountID: a.id, reason: .appLaunch)
+        await h.engine.sync(.notifications, accountID: b.id, reason: .appLaunch)
+        var restricted = SyncFixtures.notification("ra", type: .newPost, postID: "p1")
+        restricted.isRestricted = true
+        var readable = SyncFixtures.notification("rb", type: .newPost, postID: "p1")
+        readable.isRestricted = false
+        h.mock.update {
+            $0.notifications[a.id] = [restricted]
+            $0.notifications[b.id] = [readable]
+        }
+        await h.engine.sync(.notifications, accountID: a.id, reason: .userRefresh)
+        XCTAssertEqual(delivered, ["newPost|p1"])
+        XCTAssertEqual(h.store.notificationEvent(id: "newPost|p1")?.prefetchState, .notNeeded)
+        h.store.notificationEvent(id: "newPost|p1")?.deliveredLocally = true      // the banner went out with the title
+        delivered.removeAll()
+
+        await h.engine.sync(.notifications, accountID: b.id, reason: .userRefresh)
+        XCTAssertEqual(h.store.notificationEvent(id: "newPost|p1")?.prefetchState, .pending)
+        XCTAssertEqual(delivered, ["newPost|p1"], "handed to the pipeline again for its prefetch")
     }
 
     // MARK: Creator comments first import (Creator Mode 未読)

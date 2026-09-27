@@ -48,9 +48,11 @@ final class MediaPrefetcher {
         let events = eventIDs.compactMap { store.notificationEvent(id: $0) }.sorted { $0.priority > $1.priority }
         var small: [MediaRequest] = []
         var large: [MediaRequest] = []
+        let disabled = store.disabledAccountIDs()
         for event in events {
             let post = event.postID.flatMap { store.post(id: $0) }
-            let accountID = post.flatMap(Self.account(for:)) ?? event.accountIDs.first
+            let accountID = post.flatMap { OfflineLibraryService.mediaAccount(for: $0, excluding: disabled) }
+                ?? event.accountIDs.first(where: { !disabled.contains($0) })
             // Priority 2: small avatar + thumbnail.
             add(event.actorIconURL, .thumbnail, postID: nil, creatorID: event.creatorID, accountID: accountID, to: &small)
             let creatorIcon = post?.creatorIconURL ?? event.creatorID.flatMap { store.creator(id: $0)?.iconURL }
@@ -85,16 +87,13 @@ final class MediaPrefetcher {
         }, sortBy: [SortDescriptor(\.publishedAt, order: .reverse)])
         descriptor.fetchLimit = Self.feedPostLimit
         var result: [MediaRequest] = []
+        let disabled = store.disabledAccountIDs()
         for post in store.fetch(descriptor) {
-            let accountID = Self.account(for: post)
+            let accountID = OfflineLibraryService.mediaAccount(for: post, excluding: disabled)
             add(post.coverImageURL, .thumbnail, postID: post.postID, creatorID: post.creatorID, accountID: accountID, to: &result)
             add(post.creatorIconURL, .thumbnail, postID: nil, creatorID: post.creatorID, accountID: accountID, to: &result)
         }
         return result
-    }
-
-    private static func account(for post: Post) -> String? {
-        post.detailAccountID ?? post.accessAccountIDs.first ?? post.seenByAccountIDs.first
     }
 
     private func add(_ url: String?, _ variant: MediaVariant, postID: String?, creatorID: String?, accountID: String?,

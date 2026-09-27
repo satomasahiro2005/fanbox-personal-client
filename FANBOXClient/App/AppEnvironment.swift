@@ -92,6 +92,10 @@ final class AppEnvironment {
             // Text is local now (Priority 0/1); avatars / thumbnails / display images follow at mediaPrefetch (SPEC §25).
             self?.prefetcher.notificationEventsProcessed(ids)
         }
+        sync.onPrefetchOnlyEvents = { [weak self] ids in
+            await self?.notifications.prefetchWithoutDelivery(eventIDs: ids)
+            self?.prefetcher.notificationEventsProcessed(ids)
+        }
         sync.onSyncFinished = { [weak self] outcome, reason in
             // Offline "recent N" rules keep applying to new posts (SPEC §31); Normal-mode media prefetch (SPEC §30).
             self?.offline.syncFinished(outcome, reason: reason)
@@ -122,9 +126,14 @@ final class AppEnvironment {
             }
         }
 
-        // The badge counts events of enabled accounts only.
+        // The badge counts events of enabled accounts only; a removed account's queued replies are gone.
         accounts.onEnabledAccountsChanged = { [weak self] in
+            self?.replies.countsChanged()
             Task { await self?.notifications.updateBadge() }
+        }
+        accounts.prepareRemoval = { [weak self] accountID in
+            await self?.sync.prepareForRemoval(accountID: accountID)
+            await self?.replies.prepareForRemoval(accountID: accountID)
         }
         // Transport ↔ accounts (SPEC §3.2 / §7.2 / §40).
         accounts.sessionRevoker = transport
@@ -184,9 +193,13 @@ final class AppEnvironment {
     }
 
     /// Re-derives the stored creator / feed relation flags once per launch. Earlier builds counted disabled accounts in
-    /// them, and a sync only recomputes the syncing account's own creators; one Creator fetch when nothing changed.
+    /// them, and a sync only recomputes the syncing account's own creators; one Creator fetch when nothing changed. Every
+    /// post is re-derived only when the enabled accounts differ from the last launch's (and once after this field arrived:
+    /// earlier builds kept posts only a disabled account's feeds listed in the timeline, and recorded no feed listings).
     func refreshStoredFlagsAtLaunch() {
-        store.refreshRelationFlags()
+        let signature = "v1|" + store.enabledAccountIDs().sorted().joined(separator: ",")
+        store.refreshRelationFlags(recomputeAllPosts: settings.feedFlagsSignature != signature)
+        settings.feedFlagsSignature = signature
     }
 
     /// In-memory environment with demo accounts (previews / tests).

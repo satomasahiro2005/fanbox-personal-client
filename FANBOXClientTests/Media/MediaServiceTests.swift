@@ -56,6 +56,41 @@ final class MediaServiceTests: XCTestCase {
         XCTAssertNotNil(best, "same URL cached under another variant is reused")
     }
 
+    /// A tall display image keeps its full width (it is shown at the width of the screen), within a pixel budget.
+    func testTallDisplayImageKeepsItsWidth() async throws {
+        h.http.payload = MediaTestFixtures.pngData(width: 400, height: 2_400)
+        let image = try await h.media.image(MediaRequest(url: "https://img.example.com/tall.png", variant: .display))
+        XCTAssertEqual(image.size.width * image.scale, 400, accuracy: 1)
+        XCTAssertEqual(image.size.height * image.scale, 2_400, accuracy: 1)
+
+        XCTAssertEqual(ImageDownsampler.shortSideLimitedLongestSide(pixelSize: CGSize(width: 1_200, height: 6_000), shortSide: 1_600,
+                                                                    budget: ImageDownsampler.displayPixelBudget), 6_000)
+        XCTAssertEqual(ImageDownsampler.shortSideLimitedLongestSide(pixelSize: CGSize(width: 4_000, height: 3_000), shortSide: 1_600,
+                                                                    budget: ImageDownsampler.displayPixelBudget) ?? 0, 2_133, accuracy: 1)
+        let huge = try XCTUnwrap(ImageDownsampler.shortSideLimitedLongestSide(pixelSize: CGSize(width: 2_000, height: 20_000),
+                                                                              shortSide: 1_600, budget: ImageDownsampler.displayPixelBudget))
+        XCTAssertLessThanOrEqual(huge * huge / 10, ImageDownsampler.displayPixelBudget + 20_000, "bounded by the pixel budget")
+    }
+
+    /// A tall strip keeps some width as a thumbnail (square tiles fill with it), and its original is never decoded
+    /// narrower than its display image (the viewer swaps one for the other).
+    func testTallStripThumbnailAndOriginalKeepTheirWidth() async throws {
+        h.http.payload = MediaTestFixtures.pngData(width: 200, height: 1_000)
+        let tile = try await h.media.image(MediaRequest(url: "https://img.example.com/strip.png", variant: .thumbnail))
+        XCTAssertEqual(tile.size.width * tile.scale, 200, accuracy: 1, "not squeezed to 80 px of width")
+
+        func limit(_ width: CGFloat, _ height: CGFloat, _ variant: MediaVariant) -> CGFloat {
+            ImageDownsampler.longestSideLimit(pixelSize: CGSize(width: width, height: height), variant: variant) ?? 0
+        }
+        XCTAssertEqual(limit(1_200, 6_000, .thumbnail), 1_000, accuracy: 1)
+        XCTAssertEqual(limit(2_400, 1_600, .thumbnail), 400, "ordinary shapes keep the 400 px longest side")
+        XCTAssertEqual(limit(1_200, 630, .thumbnail), 400)
+        for (width, height) in [(1_200.0, 20_000.0), (2_000.0, 10_000.0), (4_000.0, 3_000.0), (12_000.0, 12_000.0)] {
+            XCTAssertGreaterThanOrEqual(limit(width, height, .original), limit(width, height, .display), "\(width)x\(height)")
+        }
+        XCTAssertEqual(limit(12_000, 12_000, .original), ImageDownsampler.originalPixelCap)
+    }
+
     func testDemoFileIsGeneratedWithRequestedSize() async throws {
         let url = "demo://file/sample.zip?size=2048"
         let fileURL = try await h.media.load(MediaRequest(url: url, variant: .original, kind: .file, trigger: .manual, postID: "p1"))
@@ -158,6 +193,89 @@ final class MediaServiceTests: XCTestCase {
         XCTAssertEqual(h.entries.count, 1)
     }
 
+    /// A turned-off account's session is never used for media, whatever account the request names.
+    func testDisabledAccountNeverSendsMediaRequests() async throws {
+        let off = Account(displayName: "Off", enabled: false)
+        h.env.store.context.insert(off)
+        h.env.store.save()
+        _ = try await h.media.load(MediaRequest(url: "https://example.com/off.png", variant: .display, accountID: off.id))
+        _ = try await h.media.load(MediaRequest(url: "https://example.com/on.png", variant: .display, accountID: "acc-1"))
+        XCTAssertEqual(h.http.requestedAccountIDs, [nil, "acc-1"])
+    }
+
+    /// A saving request (pin) that joins a download the screen started moves the file into the saved root; the screen's
+    /// request must get the file where it is now, and must never delete the saved file as "corrupt".
+    func testPinningJoinOfAScreenDownloadKeepsTheSavedFile() async throws {
+        let remote = "https://downloads.example.com/images/join.png"
+        h.http.delay = .milliseconds(200)
+        let screen = Task { try await h.media.image(MediaRequest(url: remote, variant: .display, postID: "p1")) }
+        var spins = 0
+        while h.http.downloadCount == 0 && spins < 100_000 { spins += 1; await Task.yield() }
+        let saved = try await h.media.load(MediaRequest(url: remote, variant: .display, postID: "p1", pin: true))
+        let image = try await screen.value
+        XCTAssertGreaterThan(image.size.width, 0)
+        let entry = try XCTUnwrap(h.entries.first)
+        XCTAssertTrue(entry.isPinned)
+        XCTAssertTrue(h.fileExists(entry), "the saved file is kept")
+        XCTAssertEqual(saved, h.media.fileCache.fileURL(relativePath: entry.relativePath))
+        XCTAssertEqual(h.http.downloadCount, 1)
+    }
+
+    /// A download every waiter gave up on is not joined by a later request (it would only end with `.cancelled`).
+    func testANewRequestDoesNotJoinACancelledDownload() async throws {
+        let remote = "https://downloads.example.com/images/cancelled.png"
+        h.http.uncancellableDelay = .milliseconds(300)
+        let first = Task { try await h.media.load(MediaRequest(url: remote, variant: .display)) }
+        var spins = 0
+        while h.http.downloadCount == 0 && spins < 100_000 { spins += 1; await Task.yield() }
+        first.cancel()
+        spins = 0
+        while h.media.activeFetchCount != 0 && spins < 1_000 { spins += 1; await Task.yield() }
+
+        let fileURL = try await h.media.load(MediaRequest(url: remote, variant: .display))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fileURL.path))
+        XCTAssertEqual(h.http.downloadCount, 2, "a fresh download")
+        _ = try? await first.value
+    }
+
+    /// Attachments are opened / shared under their real name, and the link a screen holds survives Offline保存 moving
+    /// the cached file into the saved root.
+    func testNamedFileKeepsTheRealNameAndSurvivesPinning() async throws {
+        let remote = "https://downloads.example.com/files/abc123.pdf"
+        _ = try await h.media.load(MediaRequest(url: remote, variant: .original, kind: .file, trigger: .manual, postID: "p1"))
+        let named = try XCTUnwrap(h.media.namedFileURL(url: remote, variant: .original, fileName: "第3話.pdf"))
+        XCTAssertEqual(named.lastPathComponent, "第3話.pdf")
+        h.media.pin(postID: "p1")
+        XCTAssertEqual(h.entries.first?.isPinned, true)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: named.path), "the link still opens after the file moved")
+        XCTAssertEqual(try Data(contentsOf: named), h.http.payload)
+
+        // Deleting the saved file deletes its link too: the link would keep the bytes on disk, uncounted.
+        h.media.removeEntry(key: try XCTUnwrap(h.entries.first?.key))
+        XCTAssertTrue(h.entries.isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: named.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: named.deletingLastPathComponent().path))
+    }
+
+    /// "すべて削除（保存済みを含む）" deletes every readable-name link with the files.
+    func testClearingEverythingDeletesTheNamedLinks() async throws {
+        let remote = "https://downloads.example.com/files/all.zip"
+        _ = try await h.media.load(MediaRequest(url: remote, variant: .original, kind: .file, trigger: .manual, postID: "p1"))
+        let named = try XCTUnwrap(h.media.namedFileURL(url: remote, variant: .original, fileName: "まとめ.zip"))
+        h.media.clearAll(includePinned: true)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: named.path))
+    }
+
+    /// A "すべて削除" cut short by suspension leaves its detached copy: it is deleted later.
+    func testLeftoverTrashOfAnInterruptedClearIsDeleted() throws {
+        let trash = h.root.deletingLastPathComponent()
+            .appendingPathComponent(MediaFileCache.trashPrefix + UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: trash, withIntermediateDirectories: true)
+        try Data("x".utf8).write(to: trash.appendingPathComponent("f.jpg"))
+        XCTAssertGreaterThanOrEqual(h.media.fileCache.removeLeftoverTrash(), 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: trash.path))
+    }
+
     func testCacheSelfHealsWhenRowOrFileDisappears() async throws {
         let url = "https://example.com/drift.png"
         _ = try await h.media.load(MediaRequest(url: url, variant: .display))
@@ -199,6 +317,24 @@ final class MediaServiceTests: XCTestCase {
             guard case .decoding = error as? RemoteError else { return XCTFail("unexpected error \(error)") }
         }
         XCTAssertTrue(h.entries.isEmpty, "undecodable files are removed so they can be re-fetched")
+    }
+
+    /// A saved image that really is undecodable is dropped, and its post is no longer claimed as saved offline.
+    func testCorruptSavedImageReleasesItsPost() async throws {
+        let post = h.insertPost(id: "p1")
+        post.offlineState = .saved
+        h.http.payload = Data("<html>not an image</html>".utf8)
+        let request = MediaRequest(url: "https://example.com/bad-saved.png", variant: .display, postID: "p1", pin: true)
+        _ = try await h.media.load(request)
+        XCTAssertEqual(h.entries.first?.isPinned, true)
+        do {
+            _ = try await h.media.image(request)
+            XCTFail("decode must fail")
+        } catch {
+            guard case .decoding = error as? RemoteError else { return XCTFail("unexpected error \(error)") }
+        }
+        XCTAssertTrue(h.entries.isEmpty)
+        XCTAssertEqual(post.offlineState, OfflineState.none, "the saved post lost an image")
     }
 
     // MARK: - Pin / clear

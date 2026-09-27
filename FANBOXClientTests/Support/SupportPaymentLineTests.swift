@@ -171,6 +171,8 @@ final class SupportPaymentLineTests: XCTestCase {
         XCTAssertEqual(SupportText.billingDate(jst(2025, 12, 2, 9), now: jst(2026, 1, 24)), "2025/12/2")
         let edge = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-09-30T15:30:00Z"))
         XCTAssertEqual(SupportText.billingDate(edge, now: jst(2026, 10, 3)), "10/1", "dates are Japan dates")
+        XCTAssertEqual(SupportText.paymentDate(edge), "2026/10/1", "a payment row shows the Japan date of its month section")
+        XCTAssertEqual(SupportAnalyzer.monthKey(edge), SupportAnalyzer.monthKey(jst(2026, 10, 1)))
     }
 
     func testSummaryOfOneSupportLine() {

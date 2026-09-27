@@ -88,6 +88,24 @@ final class SearchServiceTests: XCTestCase {
         XCTAssertEqual(results.totalCount, 7)
     }
 
+    /// A turned-off account's drafts, the creators only it relates to and the comments it fetched are hidden in search too.
+    func testSearchHidesWhatOnlyADisabledAccountHas() {
+        let off = Account(kind: .demo, displayName: "Off", creatorID: "offpage")
+        off.enabled = false
+        store.context.insert(off)
+        store.context.insert(Draft(accountID: off.id, title: "Hidden piano draft"))
+        let creator = Creator(creatorID: "c9", name: "Piano hidden")
+        creator.followedByAccountIDs = [off.id]
+        store.context.insert(creator)
+        store.context.insert(Comment(commentID: "cm9", postID: "p5", fetchedByAccountID: off.id, authorUserID: "u", authorName: "fan",
+                                     body: "piano hidden", createdAt: .now))
+        store.save()
+        let results = search.search("piano")
+        XCTAssertEqual(results.drafts.count, 2, "the turned-off account's draft is not listed")
+        XCTAssertEqual(results.creators.map(\.creatorID), ["c1"])
+        XCTAssertEqual(results.comments.map(\.commentID), ["cm1"])
+    }
+
     func testSearchIsCaseInsensitiveAndSupportsJapanese() {
         XCTAssertEqual(Set(search.search("PIANO").posts.map(\.postID)), ["p1", "p3", "p4"])
         let jp = search.search("ピアノ")

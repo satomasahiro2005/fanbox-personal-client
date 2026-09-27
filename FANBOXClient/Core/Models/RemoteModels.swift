@@ -55,6 +55,9 @@ struct RemotePostSummary: Sendable, Hashable {
     var hasAdultContent: Bool
     /// Creator Mode listing only (my own managed posts): FANBOX-side status. nil for reader listings.
     var remoteStatus: RemotePostStatus?
+    /// Fields the source does not carry (their values above are defaults): the stored values are kept. Creator Mode's
+    /// post.listManaged has no counts or like state, post.get no like state or revision.
+    var unreported: Set<RemotePostField> = []
 
     init(id: String, creatorID: String, creatorName: String, creatorIconURL: String? = nil, pixivUserID: String? = nil, title: String,
          excerpt: String = "", type: PostType = .unknown, feeRequired: Int = 0, coverImageURL: String? = nil, publishedAt: Date,
@@ -79,6 +82,17 @@ struct RemotePostSummary: Sendable, Hashable {
         self.isRestricted = isRestricted
         self.hasAdultContent = hasAdultContent
     }
+}
+
+/// Post summary fields a source may leave out (`RemotePostSummary.unreported`).
+enum RemotePostField: Sendable, Hashable {
+    /// likeCount / commentCount
+    case counts
+    case isLiked
+    case updatedAt
+    case tags
+    case adultContent
+    case creatorName
 }
 
 struct RemoteBlock: Sendable, Hashable {
@@ -293,10 +307,19 @@ struct RemoteCreatorDashboard: Sendable, Hashable {
     var earnings: Int?
     var postCount: Int?
     var commentCount: Int?
+    /// Some sources failed (their metrics are nil although FANBOX may have a value).
+    var partialError: RemoteError?
+    /// The metrics whose source failed in this refresh (the stored value is kept); any other nil metric is unavailable.
+    var failedMetrics: Set<Metric> = []
+
+    enum Metric: Sendable, Hashable {
+        case supporterCount, earnings, postCount, commentCount
+    }
 }
 
+/// `archived` = taken down (非公開): FANBOX's unpublish, not visible to readers.
 enum RemotePostStatus: String, Sendable, Codable {
-    case draft, published, scheduled, unknown
+    case draft, published, scheduled, archived, unknown
 }
 
 struct RemoteEditablePost: Sendable, Hashable {
@@ -396,7 +419,7 @@ struct RemoteUploadResult: Sendable, Hashable, Codable {
 }
 
 /// Errors surfaced by remote data sources. Feature code shows cached data + a banner; it never deletes local cache on error.
-enum RemoteError: Error, Sendable, Equatable {
+enum RemoteError: Error, Sendable, Hashable {
     /// Network mode is Offline or there is no connectivity.
     case offline
     /// Session missing / expired — re-login via Web Bridge.

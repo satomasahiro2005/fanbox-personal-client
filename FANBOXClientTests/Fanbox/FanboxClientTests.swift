@@ -436,6 +436,7 @@ final class FanboxClientTests: XCTestCase {
         XCTAssertNil(dashboard.earnings, "failed source ⇒ unavailable, never guessed")
         XCTAssertEqual(dashboard.postCount, 1)
         XCTAssertNil(dashboard.commentCount, "no reliable source")
+        XCTAssertEqual(dashboard.failedMetrics, [.earnings], "only the failed source keeps its stored value")
         XCTAssertEqual(h.http.requests(for: "legacy.manage.pledge.monthly").last?.url.absoluteString,
                        "https://api.fanbox.cc/legacy/manage/pledge/monthly?month=\(month)")
 
@@ -454,6 +455,7 @@ final class FanboxClientTests: XCTestCase {
         let meta = try await h.source.postMetadata(id: "5001", account: FanboxTestHarness.fan)
         XCTAssertEqual(meta.coverImageURL, "https://pixiv.pximg.net/c.jpeg")
         XCTAssertFalse(meta.isRestricted, "missing body on post.get is not a restriction")
+        XCTAssertEqual(meta.unreported, [.isLiked, .updatedAt], "missing like state / revision are not \"not liked\" / \"never edited\"")
 
         h.http.stub("post.listTagged", json: FanboxFixtures.envelope(#"{"count":1,"items":[{"id":"1","creatorId":"alice"}],"nextUrl":"https://api.fanbox.cc/post.listTagged?tag=x&creatorId=alice&page=1"}"#))
         let tagged = try await h.source.taggedPosts(tag: "x", creatorID: "alice", account: FanboxTestHarness.fan, cursor: nil)

@@ -122,9 +122,13 @@ struct SupportRootView: View {
         .navigationTitle("支援")
         .refreshable { await refreshAll(priority: .interactiveRead, reason: .userRefresh) }
         .task {
-            let ids = accounts.map(\.id)
-            guard !ids.isEmpty, SupportSync.isStale(states: syncStates, accountIDs: ids) else { return }
-            await refreshAll(priority: .backgroundSync, reason: .onDemand)
+            // Only the stale accounts that can sync: one expired / logged-out account must not re-sync all of them on
+            // every visit.
+            let ids = accounts.filter { SupportSync.refreshesAutomatically(kind: $0.kind, state: $0.sessionState) }.map(\.id)
+            let stale = SupportSync.staleAccountIDs(states: syncStates, accountIDs: ids)
+            guard !stale.isEmpty else { return }
+            refreshError = await SupportSync.refresh(env: env, accountIDs: stale, includePayments: true, priority: .backgroundSync,
+                                                     reason: .onDemand)
         }
         .paymentFlowSheet($flowRequest)
     }

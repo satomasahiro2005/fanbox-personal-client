@@ -35,7 +35,7 @@ struct TaggedPostsView: View {
         List {
             if posts.isEmpty {
                 EmptyStateView(title: "#\(normalized)", systemImage: "number",
-                               message: "このタグが付いた投稿はありません。投稿詳細の「タグとメモ」から付けられます。")
+                               message: "このタグが付いた投稿はありません。投稿詳細の「タグ・メモ」から付けられます。")
                     .listRowSeparator(.hidden)
             }
             ForEach(posts) { post in
