@@ -4,7 +4,8 @@ import SwiftData
 /// Unified, deduplicated notification event (SPEC §27).
 @Model
 final class NotificationEvent {
-    /// Dedupe key independent of account, e.g. "newPost|<postID>" / "comment|<commentID>". See `NotificationEvent.dedupeKey`.
+    /// Dedupe key, e.g. "newPost|<postID>" / "comment|<commentID>". Account-independent for posts, comments and おたより;
+    /// per account for support events. See `NotificationEvent.dedupeKey`.
     @Attribute(.unique) var id: String
     var typeRaw: String
     var accountIDs: [String]
@@ -59,7 +60,11 @@ final class NotificationEvent {
 
     var priority: NotificationPriority { NotificationPriority(rawValue: priorityRaw) ?? .normal }
 
-    /// Account-independent dedupe key so the same FANBOX event received by several accounts becomes one row.
+    /// Dedupe key. New posts, comments with a known id and おたより get an account-independent key, so the same FANBOX item
+    /// received by several accounts becomes one row (comment bells without an id are matched in `upsertNotifications`).
+    /// Everything else ends in `fallbackRemoteID`, which callers make per account (a bell id, or `local:<accountID>:…` for
+    /// derived support events): one account's support change, stop or payment problem is never merged into another
+    /// account's event for the same creator.
     static func dedupeKey(type: NotificationEventType, creatorID: String?, postID: String?, commentID: String?, newsletterID: String?,
                           fallbackRemoteID: String) -> String {
         switch type {

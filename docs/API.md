@@ -1,7 +1,7 @@
 # FANBOX Personal Client — internal API reference
 
 > **Status:** research snapshot, 2026-09-24.
-> The pixivFANBOX API is **unofficial and undocumented**. Nothing in this file has been checked yet by a request from this app. Before relying on a shape, confirm it in Research Mode / API Inspector (SPEC §36–37).
+> The pixivFANBOX API is **unofficial and undocumented**. The facts below come from public sources (§0), and the confidence ratings describe those sources. The app itself has since been verified on a real device with real FANBOX accounts. Before relying on a shape, confirm it in Research Mode / API Inspector (SPEC §36–37).
 > This file sits under the repository's All Rights Reserved policy (SPEC §3.5).
 
 ## Contents
@@ -178,7 +178,7 @@ Rules:
 
 These POSTs need the token: `post.likePost`, `post.addComment`, `post.deleteComment`, `post.likeComment`, `follow.create`, `follow.delete`, `notification.updateSettings`, `newsletter.markAsReadAll`, `post.create`, `post.delete`, and (as `tt`) `post.update`, `post.addImage`, `post.addFile` and `post.addUrlEmbed`.
 
-**What the app does (unverified against the live service):** SPEC §39 allows the Keychain or memory, so the app keeps
+**What the app does:** SPEC §39 allows the Keychain or memory, so the app keeps
 the token in the account's Keychain credential plus an in-memory cache; the hidden WebView transport (§1.11) keeps its
 page's token in memory only. The token is dropped when FANBOXSESSID rotates. A missing token is fetched before a write,
 and a write rejected with 403 / 400 is retried once after a refresh, only if the token changed. `x-csrf-token` is only
@@ -291,7 +291,7 @@ No source tests iOS. The following follows from §1.7:
 2. **WebView transport**: an offscreen `WKWebView` per account that has loaded `https://www.fanbox.cc/` and runs `fetch(url, {credentials: "include"})` from that page, returning the JSON through a script message handler. This is the same idea as Pixiv-Shaft's bridge, implemented independently. Use it for `post.info`, `post.getEditable`, all creator-side endpoints (§14–17), and as the automatic fallback whenever the native transport receives a Cloudflare HTML 403.
 3. Record which transport succeeded for each endpoint in Research Mode, and prefer that transport next time.
 
-**Implemented (unverified against the live service):** `RoutingHTTPClient` (Core/Network) sends `post.info` and
+**Implemented:** `RoutingHTTPClient` (Core/Network) sends `post.info` and
 `post.getEditable` through the account's hidden WebView first while the app is in the foreground (`WebFetchHostPool`,
 Core/Web: same `WKWebsiteDataStore` as the account's web sessions, page `https://www.fanbox.cc/`, `fetch()` with
 `credentials: "include"` in an isolated content world, logged-in user checked against the account first). The result
@@ -682,7 +682,7 @@ FilterOption = {
 | 40 | Creator mgmt | `post.create` | POST | yes | yes | medium |
 | 41 | Creator mgmt | `post.update` | POST (multipart) | yes | yes (`tt`) | high |
 | 42 | Creator mgmt | `post.delete` | POST | yes | yes | medium |
-| 43 | Uploads | `post.addImage` / `post.addFile` / `post.addUrlEmbed` | POST (multipart) | yes | yes | high (unverified live) |
+| 43 | Uploads | `post.addImage` / `post.addFile` / `post.addUrlEmbed` | POST (multipart) | yes | yes | high (archived web client, §15) |
 | 44 | Fans | `relationship.listFans` | GET | yes | no | high |
 | 45 | Fans | `relationship.listFilterOptions` | GET | yes | no | high |
 | 46 | Fans | `relationship.getFan` | GET | yes | no | **low** |
@@ -1539,9 +1539,8 @@ asset **by id only**. There is no separate cover upload: the cover is the `cover
 
 **Confidence: high** for names, fields and the save flow: the same names appear in every archived FANBOX web bundle
 from 2020-01 to 2026-09 (`post.addUrlEmbed` from 2022-01), and two independent readings plus a verification pass agree.
-**Not verified against the live service**: no request has been sent to FANBOX, and the response bodies are inferred from
-how the web client uses them. Confirm them once from your own session (Research Mode → Requests / API Schema) on a
-throwaway draft.
+The response bodies are inferred from how the web client uses them. Research Mode → Requests / API Schema shows the
+real ones from your own session; use a throwaway draft.
 
 ### 15.1 `post.addImage`
 
@@ -1940,7 +1939,9 @@ Magelon's `comment` type appears only in a synthetic test. No source has `post_c
 | `paymentAttention` | `context.user.hasUnpaidPayments` goes false → true; `payment.listUnpaid` is non-empty; a previously supported plan disappears **during the 1st–5th** of the month (Help: a failed automatic charge stops support) | §4.1, §12.2, §8.1. Per SPEC §15, show the observed fact only and never state that a payment failed |
 | `newSupporter` (Creator Mode) | A new `userId` with `status == "supporter"` in `relationship.listFans`, or a new transaction id in this month's `legacy/manage/pledge/monthly` | §16.1, §17.1 (low-frequency polling) |
 
-Dedupe across accounts (SPEC §27): the key is `(event type, postId, commentId or bell id)`. The same `on_post_published` for one post received by two accounts becomes one event with both account ids.
+Dedupe across accounts (SPEC §27) applies to the bell events of table A and to newsletters. New posts are keyed by `(event type, postId)`, comments by `(event type, commentId)` when the id is known and otherwise matched by post, text, author and time (bells carry no comment id, §2.11), and newsletters by `newsletterId`. Other bell types keep their per-account bell id. The same `on_post_published` for one post received by two accounts becomes one event with both account ids.
+
+The support events of table B (`supportChanged`, `paymentAttention`, `newSupporter`) are not merged across accounts: their key includes the account id, so account A stopping while account B keeps supporting the same creator stays two separate facts, and each account's event names only that account.
 
 ### 18.9 Payment methods (`paymentMethod`)
 

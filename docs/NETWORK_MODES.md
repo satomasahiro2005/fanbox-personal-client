@@ -12,7 +12,7 @@ Code: `Core/Network/NetworkPolicy.swift` (`NetworkModePreference`, `NetworkMode`
 Settings UI: Settings → 通信モード (network mode) (`Features/Settings/NetworkModeSettingsView.swift`).
 
 The modes and the scheduler are exercised by unit tests. The request budget's numbers are inferred from third-party
-reports ([API.md](API.md) §1.8) and have not been checked against the live service.
+reports ([API.md](API.md) §1.8), not measured.
 
 ## Modes
 

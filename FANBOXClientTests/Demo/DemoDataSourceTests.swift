@@ -89,7 +89,7 @@ final class DemoDataSourceTests: XCTestCase {
         XCTAssertEqual(p1, p2)
         XCTAssertEqual(p1, preferred)
 
-        // Two viewer accounts always differ, even when both hash to the same profile.
+        // Two viewer accounts always get different fixture profiles, even when both hash to the same profile.
         let first = account(userID(preferring: .viewerA, skip: 0))
         let second = account(userID(preferring: .viewerA, skip: 1))
         let world = DemoWorld(now: anchor, latencyScale: 0)
@@ -189,12 +189,14 @@ final class DemoDataSourceTests: XCTestCase {
         XCTAssertFalse(detailB.summary.isRestricted)
         XCTAssertEqual(detailB.blocks.filter { $0.kind == .image }.count, 6)
 
-        // ¥1,000 post of Demo 作曲家ミント: A supports at ¥1,000, B only follows.
+        // ¥1,000 post of Demo 作曲家ミント: A supports at ¥1,000, B at ¥500.
         let mintA = try await source.post(id: "demo-post-102", account: a)
         let mintB = try await source.post(id: "demo-post-102", account: b)
         XCTAssertFalse(mintA.summary.isRestricted)
         XCTAssertTrue(mintA.blocks.contains { $0.kind == .audio })
         XCTAssertTrue(mintB.summary.isRestricted)
+        let mintCheapB = try await source.post(id: "demo-post-125", account: b)
+        XCTAssertFalse(mintCheapB.summary.isRestricted, "B's ¥500 plan covers the ¥500 post")
 
         // Free posts are viewable by everyone.
         let free = try await source.post(id: "demo-post-107", account: a)
@@ -442,10 +444,13 @@ final class DemoDataSourceTests: XCTestCase {
     func testSupportAnomalySecondCallLacksSupport() async throws {
         let (source, world) = makeSource()
         let b = viewerB, a = viewerA
+        let missing = try XCTUnwrap(DemoFixtures.profile(.viewerB).disappearingSupportCreatorID)
+        XCTAssertEqual(missing, "demo-mint")
+        let before = try await source.post(id: "demo-post-125", account: b)
+        XCTAssertFalse(before.summary.isRestricted, "B's ¥500 ミント plan covers the post before the support disappears")
         let first = try await source.supportingPlans(account: b)
         let second = try await source.supportingPlans(account: b)
         let third = try await source.supportingPlans(account: b)
-        let missing = try XCTUnwrap(DemoFixtures.profile(.viewerB).disappearingSupportCreatorID)
         XCTAssertTrue(first.contains { $0.creatorID == missing })
         XCTAssertFalse(second.contains { $0.creatorID == missing })
         XCTAssertEqual(second, third)
@@ -453,13 +458,49 @@ final class DemoDataSourceTests: XCTestCase {
         let calls = await world.supportingPlansCallCount(accountID: b.accountID)
         XCTAssertEqual(calls, 3)
         // After the disappearance, paid posts of that creator become restricted for B.
-        let kuonPost = try await source.post(id: "demo-post-115", account: b)
-        XCTAssertTrue(kuonPost.summary.isRestricted)
+        let mintPostB = try await source.post(id: "demo-post-125", account: b)
+        XCTAssertTrue(mintPostB.summary.isRestricted)
 
-        // Viewer A is stable.
+        // Viewer A is stable and keeps supporting the same creator.
         let a1 = try await source.supportingPlans(account: a)
         let a2 = try await source.supportingPlans(account: a)
         XCTAssertEqual(a1, a2)
+        XCTAssertTrue(a2.contains { $0.creatorID == missing })
+        let mintPostA = try await source.post(id: "demo-post-125", account: a)
+        XCTAssertFalse(mintPostA.summary.isRestricted)
+    }
+
+    /// The demo accounts are one person's accounts: FANBOX allows one plan per account per creator, so the viewer
+    /// accounts support mostly the same creators, and the per-account state changes sit on creators the other account
+    /// keeps supporting.
+    func testViewerAccountsSupportMostlyTheSameCreators() throws {
+        let a = DemoFixtures.profile(.viewerA), b = DemoFixtures.profile(.viewerB)
+        let feesA = Dictionary(uniqueKeysWithValues: a.supports.map { ($0.creatorID, $0.fee) })
+        let feesB = Dictionary(uniqueKeysWithValues: b.supports.map { ($0.creatorID, $0.fee) })
+        let shared = Set(feesA.keys).intersection(feesB.keys)
+        let all = Set(feesA.keys).union(feesB.keys)
+        XCTAssertGreaterThan(shared.count * 2, all.count, "most supported creators are supported by both viewer accounts")
+        for creatorID in shared {
+            XCTAssertNotEqual(feesA[creatorID], feesB[creatorID], "\(creatorID): each account holds its own plan")
+        }
+        XCTAssertTrue(DemoFixtures.profile(.creator).supports.contains { $0.creatorID == "demo-aoi" })
+        XCTAssertTrue(shared.contains("demo-aoi"), "one creator is supported by all three demo accounts")
+
+        // A stops a support that B keeps.
+        let stopping = a.supports.filter(\.stopping)
+        XCTAssertFalse(stopping.isEmpty)
+        for support in stopping {
+            let other = try XCTUnwrap(b.supports.first { $0.creatorID == support.creatorID })
+            XCTAssertFalse(other.stopping)
+        }
+        // B loses a support that A keeps.
+        let disappearing = try XCTUnwrap(b.disappearingSupportCreatorID)
+        XCTAssertNotNil(feesA[disappearing])
+        // The fixture support-state events of one account are on creators the other account also supports.
+        for (profile, other) in [(DemoProfile.viewerA, feesB), (.viewerB, feesA)] {
+            let events = (DemoFixtures.notifications[profile] ?? []).filter { $0.type == .paymentAttention || $0.type == .supportChanged }
+            XCTAssertTrue(events.contains { event in event.creatorID.map { other[$0] != nil } ?? false }, "\(profile)")
+        }
     }
 
     func testThisMonthActualDiffersFromRecurring() async throws {
@@ -476,8 +517,8 @@ final class DemoDataSourceTests: XCTestCase {
         XCTAssertFalse(lastMonth.isEmpty)
         XCTAssertTrue(thisMonth.allSatisfy { $0.paidAt <= anchor })
         XCTAssertNotEqual(thisMonth.map(\.amount).reduce(0, +), recurring)
-        XCTAssertEqual(recurring, 4600)
-        XCTAssertEqual(thisMonth.map(\.amount).reduce(0, +), 5100)
+        XCTAssertEqual(recurring, 5600)
+        XCTAssertEqual(thisMonth.map(\.amount).reduce(0, +), 6100)
     }
 
     // MARK: - Media

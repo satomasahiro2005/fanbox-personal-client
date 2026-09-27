@@ -98,6 +98,10 @@ enum DemoFixtures {
     static let creatorsByID: [String: DemoCreatorFixture] = Dictionary(uniqueKeysWithValues: creators.map { ($0.id, $0) })
 
     // MARK: - Profiles (who follows / supports what)
+    // One person's accounts: FANBOX allows one plan per account per creator, so the viewer accounts support mostly the
+    // same creators on different plans (demo-aoi is supported by all three). Per-account state changes sit on shared
+    // creators: viewerA stops シオン while viewerB keeps it, viewerA changed its ミント plan this month, and viewerB's ミント
+    // support disappears (決済要確認) while viewerA keeps supporting ミント.
 
     static let profiles: [DemoProfile: DemoProfileFixture] = [
         .viewerA: DemoProfileFixture(
@@ -107,19 +111,22 @@ enum DemoFixtures {
                 DemoSupportFixture(creatorID: "demo-mint", fee: 1000, paymentMethod: "card"),
                 DemoSupportFixture(creatorID: "demo-shion", fee: 100, paymentMethod: "paypal", stopping: true),
                 DemoSupportFixture(creatorID: "demo-ruri", fee: 3000, paymentMethod: "card"),
+                DemoSupportFixture(creatorID: "demo-kohaku", fee: 1000, paymentMethod: "card"),
             ],
-            followOnly: ["demo-sora", "demo-kohaku"],
+            followOnly: ["demo-sora"],
             disappearingSupportCreatorID: nil),
         .viewerB: DemoProfileFixture(
             profile: .viewerB, userName: "Demo 読者ナツ",
             supports: [
                 DemoSupportFixture(creatorID: "demo-aoi", fee: 1000, paymentMethod: "paypal"),
                 DemoSupportFixture(creatorID: "demo-kohaku", fee: 5000, paymentMethod: "card"),
+                DemoSupportFixture(creatorID: "demo-ruri", fee: 500, paymentMethod: "card"),
+                DemoSupportFixture(creatorID: "demo-mint", fee: 500, paymentMethod: "card"),
+                DemoSupportFixture(creatorID: "demo-shion", fee: 500, paymentMethod: "card"),
                 DemoSupportFixture(creatorID: "demo-sora", fee: 500, paymentMethod: "card"),
-                DemoSupportFixture(creatorID: "demo-kuon", fee: 500, paymentMethod: "card"),
             ],
-            followOnly: ["demo-mint", "demo-hisui"],
-            disappearingSupportCreatorID: "demo-kuon"),
+            followOnly: ["demo-kuon", "demo-hisui"],
+            disappearingSupportCreatorID: "demo-mint"),
         .creator: DemoProfileFixture(
             profile: .creator, userName: "Demo セルフ工房",
             supports: [
@@ -591,10 +598,10 @@ enum DemoFixtures {
             reply("demo-c-107-3", unread: false),
             newPost("demo-post-108", unread: false),
             DemoNotificationFixture(
-                key: "payment-kuon", type: .paymentAttention, rawType: "payment_attention", time: .daysAgo(1, hours: 2),
-                creatorID: "demo-kuon", postID: nil, commentID: nil, newsletterID: nil, actorName: nil, actorIconURL: nil,
+                key: "payment-mint", type: .paymentAttention, rawType: "payment_attention", time: .daysAgo(1, hours: 2),
+                creatorID: "demo-mint", postID: nil, commentID: nil, newsletterID: nil, actorName: nil, actorIconURL: nil,
                 title: "お支払い状況をご確認ください（Demo）",
-                message: "Demo 動画クリエイタークオン への支援について、お支払い状況の確認をお願いします。", unread: true),
+                message: "Demo 作曲家ミント への支援について、お支払い状況の確認をお願いします。", unread: true),
             DemoNotificationFixture(
                 key: "support-sora-start", type: .supportChanged, rawType: "support_started", time: .thisMonth(0.3),
                 creatorID: "demo-sora", postID: nil, commentID: nil, newsletterID: nil, actorName: "Demo 写真家ソラ",
@@ -658,8 +665,9 @@ enum DemoFixtures {
     ]
 
     // MARK: - Paid payment records
-    // viewerA: mid-month plan change (ミント ¥500 → ¥1,000) ⇒ 今月実請求 ¥5,100 ≠ 定常月額 ¥4,600.
-    // viewerB: a support that ended after this month's payment (シオン) ⇒ 今月実請求 ¥7,000; クオン has no payment this month.
+    // viewerA: mid-month plan change (ミント ¥500 → ¥1,000) ⇒ 今月実請求 ¥6,100 ≠ 定常月額 ¥5,600.
+    // viewerB: ミント has no payment this month (the support that disappears, while viewerA keeps paying for ミント) and
+    // ソラ started this month ⇒ 今月実請求 ¥7,500.
 
     static let payments: [DemoProfile: [DemoPaymentFixture]] = [
         .viewerA: [
@@ -668,10 +676,12 @@ enum DemoFixtures {
             DemoPaymentFixture(id: "demo-pay-a-03", creatorID: "demo-shion", amount: 100, time: .thisMonth(0.05), paymentMethod: "paypal"),
             DemoPaymentFixture(id: "demo-pay-a-04", creatorID: "demo-ruri", amount: 3000, time: .thisMonth(0.05), paymentMethod: "card"),
             DemoPaymentFixture(id: "demo-pay-a-05", creatorID: "demo-mint", amount: 1000, time: .thisMonth(0.6), paymentMethod: "card"),
+            DemoPaymentFixture(id: "demo-pay-a-06", creatorID: "demo-kohaku", amount: 1000, time: .thisMonth(0.05), paymentMethod: "card"),
             DemoPaymentFixture(id: "demo-pay-a-11", creatorID: "demo-aoi", amount: 500, time: .monthsAgo(1, day: 1, hour: 9), paymentMethod: "card"),
             DemoPaymentFixture(id: "demo-pay-a-12", creatorID: "demo-mint", amount: 500, time: .monthsAgo(1, day: 1, hour: 9), paymentMethod: "card"),
             DemoPaymentFixture(id: "demo-pay-a-13", creatorID: "demo-shion", amount: 100, time: .monthsAgo(1, day: 1, hour: 9), paymentMethod: "paypal"),
             DemoPaymentFixture(id: "demo-pay-a-14", creatorID: "demo-ruri", amount: 3000, time: .monthsAgo(1, day: 1, hour: 9), paymentMethod: "card"),
+            DemoPaymentFixture(id: "demo-pay-a-15", creatorID: "demo-kohaku", amount: 1000, time: .monthsAgo(1, day: 1, hour: 9), paymentMethod: "card"),
             DemoPaymentFixture(id: "demo-pay-a-21", creatorID: "demo-aoi", amount: 500, time: .monthsAgo(2, day: 1, hour: 9), paymentMethod: "card"),
             DemoPaymentFixture(id: "demo-pay-a-22", creatorID: "demo-mint", amount: 500, time: .monthsAgo(2, day: 1, hour: 9), paymentMethod: "card"),
             DemoPaymentFixture(id: "demo-pay-a-23", creatorID: "demo-ruri", amount: 3000, time: .monthsAgo(2, day: 1, hour: 9), paymentMethod: "card"),
@@ -681,13 +691,16 @@ enum DemoFixtures {
             DemoPaymentFixture(id: "demo-pay-b-02", creatorID: "demo-kohaku", amount: 5000, time: .thisMonth(0.05), paymentMethod: "card"),
             DemoPaymentFixture(id: "demo-pay-b-03", creatorID: "demo-shion", amount: 500, time: .thisMonth(0.05), paymentMethod: "card"),
             DemoPaymentFixture(id: "demo-pay-b-04", creatorID: "demo-sora", amount: 500, time: .thisMonth(0.3), paymentMethod: "card"),
+            DemoPaymentFixture(id: "demo-pay-b-05", creatorID: "demo-ruri", amount: 500, time: .thisMonth(0.05), paymentMethod: "card"),
             DemoPaymentFixture(id: "demo-pay-b-11", creatorID: "demo-aoi", amount: 1000, time: .monthsAgo(1, day: 1, hour: 10), paymentMethod: "paypal"),
             DemoPaymentFixture(id: "demo-pay-b-12", creatorID: "demo-kohaku", amount: 5000, time: .monthsAgo(1, day: 1, hour: 10), paymentMethod: "card"),
-            DemoPaymentFixture(id: "demo-pay-b-13", creatorID: "demo-kuon", amount: 500, time: .monthsAgo(1, day: 1, hour: 10), paymentMethod: "card"),
+            DemoPaymentFixture(id: "demo-pay-b-13", creatorID: "demo-mint", amount: 500, time: .monthsAgo(1, day: 1, hour: 10), paymentMethod: "card"),
             DemoPaymentFixture(id: "demo-pay-b-14", creatorID: "demo-shion", amount: 500, time: .monthsAgo(1, day: 1, hour: 10), paymentMethod: "card"),
+            DemoPaymentFixture(id: "demo-pay-b-15", creatorID: "demo-ruri", amount: 500, time: .monthsAgo(1, day: 1, hour: 10), paymentMethod: "card"),
             DemoPaymentFixture(id: "demo-pay-b-21", creatorID: "demo-aoi", amount: 1000, time: .monthsAgo(2, day: 1, hour: 10), paymentMethod: "paypal"),
             DemoPaymentFixture(id: "demo-pay-b-22", creatorID: "demo-kohaku", amount: 5000, time: .monthsAgo(2, day: 1, hour: 10), paymentMethod: "card"),
-            DemoPaymentFixture(id: "demo-pay-b-23", creatorID: "demo-kuon", amount: 500, time: .monthsAgo(2, day: 1, hour: 10), paymentMethod: "card"),
+            DemoPaymentFixture(id: "demo-pay-b-23", creatorID: "demo-mint", amount: 500, time: .monthsAgo(2, day: 1, hour: 10), paymentMethod: "card"),
+            DemoPaymentFixture(id: "demo-pay-b-24", creatorID: "demo-ruri", amount: 500, time: .monthsAgo(2, day: 1, hour: 10), paymentMethod: "card"),
         ],
         .creator: [
             DemoPaymentFixture(id: "demo-pay-c-01", creatorID: "demo-aoi", amount: 5000, time: .thisMonth(0.05), paymentMethod: "card"),

@@ -4,7 +4,7 @@
 
 # FANBOX Personal Client
 
-**Several pixivFANBOX accounts, one local-first iOS app**
+**Support the same creators from several pixivFANBOX accounts, in one local-first iOS app**
 
 ![iOS](https://img.shields.io/badge/iOS-26%2B-000000?logo=apple&logoColor=white)
 ![Swift](https://img.shields.io/badge/Swift-SwiftUI%20%2B%20SwiftData-F05138?logo=swift&logoColor=white)
@@ -24,7 +24,12 @@
 
 ---
 
-FANBOX Personal Client is a personal iOS app for people who use more than one pixivFANBOX / pixiv account.
+FANBOX Personal Client is a personal iOS app for supporting pixivFANBOX creators from several of your own pixiv
+accounts. FANBOX lets one account join only one plan per creator, so supporting a creator more than once takes more
+than one account, and the same creator is usually supported from several of them. The app treats all accounts as one
+person: a creator's monthly total adds up the supports of every account, while each account's plan, payment and stop
+stay separate.
+
 It reads posts, comments, notifications, newsletters (おたより) and support state for every account, stores them in a
 local SwiftData database, and shows one merged view. The screens render from the local database first and refresh
 from the network afterwards, so a slow or missing connection does not block reading, searching, drafting or replying.
@@ -32,9 +37,8 @@ from the network afterwards, so a slow or missing connection does not block read
 The app is not distributed through the App Store, and it is not affiliated with or endorsed by pixiv Inc.
 The full specification (in Japanese) is in [SPEC.md](SPEC.md).
 
-> **Status: not yet tested against the live service.** The FANBOX integration has not been exercised against
-> fanbox.cc. No request was sent to fanbox.cc or pixiv.net during development. Today the UI runs on the built-in
-> demo accounts. See [Verification status](#verification-status) and [Known limitations](#known-limitations).
+> **Status:** verified on a real iPhone with real FANBOX accounts. The FANBOX API is unofficial and can change at any
+> time. See [Verification status](#verification-status) and [Known limitations](#known-limitations).
 
 ## Contents
 
@@ -55,10 +59,10 @@ The full specification (in Japanese) is in [SPEC.md](SPEC.md).
 |---|---|
 | Accounts | Any number of FANBOX / pixiv accounts. Each account has its own `WKWebsiteDataStore`, its own Keychain credential and its own `URLSession`, so cookies never mix. A web session is stored for an account only after its logged-in pixiv user was checked against the account. A session that turns out to belong to another pixiv user is deleted and the account stops syncing until it is logged in again. |
 | Reader | One timeline across all accounts. A post seen by several accounts is shown once. The app picks the account to read with (cached, can view, valid session, higher plan, main account) and you can switch by hand. Posts render natively: text, images, galleries, files, audio, video, links, embeds and article blocks. |
-| Notifications | One inbox for all accounts, with duplicates merged. When an event is detected, the app first tries to fetch the post body or comment thread, then posts the iOS notification. A tap opens the post from the local database. Replies can be written from the notification and are queued offline. Besides FANBOX's own notifications, the app derives 支援状態変化 (support changed), 決済要確認 (payment needs checking) and 新規支援 (new supporter) events from what it observes. |
+| Notifications | One inbox for all accounts. The same post, comment or newsletter seen by several accounts is one entry. When an event is detected, the app first tries to fetch the post body or comment thread, then posts the iOS notification. A tap opens the post from the local database. Replies can be written from the notification and are queued offline. Besides FANBOX's own notifications, the app derives 支援状態変化 (support changed), 決済要確認 (payment needs checking) and 新規支援 (new supporter) events from what it observes. These stay one per account, so one account's stop or payment problem is shown even when another account keeps supporting the same creator. |
 | Low data | Automatic / Normal / Low Data / Extreme / Offline modes. A text-first scheduler sends comment posts and interactive reads before any media and pauses media transfers while they run. Offline stops every request: queued requests fail, downloads and uploads are cancelled, and no web view loads a page. |
-| Transport | FANBOX requests go through the account's `URLSession`, or through a hidden web view of the same account (same cookies and web session). `post.info` and `post.getEditable` use the web view first while the app is in the foreground; other calls switch to it only when Cloudflare stops the native request. A device-wide budget spaces `post.info`, pauses every FANBOX call after a 429 and does not repeat a block across accounts. This design follows public reports (docs/API.md §1.7–§1.11); it has not been checked against the live service. |
-| Support | Supports grouped by creator and by account, with monthly totals, this month's actual payments, next month's planned total, a locally observed support history and anomaly flags. Payment profiles (nickname, brand, last four digits, memo) can be linked to each support. Payment itself always happens in the account-aware web view. |
+| Transport | FANBOX requests go through the account's `URLSession`, or through a hidden web view of the same account (same cookies and web session). `post.info` and `post.getEditable` use the web view first while the app is in the foreground; other calls switch to it only when Cloudflare stops the native request. A device-wide budget spaces `post.info`, pauses every FANBOX call after a 429 and does not repeat a block across accounts. This design follows public reports (docs/API.md §1.7–§1.11). |
+| Support | Supports grouped by creator and by account, with monthly totals, this month's actual payments, next month's planned total, a locally observed support history and anomaly flags. A creator's total adds up every account's plan for that creator; each account's support keeps its own plan, payment state, history and stop. Payment profiles (nickname, brand, last four digits, memo) can be linked to each support, and one profile can be linked to supports of several accounts. Payment itself always happens in the account-aware web view. |
 | Creator mode | Dashboard, managed posts, local drafts with a block editor, a media upload queue, comments, fans and plans for accounts that own a creator page. With real accounts, images, files and link cards are uploaded natively into the post; new embeds are finished in the web editor. See [Known limitations](#known-limitations). |
 | Library | Local full-text search, favorites, read later, local tags and memos (never sent to FANBOX), offline saving with a size-limited media cache. |
 | Research mode | Redacted request / response / navigation logs, an API schema inspector that flags new or missing fields, account, sync, support and scheduler state, and a switch that forces the native or the web view transport. Debug builds add demo tools that simulate new notifications. |
@@ -68,29 +72,21 @@ Not included on purpose: bulk downloading, full-history crawling, and card payme
 
 ## Verification status
 
+The app has been verified on a real iPhone with real FANBOX accounts.
+
 **What the tests cover.** Unit tests (`FANBOXClientTests`) run the modules against in-memory stores, the demo data
 source, fake data sources and `URLProtocol` stubs. UI tests (`FANBOXClientUITests`) run a smoke test and a tour that
-opens every screen with the demo accounts. They check the app's own logic. They cannot show that FANBOX behaves the
-way the code assumes, and none of them sends a request to FANBOX.
+opens every screen with the demo accounts. They check the app's own logic, and none of them sends a request to FANBOX.
 
-**What has not been checked.** No request has been sent from this app to fanbox.cc, pixiv.net or pximg.net. Endpoint
-paths, parameters and response shapes in [docs/API.md](docs/API.md) come from reading public sources (docs/API.md §0);
-each endpoint there has a confidence rating, and §22 lists the open questions. The decoders are lenient, but none has
-seen a real payload.
+**Where the FANBOX details come from.** Endpoint paths, parameters and response shapes in [docs/API.md](docs/API.md)
+were collected from public sources (docs/API.md §0). Each endpoint there has a confidence rating for its sources, and
+§22 lists the open questions. The decoders are lenient: a field FANBOX adds is reported by the API Inspector instead of
+breaking a screen.
 
-**What to check on a device.** The first real account is the first live test. Research Mode (Settings → Research /
-API Inspector) is the tool for it. The areas below are expected to need verification:
-
-| Area | What to check | Where to look |
-|---|---|---|
-| Login and identity | Login in the account web view, and the page metadata (`<meta name="metadata">` on www.fanbox.cc). The app reads the logged-in user and the CSRF token from it, and every login and session check is verified with it (`currentUser`, docs/API.md §2.14, §4) | Account State, Navigation |
-| Endpoint shapes | Every decoder. The API Inspector marks new and missing fields per endpoint and object path; decode failures are recorded as events | API Schema, Sync / Errors |
-| Cloudflare | Whether list and count calls pass over `URLSession` with the web view's cookies and user agent; whether `post.info` passes through the hidden web view; whether the edge-block detection matches the real block pages; whether the request budget is conservative enough. The 通信経路 (transport) switch forces "Native のみ" (native only) or "WebView のみ" (web view only) | 通信経路 section, Requests |
-| Writes | Comments, replies and comment deletion, likes, `post.create` / `post.update` (multipart form with the CSRF token in `tt`), and the CSRF refresh after a rejected write. Their response bodies are unknown (docs/API.md §23.4) | Requests, Responses |
-| Media uploads | `post.addImage`, `post.addFile` and `post.addUrlEmbed` (docs/API.md §15): the response shapes (`Image` / `File` / `UrlEmbed`), whether the calls bump the post's `updatedAt`, and the attachment name FANBOX shows. The app sends the CSRF token in `tt` as the web editor does (plus the header), with the upload body streamed so the token never reaches the disk. Try it on a throwaway draft first | Requests, Responses, API Schema |
-| Web pages | The URLs marked *unverified* in docs/API.md §20: login, plan pages, supporting plans list, payment settings and history, notifications list, newsletter inbox, new-post editor | Navigation, fallback banner |
-| Derived events | 決済要確認 from `hasUnpaidPayments` / `payment.listUnpaid`, 新規支援 from the fan list, 支援状態変化 from the supporting-plan list | Support State, notification inbox |
-| Background | When iOS runs `BGAppRefreshTask`, and what the native transport can fetch in the background | Scheduler, Requests |
+**When FANBOX changes.** Research Mode (Settings → Research / API Inspector) shows what changed. The API Inspector
+marks new and missing fields per endpoint and object path, decode failures appear under Sync / Errors, the Requests,
+Responses and Navigation lists show redacted traffic, and the 通信経路 (transport) switch forces "Native のみ" (native
+only) or "WebView のみ" (web view only) when Cloudflare starts blocking one of them.
 
 **Live API check.** Research Mode → Live API チェック calls every read endpoint the app uses, once, against the real
 FANBOX with one of your own accounts, through the app's own stack (transport routing, DTOs, adapter). It shows per
@@ -102,19 +98,19 @@ so the tests run against the live service's real structure instead of documentat
 
 Research Mode can also record the API calls FANBOX's own pages make inside the account web view (structure only:
 method, redacted URL, status, field names). Adding an image in the web editor that way shows the media upload request
-of your own session next to the app's own `post.addImage` call, which is how the endpoints read from FANBOX's archived
-web client (docs/API.md §15) can be confirmed.
+of your own session next to the app's own `post.addImage` call, so the upload calls can be compared with FANBOX's own
+web client (docs/API.md §15) when it changes.
 
 ## Known limitations
 
-**Creator Mode with real FANBOX accounts.** The FANBOX write API is reconstructed from public sources and has not
-been verified against the live service (docs/API.md §14–§15).
+**Creator Mode with real FANBOX accounts.** The FANBOX write calls follow public sources and FANBOX's own archived
+web client (docs/API.md §14–§15).
 
-- **Media upload is native but not yet verified live.** Images, files and link cards are stored into the post with
-  `post.addImage`, `post.addFile` and `post.addUrlEmbed`, which were read from FANBOX's own (archived) web client
-  (docs/API.md §15). For a new post the app first creates a FANBOX draft (`post.create`), stores its id, uploads, then
-  saves the content referencing everything by id. If a step fails, the draft, its FANBOX id and every completed upload
-  are kept, and the next send continues where it stopped; only failed items are sent again. Uploads of a new post start
+- **Media upload is native.** Images, files and link cards are stored into the post with `post.addImage`,
+  `post.addFile` and `post.addUrlEmbed`, which were read from FANBOX's own (archived) web client (docs/API.md §15).
+  For a new post the app first creates a FANBOX draft (`post.create`), stores its id, uploads, then saves the content
+  referencing everything by id. If a step fails, the draft, its FANBOX id and every completed upload are kept, and the
+  next send continues where it stopped; only failed items are sent again. Uploads of a new post start
   when you send it, never from the upload button (so no FANBOX draft is created by surprise). The app checks FANBOX's
   own limits before sending: images jpg / png / gif up to 50 MB, attachments up to 300 MB with FANBOX's extension list.
   Photos stored sideways (EXIF orientation) are redrawn upright when added, as FANBOX's web editor does before it
@@ -193,6 +189,9 @@ scripts/clean-dd.sh
 Demo accounts use `DemoRemoteDataSource`: fixture data in an in-memory demo world, a short simulated delay per call,
 and images drawn on the device (`DemoMediaRenderer`). They never touch the network. They do follow the network mode,
 so Offline mode can be tried with them. All creators and posts in the demo data are fictional.
+
+The demo accounts stand for one person's accounts. They support mostly the same creators on different plans, and on
+some of those creators one account stops, changes or loses its support while another account keeps supporting.
 
 ### Adding demo accounts in the app
 

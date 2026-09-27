@@ -3,9 +3,9 @@
 This document describes how FANBOX Personal Client is put together. The requirements are in [SPEC.md](../SPEC.md);
 section numbers below (§n) refer to it. "docs/API.md §n" refers to [API.md](API.md).
 
-It describes the code. The FANBOX side has not been exercised against the live service: no request was sent to
-fanbox.cc or pixiv.net during development, and the assumptions about FANBOX (endpoint shapes, Cloudflare behavior,
-rate limits) come from public reports collected in API.md. The demo accounts drive the UI today.
+It describes the code. The app has been verified on a real iPhone with real FANBOX accounts. The FANBOX details it
+relies on (endpoint shapes, Cloudflare behavior, rate limits) were collected from public reports in API.md. The demo
+accounts run the same UI without a network.
 
 ## Goals that shape the design
 
@@ -13,8 +13,11 @@ rate limits) come from public reports collected in API.md. The demo accounts dri
    shows something.
 2. **Text before media** (§29, §46). Notifications, comments and post text are fetched and sent before images, video
    or attachments, including on a 128 kbps connection.
-3. **Many accounts, one view** (§3.2, §46). Each account has an isolated session. Data seen by several accounts is
-   merged into one row. A session is never used for an account it does not belong to.
+3. **Several accounts, one self** (§0, §3.2, §46). The accounts exist to support the same creators more than once,
+   because FANBOX allows one plan per account per creator. Each account has an isolated session, and a session is never
+   used for an account it does not belong to. A post, comment or newsletter seen by several accounts is stored once.
+   Supports, payment assignments, payment records, support history and support-state events each belong to one
+   account and are never merged across accounts; per-creator totals add up the supports of every account.
 4. **No mass collection** (§3.7). Sync reads the newest items and stops at the first known one.
 
 ## Layers
@@ -132,7 +135,7 @@ Account ───< PostAccess >─── Post ───< PostBlock
    │        ├── SupportHistory (observed changes)
    │        └── SupportPaymentAssignment ──> PaymentProfile
    │
-   ├───< PaymentRecord, NotificationEvent (deduplicated across accounts), Newsletter
+   ├───< PaymentRecord, NotificationEvent (post / comment / newsletter events merged across accounts), Newsletter
    ├───< Fan, CreatorDashboardSnapshot            (creator accounts)
    └───< SyncState (per account / resource / scope)
 
@@ -143,8 +146,14 @@ ResearchLog, APISchemaSnapshot                    (Research Mode / API Inspector
 ```
 
 - A post is stored once (`Post.postID` is unique). Per-account visibility lives in `PostAccess`.
-- A notification seen by several accounts is one `NotificationEvent` whose id is an account-independent dedupe key
-  (`NotificationEvent.dedupeKey`), with `accountIDs` listing every receiver.
+- A new-post, comment or newsletter notification seen by several accounts is one `NotificationEvent` whose id is an
+  account-independent dedupe key (`NotificationEvent.dedupeKey`), with `accountIDs` listing every receiver. Derived
+  support events (`supportChanged`, `paymentAttention`, `newSupporter`) are keyed per account (fallback
+  `local:<accountID>:…`): each account's support change, stop or payment problem is its own event, even for a creator
+  that other accounts still support.
+- Supports are one row per account and creator (`Support.key` is `accountID|creatorID`), and so are
+  `SupportPaymentAssignment` rows; `PaymentRecord` and `SupportHistory` rows carry their account too. The same creator
+  under several accounts is the normal case: per-creator views add the rows up and never merge them.
 - User metadata (read, favorite, read later, memo, tags, offline state) is never overwritten by remote data and is
   never sent to FANBOX (§33).
 - Secrets are not stored in SwiftData. See [SECURITY.md](SECURITY.md).
@@ -205,8 +214,7 @@ prunes Research logs older than 14 days and prunes old inbox events.
 
 Every FANBOX request goes through `RoutingHTTPClient` (`Core/Network/RoutingHTTPClient.swift`), which is the app's
 `HTTPClient`. It chooses between two transports of the same account and applies the device-wide `RateGate`. The design
-follows docs/API.md §1.7–§1.11. It has not been checked against the live service; Research Mode can force either
-transport to check it.
+follows docs/API.md §1.7–§1.11. Research Mode can force either transport to see which one FANBOX accepts.
 
 ### The two transports
 
@@ -357,8 +365,9 @@ silent push (optional relay)     post title + body,                 Support / Fa
                                                                no HTTP wait; reply -> ReplyQueue
 ```
 
-- New events come from `SyncEngine` (notifications resource) and are deduplicated across accounts. FANBOX comment
-  bells carry no comment id, so the same comment seen by two accounts is matched by post, text, author and time.
+- New events come from `SyncEngine` (notifications resource). New-post, comment and newsletter events are deduplicated
+  across accounts. FANBOX comment bells carry no comment id, so the same comment seen by two accounts is matched by
+  post, text, author and time.
 - Automatic polling asks `bell.countUnread` first and lists `bell.list` only when the count changed or 15 minutes
   passed; `newsletter.list` is polled at most every 10 minutes. Expired sessions are not polled.
 - Event types and priorities (§24.2, `NotificationEventType`):
@@ -372,9 +381,11 @@ silent push (optional relay)     post title + body,                 Support / Fa
   | `paymentAttention` (決済要確認, payment needs checking) | page metadata `hasUnpaidPayments` turning true, a creator listed by `payment.listUnpaid`, or a supported plan that disappears on the 1st–5th of the month | critical | supports |
   | `newSupporter` (新規支援, new supporter) | new supporters in the creator's fan list | normal | fan list |
 
-  Derived events (docs/API.md §18.8 B) are created by `LocalStore+Upserts`. The first sync of each source is a silent
-  baseline. A `paymentAttention` reason is announced at most once per account, creator and month. The texts state
-  observed facts only; they never say that a payment failed (§15).
+  Derived events (docs/API.md §18.8 B) are created by `LocalStore+Upserts`. The support events (`supportChanged`,
+  `paymentAttention`, `newSupporter`) are one per account: when one account's support stops, changes or disappears
+  while another account keeps supporting the same creator, the event names only that account. The first sync of each
+  source is a silent baseline. A `paymentAttention` reason is announced at most once per account, creator and month.
+  The texts state observed facts only; they never say that a payment failed (§15).
 - Prefetch follows `NotificationEventType.prefetchTarget` and records `prefetchState`. For comment events the commented
   comment is resolved from the thread (`NotificationCommentResolver`). After the text, `NotificationService` asks for
   avatars and thumbnails, and `MediaPrefetcher` adds thumbnails and up to three display images per post (not in a
@@ -557,5 +568,6 @@ Unit tests are hosted in the app (`FANBOXClientTests/<Module>/`). They use
 `PersistenceController.makeContainer(inMemory: true)`, `AppEnvironment.preview(seedDemo:)`, `InMemoryCredentialStore`,
 per-module fake `RemoteDataSource` implementations and `URLProtocol` stubs for the transport, so they never reach
 FANBOX. `RateGate` and the payment resync run on injected clocks. `FANBOXClientUITests` launches the app with
-`-uiTesting -demoData`: a smoke test and a screen tour that opens every screen with demo data. None of the tests can
-confirm how the live service behaves.
+`-uiTesting -demoData`: a smoke test and a screen tour that opens every screen with demo data. Reports captured with
+Research Mode → Live API チェック go into `FANBOXClientTests/Research/LiveReports/`, where `LiveContractTests` decodes
+them with the app's decoders.

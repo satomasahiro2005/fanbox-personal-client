@@ -39,9 +39,9 @@ struct DemoStoredComment: Sendable, Hashable {
 ///   explicit mutations (comments, likes, created / updated posts, uploads) and the documented support anomaly.
 /// - Profiles: `demo-creator-self` ⇒ `.creator`; other accounts get `.viewerA` / `.viewerB` by FNV-1a parity of their
 ///   pixivUserID. When a second viewer account hashes to an already assigned profile while the other one is still free,
-///   it gets the free one, so two viewer accounts always differ.
+///   it gets the free one, so two viewer accounts always get different fixture profiles.
 /// - Support anomaly (SPEC §15): for `.viewerB`, one support is returned by the first `supportingPlans` call of an
-///   account only; later calls omit it (tracked per account id).
+///   account only; later calls omit it (tracked per account id). `.viewerA` keeps supporting the same creator.
 actor DemoWorld {
     static let shared = DemoWorld()
 

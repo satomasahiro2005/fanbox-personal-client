@@ -1,8 +1,12 @@
 import Foundation
 
-/// The three fixture "people" of the demo world. Every demo account maps to one of them.
-/// - `viewerA` / `viewerB`: two reader accounts with different follows / supports / plans.
-/// - `creator`: the account that owns the demo creator page `demo-creator-self`.
+/// The three fixture accounts of the demo world. Every demo account maps to one of them. They all belong to one person,
+/// like real accounts in this app: FANBOX lets one account join only one plan per creator, so supporting a creator more
+/// than once takes several accounts.
+/// - `viewerA` / `viewerB`: two reader accounts that support mostly the same creators on different plans. On some of
+///   those creators one account stops, changes or loses its support while the other keeps it (`DemoFixtures.profiles`).
+/// - `creator`: the account that owns the demo creator page `demo-creator-self`; it also supports `demo-aoi`, which all
+///   three accounts support.
 enum DemoProfile: Int, Sendable, CaseIterable, Hashable {
     case viewerA = 0
     case viewerB = 1

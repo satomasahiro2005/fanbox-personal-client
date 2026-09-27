@@ -3,10 +3,9 @@
 This document maps the storage, isolation and redaction rules of [SPEC.md](../SPEC.md) §3.2, §7, §12, §38, §39 and
 §40 to the code that implements them.
 
-Unit tests exercise these rules with in-memory stores, fake data sources and `URLProtocol` stubs. The rules have
-not been exercised against the live FANBOX service: no request was sent to fanbox.cc or pixiv.net during development.
-In particular, the identity checks rely on the shape of the FANBOX page metadata described in [API.md](API.md) §2.14,
-which has not been confirmed by a request from this app.
+Unit tests exercise these rules with in-memory stores, fake data sources and `URLProtocol` stubs, and the app has been
+verified on a real iPhone with real FANBOX accounts. The identity checks rely on the shape of the FANBOX page metadata
+described in [API.md](API.md) §2.14.
 
 ## Principles
 
@@ -90,7 +89,6 @@ creator id, flags, timestamps).
   store has no FANBOX session, `prepareWebSession` installs the stored credential, and `resetWebSession` does the same
   after clearing a web store. These paths install every fanbox.cc / pixiv.net cookie of the credential. That can include
   CDN cookies the native transport received; `SessionCredential.isEdgeCookie` exists but is not used to filter them.
-  Whether this matters on the live service has not been checked.
 
 ## Account identity
 

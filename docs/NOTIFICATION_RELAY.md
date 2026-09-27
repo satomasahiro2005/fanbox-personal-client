@@ -3,8 +3,7 @@
 Status: **design document.** The client-side hooks are in the app. The relay server is **not part of v1.0**, and the
 app does not yet send its device token to a relay (see [What is implemented](#what-is-implemented-in-v10)). The
 silent-push handler has never received a real push, because the app target has no `aps-environment` entitlement; only
-its result mapping is unit-tested. Like the rest of the FANBOX integration, the fetch it triggers has not been
-exercised against the live service.
+its result mapping is unit-tested.
 
 Related: [SPEC.md](../SPEC.md) §24–§28, [ARCHITECTURE.md](ARCHITECTURE.md#notification-pipeline),
 [SECURITY.md](SECURITY.md).

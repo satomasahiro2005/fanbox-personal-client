@@ -98,7 +98,7 @@ struct SupportCreatorDetailView: View {
                 Button {
                     flowRequest = PaymentFlowRequest(creatorID: creatorID)
                 } label: {
-                    Label("プラン変更 / 再支援", systemImage: "heart.circle")
+                    Label("支援を追加 / プラン変更", systemImage: "heart.circle")
                 }
                 .accessibilityIdentifier("supportCreatorPaymentFlow")
                 NavigationLink(value: AppRoute.creator(creatorID: creatorID)) {

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="tilt" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="1024" y2="0">
+      <stop offset="0" stop-color="#48317C" stop-opacity="0.133"/>
+      <stop offset="0.5" stop-color="#48317C" stop-opacity="0"/>
+      <stop offset="0.5" stop-color="#000000" stop-opacity="0"/>
+      <stop offset="1" stop-color="#000000" stop-opacity="0.176"/>
+    </linearGradient>
+    <radialGradient id="glow" gradientUnits="userSpaceOnUse" cx="512" cy="560" r="512">
+      <stop offset="0" stop-color="#7054AC" stop-opacity="0.577"/>
+      <stop offset="1" stop-color="#7054AC" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="1024" height="1024" fill="url(#tilt)"/>
+  <rect width="1024" height="1024" fill="url(#glow)"/>
+</svg>

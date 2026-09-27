@@ -5,6 +5,8 @@ options:
     iOS: "26.0"
   createIntermediateGroups: true
   developmentLanguage: ja
+  # XcodeGen labels .icon bundles "wrapper.icon"; Xcode's type for Icon Composer bundles is folder.iconcomposer.icon.
+  postGenCommand: sed -i '' 's/lastKnownFileType = wrapper.icon;/lastKnownFileType = folder.iconcomposer.icon;/' FANBOXClient.xcodeproj/project.pbxproj
 settings:
   base:
     SWIFT_VERSION: "5.0"
